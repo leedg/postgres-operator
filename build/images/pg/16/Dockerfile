@@ -27,8 +27,7 @@ RUN set -eux; \
     # Citus apt repo
     curl -fsSL https://install.citusdata.com/community/deb.sh | bash; \
     apt-get install -y --no-install-recommends \
-        postgresql-${PG_MAJOR}-citus-${CITUS_VERSION%.*} \
-        postgresql-${PG_MAJOR}-pg-stat-statements \
+        postgresql-${PG_MAJOR}-citus-${CITUS_VERSION} \
     ; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*

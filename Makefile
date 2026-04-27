@@ -81,9 +81,15 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+# Pillar 라벨 — Pillar 단위로 e2e 시나리오를 좁혀 실행한다(roadmap.md 참조).
+# 사용 예: make test-e2e PILLAR=p1
+# 빈 값(디폴트)은 전체 e2e 실행. CI 매트릭스가 본 변수를 채워 Pillar 단위 통과율을
+# 추적한다(.github/workflows/ci.yml의 e2e job).
+PILLAR ?=
+
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind. Use PILLAR=p1 to narrow to one Pillar.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) PILLAR=$(PILLAR) go test -tags=e2e ./test/e2e/ -v -ginkgo.v $(if $(PILLAR),-ginkgo.label-filter=$(PILLAR),)
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

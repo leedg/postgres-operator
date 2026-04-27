@@ -34,6 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	postgresv1alpha1 "github.com/keiailab/postgres-operator/api/v1alpha1"
+	"github.com/keiailab/postgres-operator/internal/controller"
+	"github.com/keiailab/postgres-operator/internal/plugin"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -44,6 +48,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(postgresv1alpha1.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
 }
@@ -174,6 +179,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Plugin SDK Registry 부트스트랩(ADR 0005). 본 시점에 등록되는 플러그인은
+	// import 그래프 init() 시점에 RegisterBackup/RegisterExporter/... 를 호출한
+	// 패키지의 결과다. 핵심 reconciler는 본 Registry만 참조한다.
+	plugins := plugin.NewRegistry()
+
+	if err := (&controller.PostgresClusterReconciler{
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Plugins: plugins,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "PostgresCluster")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

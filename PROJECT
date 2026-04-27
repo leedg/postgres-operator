@@ -8,4 +8,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: postgresql-operator
 repo: github.com/keiailab/postgres-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: keiailab.io
+  group: postgres
+  kind: PostgresCluster
+  path: github.com/keiailab/postgres-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"

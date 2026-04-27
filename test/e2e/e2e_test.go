@@ -45,7 +45,11 @@ const metricsServiceName = "postgresql-operator-controller-manager-metrics-servi
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "postgresql-operator-metrics-binding"
 
-var _ = Describe("Manager", Ordered, func() {
+// Ginkgo Label "p1"은 Makefile의 PILLAR=p1과 매칭된다(roadmap.md §10).
+// 향후 다른 Pillar(P2, P11, P12 등)별 Describe 블록 추가 시 동일 패턴으로
+// Label("p2"), Label("p11") 등을 부여한다. ci.yml의 e2e job matrix가 본
+// 라벨로 Pillar별 통과율을 추적한다.
+var _ = Describe("Manager", Ordered, Label("p1"), func() {
 	var controllerPodName string
 
 	// Before running the tests, set up the environment by creating the namespace,

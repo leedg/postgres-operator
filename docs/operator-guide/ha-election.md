@@ -87,7 +87,7 @@ K8s가 namespace 안에서 POD_NAME을 unique 보장하므로, 동일 노드에 
 3. follower가 만료 감지 후 새 lease 획득 시도
 4. 시나리오 B와 동일 후속
 
-> ⚠️ **PVC fencing 미구현 (M2 후속)** — 시나리오 C에서 옛 leader Pod이 살아돌아오면 두 Pod이 같은 PVC에 동시 마운트할 수 있다(split-brain 위험). P2-T2(PVC label 기반 fencing)이 GA 전 의무. RFC 0003 §7 참조.
+**PVC Fencing (P2-T2, 2026-04-28부터 활성)** — 시나리오 C에서 옛 leader Pod이 살아돌아오는 split-brain은 PVC label 기반 fencing으로 차단된다. 자세한 프로토콜은 [RFC 0003 부록 A](../rfcs/0003-ha-election.md#부록-a--pvc-fencing-프로토콜-p2-t2-implemented-2026-04-28) 참조. 운영 노브: `--fencing-disabled` (개발 모드 전용, 프로덕션 사용 금지).
 
 ## 6. 관찰
 
@@ -114,11 +114,12 @@ K8s가 namespace 안에서 POD_NAME을 unique 보장하므로, 동일 노드에 
 | failover가 5분+ 걸림 | LeaseDuration 과다 또는 K8s API server 지연 | `kubectl get lease -n <ns> -o yaml` 의 `renewTime` 추적 |
 | 부팅 즉시 panic("invalid lease parameters") | RenewDeadline ≥ LeaseDuration | CLI 플래그 재확인 |
 
-## 8. 알려진 한계 (M1)
+## 8. 알려진 한계 (M1+P2-T2)
 
-- **PVC fencing 미구현** — split-brain 시나리오 보호 없음. M2 의무 게이트.
-- **Failover controller 미구현** — election holder 변경이 PG primary promote/demote로 이어지는 supervise 로직은 P2-T3 후속(현재는 election callback 시그니처만 동결).
-- **Prometheus 메트릭 미배선** — `instance_election_status`는 P6 (Observability) 통합 시점에 활성.
+- **Failover controller 미구현** — election holder 변경이 PG primary promote/demote로 이어지는 supervise 로직은 P2-T3 후속(현재는 election callback 시그니처 + fence 라이프사이클만 동결).
+- **`pg_rewind` 자동화 미구현** — fence 표시 *후*의 인-flight write 회수는 P2-T4가 처리.
+- **PVC mount 외 보호 없음** — NFS·S3FS 등 강제 단독 마운트 보장이 약한 PV는 별도 StorageClass 차원 보호 필요(ADR 후속 후보).
+- **Prometheus 메트릭 미배선** — `instance_election_status`, `instance_fencing_violations_total`은 P6 (Observability) 통합 시점에 활성.
 - **이벤트 레코더 더미** — `record.FakeRecorder` 사용 중. 실 EventRecorder는 P6 통합 시 교체.
 
 ## 9. 검증 명령
@@ -134,9 +135,35 @@ go test ./internal/instance/election/... -v -count=1
 go test ./internal/instance/election/... -run TestIntegration -v
 ```
 
-## 10. 참조
+## 10. PVC Fencing 운영 (P2-T2)
 
-- [RFC 0003 — HA Election + Fencing 프로토콜](../rfcs/0003-ha-election.md)
+### 10.1 정상 동작
+- Leader 종료 시 instance manager가 자기 PVC에 `postgres.keiailab.io/fenced=true` 부착
+- 새 Pod이 자기 PVC를 잡고 promote 시도 → fence 부재 확인 후 진행
+- 옛 Pod이 좀비로 부활 → 자기 PVC가 fenced여서 promote 거절 → exit(2) → CrashLoopBackOff (운영자 개입 신호)
+
+### 10.2 Fence 해제
+
+```bash
+# 1) 데이터 무결성 검증
+kubectl exec -it <leader-pod> -- pg_controldata /var/lib/postgresql/data
+
+# 2) 옛 leader Pod 완전 종료 확인
+kubectl get pod <old-pod> -o jsonpath='{.status.phase}'
+
+# 3) 검증 후 fence 해제
+kubectl label pvc data-<old-pod> postgres.keiailab.io/fenced-
+```
+
+### 10.3 운영 노브
+- `--fencing-disabled`: 개발 환경에서만. 프로덕션 비활성화 시 split-brain 위험.
+
+### 10.4 RBAC
+instance manager ServiceAccount는 자기 namespace의 PVC `get`/`patch` 권한 필요(RFC 0003 부록 A §7).
+
+## 11. 참조
+
+- [RFC 0003 — HA Election + Fencing 프로토콜](../rfcs/0003-ha-election.md) (부록 A: PVC Fencing)
 - [ADR 0002 — Patroni 미사용](../adr/0002-no-patroni-instance-manager.md)
-- 코드: `internal/instance/election/`
-- 후속 작업: P2-T2 (PVC fencing) / P2-T3 (failover controller) / P2-T4 (pg_rewind 통합)
+- 코드: `internal/instance/election/`, `internal/instance/fencing/`
+- 후속 작업: P2-T3 (failover controller) / P2-T4 (pg_rewind 통합)

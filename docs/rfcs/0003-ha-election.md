@@ -172,3 +172,135 @@ go build ./cmd/instance/...
 # 3) lease 매개변수 sanity 회귀 (RenewDeadline < LeaseDuration)
 go test ./internal/instance/election/... -run TestLeaseParameters
 ```
+
+---
+
+## 부록 A — PVC Fencing 프로토콜 (P2-T2, Implemented 2026-04-28)
+
+본 부록은 §7에서 위임한 split-brain 방지의 두 번째 방어선을 동결한다.
+
+### A.1 동기 — 왜 lease만으로는 부족한가
+
+K8s lease는 *논리적* leader 결정만 보장한다. 다음 시나리오는 lease로 막을 수 없다.
+
+1. 옛 leader Pod이 GC SLA 또는 네트워크 지터로 lease 갱신 실패 → 새 leader 선출
+2. 옛 Pod이 다시 살아돌아옴 (kubelet이 자동 재시작)
+3. 옛 Pod의 PG 프로세스가 같은 PVC에 여전히 마운트된 채 write — 새 leader도 같은 PVC를 공유 (RWO 정책에도 ReadWriteOnce는 *Pod 단위*가 아닌 *Node 단위* 보장이라 같은 노드에서 발생 가능)
+4. 두 PG가 같은 데이터 디렉토리에 write → 데이터 손상
+
+본 부록은 PVC label을 단일 진실 출처로 사용해 *옛 leader 자신이 자기 PVC를 fenced로 표시*하는 분산 방어를 도입한다.
+
+### A.2 Label 규약
+
+| 키 | 값 | 의미 |
+|---|---|---|
+| `postgres.keiailab.io/fenced` | `"true"` | 본 PVC를 어떤 instance manager도 promote에 사용하면 안 됨 |
+| (key 부재) | — | 정상. promote 가능 |
+
+PVC 이름 컨벤션: `data-<sts-pod-name>` (StatefulSet `VolumeClaimTemplates[].metadata.name="data"`).
+
+### A.3 동작 프로토콜
+
+```
+                Election event           Fencing action
+   ─────────────────────────────────────────────────────────
+   OnStartedLeading (이번 Pod이 leader 됨)
+                   │
+                   ▼
+        VerifyNotFenced(self.PVC)
+                   │
+        ┌──────────┴──────────┐
+        │                     │
+       OK                  ErrFenced
+        │                     │
+        ▼                     ▼
+  PG promote 진행      exit(2) — 운영자 개입까지
+                       leadership 거절
+   ─────────────────────────────────────────────────────────
+   OnStoppedLeading (이번 Pod이 lease 잃음)
+                   │
+                   ▼
+         MarkFenced(self.PVC)
+                   │
+                   ▼
+         PG demote 진행 (또는 종료)
+   ─────────────────────────────────────────────────────────
+   OnNewLeader(other) (다른 Pod이 leader 됨)
+                   │
+                   ▼
+              (no-op)
+```
+
+핵심 규칙:
+
+1. **자기 PVC만 자기가 fence**한다(분산 결정). 컨트롤러가 일괄 fence 처리하면 K8s API as DCS 원칙(ADR 0002 §결과)이 깨진다.
+2. **fence 표시는 idempotent**다. 재기동 후 같은 Pod이 다시 lease를 잡고 자기 PVC를 unfence할 때까지 fenced 상태 유지.
+3. **Unfence는 운영자 수동 작업**이다. 자동 unfence는 본 RFC 범위 외 — 자동화는 잘못된 데이터 검증 단계를 우회할 위험이 있어 의식적으로 제외.
+
+### A.4 Fail-Fast 정책
+
+`VerifyNotFenced`가 `ErrFenced`를 반환하면 instance manager는 **exit code 2**로 종료한다(`cmd/instance/main.go`). 이 종료는 다음을 의미한다.
+
+- K8s가 Pod을 자동 재시작 (Pod restartPolicy=Always 가정)
+- 재시작 후에도 fence 미해제 → 다시 exit(2) → CrashLoopBackOff
+- 운영자가 PVC 검증·복구 후 `Unfence` API로 해제할 때까지 leadership 점유 거절
+
+이 fail-fast는 **availability를 일부 희생해 consistency를 보장**하는 명시적 트레이드오프다(ADR 0001 v2 §원칙).
+
+### A.5 Unfence 운영 절차
+
+```bash
+# 1) PVC 상태 확인 — 데이터 무결성 검증 (pg_controldata, replication slot 상태 등)
+kubectl exec -it <new-leader-pod> -- /usr/lib/postgresql/16/bin/pg_controldata /var/lib/postgresql/data
+
+# 2) 옛 leader Pod이 완전히 종료됐는지 확인
+kubectl get pod <old-leader-pod> -o yaml | grep phase
+
+# 3) 검증 후 fence 해제
+kubectl label pvc data-<old-leader-pod> postgres.keiailab.io/fenced-
+
+# 또는 instance manager 재기동 시 자동으로 자기 PVC 검증 후 promote 시도
+```
+
+### A.6 인터페이스 동결
+
+```go
+type Fencer interface {
+    MarkFenced(ctx context.Context) error
+    Unfence(ctx context.Context) error
+    IsFenced(ctx context.Context) (bool, error)
+    VerifyNotFenced(ctx context.Context) error // fenced=true이면 ErrFenced
+}
+```
+
+구현 — `internal/instance/fencing/`:
+- **Real** (`fencing.go`): `kubernetes.Interface`로 PVC label patch
+- **Mock** (`mock.go`): in-memory flag + 호출 카운터, 단위 테스트용
+
+### A.7 RBAC 요구사항
+
+instance manager의 ServiceAccount는 자기 namespace의 PVC에 다음 권한이 필요:
+
+```yaml
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "patch"]
+```
+
+`get`은 IsFenced/VerifyNotFenced에, `patch`는 MarkFenced/Unfence에 사용된다. List/Watch는 불필요(자기 PVC 한 개만 다룸).
+
+### A.8 한계 — M3 후속
+
+- **PVC 외 mount 보호 없음**: PV가 NFS·S3FS 등 강제 단독 마운트 보장이 약한 경우 본 메커니즘 외에 StorageClass 차원 보호 필요. ADR 후속(ADR-007 후보).
+- **인-flight write 회수**: fence 표시 *후*에도 옛 leader의 PG 프로세스가 즉시 종료되지 않으면 짧은 시간 동안 write 가능. P2-T4(`pg_rewind` 자동화)가 이 잔여 write를 신·구 leader 정합으로 복구.
+- **fence violation alerting 없음**: P6 통합 시 `instance_fencing_violations_total` 메트릭 + PrometheusRule 도입.
+
+### A.9 검증
+
+```bash
+# 단위 회귀 (fake clientset)
+go test ./internal/instance/fencing/... -v
+
+# 빌드 회귀 — instance manager가 fencer를 통합
+go build ./cmd/instance/...
+```

@@ -243,3 +243,49 @@ func TestAllImplementations_SatisfyInterface(t *testing.T) {
 	var _ Election = (*Null)(nil)
 	var _ Election = (*Mock)(nil)
 }
+
+// ----------------------------------------------------------------------------
+// 트리비얼 게터 — Identity가 생성자 인자를 그대로 보존함을 단위 회귀로 보장.
+// 본 테스트는 P2-M1 게이트(단위 ≥80%)를 위해 mock/null의 Identity·Run 분기를
+// 명시적으로 커버한다.
+// ----------------------------------------------------------------------------
+
+func TestNull_Identity(t *testing.T) {
+	n := NewNull("solo-pod-0", Callbacks{})
+	if got := n.Identity(); got != "solo-pod-0" {
+		t.Errorf("Null.Identity = %q, want %q", got, "solo-pod-0")
+	}
+}
+
+func TestMock_Identity(t *testing.T) {
+	m := NewMock("test-pod-7", Callbacks{})
+	if got := m.Identity(); got != "test-pod-7" {
+		t.Errorf("Mock.Identity = %q, want %q", got, "test-pod-7")
+	}
+}
+
+func TestMock_Run_BlocksUntilContextDone(t *testing.T) {
+	m := NewMock("p1", Callbacks{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- m.Run(ctx) }()
+
+	// Run은 ctx 종료 전에는 반환하지 않아야 한다.
+	select {
+	case <-done:
+		t.Fatal("Mock.Run returned before ctx cancel")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		// ctx.Err()를 그대로 반환해야 한다(인터페이스 계약).
+		if err == nil {
+			t.Error("Mock.Run returned nil error after cancel; want context.Canceled")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Mock.Run did not return after ctx cancel")
+	}
+}

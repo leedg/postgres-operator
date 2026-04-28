@@ -1,6 +1,6 @@
 # RFC 0003 — HA Election + Fencing 프로토콜
 
-- **상태**: Draft
+- **상태**: Implemented (P2-M1, 2026-04-28 — election + envtest 통합 회귀 통과)
 - **제출일**: 2026-04-27
 - **작성자**: @keiailab/maintainers
 - **코멘트 윈도우**: 14일 (마감 2026-05-11)

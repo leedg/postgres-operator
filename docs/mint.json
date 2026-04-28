@@ -52,11 +52,25 @@
       "pages": ["reference/crd-overview", "reference/cli", "reference/metrics"]
     },
     {
+      "group": "Operator Guide",
+      "pages": ["operator-guide/ha-election"]
+    },
+    {
       "group": "ADR",
       "pages": [
         "adr/0001-stateless-query-router-on-citus",
         "adr/0002-no-patroni-instance-manager",
-        "adr/0003-queryrouter-stateless-design"
+        "adr/0003-queryrouter-stateless-design",
+        "adr/0004-build-not-fork-or-layer",
+        "adr/0005-plugin-sdk-interface-model"
+      ]
+    },
+    {
+      "group": "RFC",
+      "pages": [
+        "rfcs/0001-crd-schema",
+        "rfcs/0002-metadata-sync",
+        "rfcs/0003-ha-election"
       ]
     }
   ],

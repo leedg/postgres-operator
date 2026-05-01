@@ -131,13 +131,12 @@ func main() {
 		tlsOpts = append(tlsOpts, disableHTTP2)
 	}
 
-	// Initial webhook TLS options
-	webhookTLSOpts := tlsOpts
+	webhookEnabled := len(webhookCertPath) > 0
 	webhookServerOptions := webhook.Options{
-		TLSOpts: webhookTLSOpts,
+		TLSOpts: tlsOpts,
 	}
 
-	if len(webhookCertPath) > 0 {
+	if webhookEnabled {
 		setupLog.Info("Initializing webhook certificate watcher using provided certificates",
 			"webhook-cert-path", webhookCertPath, "webhook-cert-name", webhookCertName, "webhook-cert-key", webhookCertKey)
 
@@ -145,8 +144,6 @@ func main() {
 		webhookServerOptions.CertName = webhookCertName
 		webhookServerOptions.KeyName = webhookCertKey
 	}
-
-	webhookServer := webhook.NewServer(webhookServerOptions)
 
 	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
 	// More info:
@@ -183,10 +180,9 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
-		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "bdce7c33.keiailab.io",
@@ -201,7 +197,12 @@ func main() {
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
 		// LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	if webhookEnabled {
+		managerOptions.WebhookServer = webhook.NewServer(webhookServerOptions)
+	}
+
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions)
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
@@ -289,12 +290,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 본 webhook 등록은 webhookCertPath가 설정된 경우(즉 매니페스트 배포 시)에만
-	// 의미가 있다. 로컬 `make run` 실행 시에는 webhook 서버가 시작되지 않아도
-	// reconciler는 정상 동작한다(K8s API server가 webhook 호출을 시도하지 않으므로).
-	if err := webhookv1alpha1.SetupPostgresClusterWebhookWithManager(mgr, featureGates, plugins); err != nil {
-		setupLog.Error(err, "Failed to create webhook", "webhook", "PostgresCluster")
-		os.Exit(1)
+	// 본 webhook 등록은 webhookCertPath가 설정된 경우(즉 인증서가 준비된 배포)에만
+	// 의미가 있다. 기본 Kustomize/Helm 배포는 아직 webhook 인증서를 제공하지 않으므로
+	// webhook을 등록하지 않아 smoke 배포가 인증서 부재로 CrashLoopBackOff되지 않게 한다.
+	if webhookEnabled {
+		if err := webhookv1alpha1.SetupPostgresClusterWebhookWithManager(mgr, featureGates, plugins); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "PostgresCluster")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("Skipping webhook setup because webhook-cert-path is not set")
 	}
 	// +kubebuilder:scaffold:builder
 

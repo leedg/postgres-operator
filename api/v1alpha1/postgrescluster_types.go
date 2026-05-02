@@ -16,307 +16,411 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// DeploymentMode는 production/development 두 운영 모드를 표현한다(RFC 0001 §3).
-// development 모드는 webhook 검증을 완화하여 quickstart 5분을 보장한다(ADR 0003).
-// +kubebuilder:validation:Enum=production;development
-type DeploymentMode string
+// 본 파일은 RFC 0001 (PostgresCluster CRD v2) §3 의 spec/status 정의를 그대로
+// Go 타입화한다. 0.3.0-alpha 기준 schema 는 alpha 채널 정책에 의해 호환성
+// 보장 없이 재정의되었다 (CHANGELOG breaking change 명시). 이전 v0.x schema
+// (`coordinator/workers/routers/extensions/sharding.backend`) 는 _archive 의
+// RFC/ADR 에 보존된다.
+
+// ShardingMode 는 단일 노드 (none) 와 자체 분산 SQL (native) 두 운영 형태를 표현한다.
+// +kubebuilder:validation:Enum=none;native
+type ShardingMode string
 
 const (
-	// DeploymentProduction은 운영 모드. coordinator/workers 멤버 ≥3 강제.
-	DeploymentProduction DeploymentMode = "production"
-	// DeploymentDevelopment는 quickstart 모드. members=1 허용.
-	DeploymentDevelopment DeploymentMode = "development"
+	// ShardingModeNone 은 라우터 없이 단일 shard 만 사용. 0.4.0 (P1) 의 GA 형태.
+	ShardingModeNone ShardingMode = "none"
+	// ShardingModeNative 는 자체 분산 SQL (router + multi-shard). P2+ 활성화.
+	ShardingModeNative ShardingMode = "native"
 )
 
-// VersionSpec은 PostgreSQL 버전을 지정한다(ADR 0001, ADR 0005).
-// internal/version/matrix.go의 IsSupported를 통과해야 한다.
-//
-// 0.3.0-alpha (ADR 0001/0003): vanilla PG18+ 단일 스택. AGPL/BUSL/CSL/SSPL 백엔드
-// 의존은 영구 제거되었다. 분산 SQL 기능은 자체 sharding plugin (RFC 0001~0005)
-// 으로 단계 도입된다.
-type VersionSpec struct {
-	// Postgres는 메이저 버전 문자열("16" | "17" | "18"). "18"이 default 권장.
-	// +kubebuilder:validation:Enum="16";"17";"18"
-	// +kubebuilder:validation:Required
-	Postgres string `json:"postgres"`
-}
-
-// StorageSpec은 PVC 생성 파라미터다(RFC 0001 §3).
+// StorageSpec 는 PVC 생성 파라미터다 (RFC 0001 §3).
 type StorageSpec struct {
-	// Size는 PVC 요청 크기(예: "100Gi").
+	// Size 는 PVC 요청 크기 (예: "100Gi").
 	// +kubebuilder:validation:Required
 	Size resource.Quantity `json:"size"`
 
-	// StorageClassName은 PVC StorageClass(nil이면 클러스터 디폴트).
+	// StorageClass 는 PVC StorageClass 이름. 빈 문자열이면 클러스터 디폴트.
 	// +optional
-	StorageClassName *string `json:"storageClassName,omitempty"`
+	StorageClass string `json:"storageClass,omitempty"`
 
-	// AccessModes는 PVC 접근 모드(빈 배열이면 ReadWriteOnce).
+	// AccessModes 는 PVC 접근 모드 (빈 배열이면 ReadWriteOnce).
 	// +optional
 	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
 }
 
-// CoordinatorSpec은 분산 SQL coordinator HA replica set을 표현한다(RFC 0001).
-type CoordinatorSpec struct {
-	// Members는 RS 멤버 수. 홀수만 허용(split-brain 방지, RFC 0003).
-	// production 모드는 ≥3, development 모드는 ≥1.
+// ShardsSpec 는 샤드 토폴로지 정의다 (RFC 0001 §3.1).
+type ShardsSpec struct {
+	// InitialCount 는 클러스터 초기 샤드 수. P1 GA 는 1 만 보장. 1024 까지 schema 허용.
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=1024
 	// +kubebuilder:validation:Required
-	Members int32 `json:"members"`
+	InitialCount int32 `json:"initialCount"`
 
-	// Storage는 PVC 사양.
+	// Storage 는 샤드 PVC 사양.
 	// +kubebuilder:validation:Required
 	Storage StorageSpec `json:"storage"`
 
-	// Resources는 컨테이너 리소스 요구사항.
+	// Replicas 는 샤드당 비동기 복제본 수 (primary 제외). 0 이면 HA 미구성 (개발용).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=15
+	// +kubebuilder:default=1
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// Resources 는 샤드 PG 컨테이너 리소스 요구사항.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
-	// ShouldHaveShards는 coordinator가 분산 테이블 shard를 보유할지 여부.
-	// nil이면 false(RFC 0001 권장).
+	// Affinity 는 샤드 Pod 친화성 규칙.
 	// +optional
-	ShouldHaveShards *bool `json:"shouldHaveShards,omitempty"`
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// Tolerations 는 샤드 Pod 노드 toleration.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 }
 
-// WorkerPoolSpec은 worker pool(HA RS) 하나를 표현한다.
-type WorkerPoolSpec struct {
-	// Name은 pool 식별자. 동일 클러스터 내 unique. DNS-1123 label 형식.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
-	// +kubebuilder:validation:MaxLength=63
-	Name string `json:"name"`
+// RouterAutoscaleSpec 는 라우터 HPA 설정이다 (RFC 0001 §3.1).
+type RouterAutoscaleSpec struct {
+	// Enabled 는 HPA 부착 여부.
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 
-	// Members는 RS 멤버 수. 홀수, ≥1.
+	// MinReplicas 는 HPA 최소 복제본.
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Required
-	Members int32 `json:"members"`
-
-	// +kubebuilder:validation:Required
-	Storage StorageSpec `json:"storage"`
-
 	// +optional
-	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-}
+	MinReplicas int32 `json:"minReplicas,omitempty"`
 
-// PgBouncerSpec은 RouterSpec 내 PgBouncer 사이드카 설정이다.
-type PgBouncerSpec struct {
-	// PoolMode는 transaction|session|statement 중 하나(디폴트 transaction).
-	// +kubebuilder:validation:Enum=transaction;session;statement
-	// +kubebuilder:default=transaction
-	// +optional
-	PoolMode string `json:"poolMode,omitempty"`
-
-	// MaxClientConn은 per-Pod 클라이언트 연결 상한. nil이면 PgBouncer 기본값.
-	// +optional
+	// MaxReplicas 는 HPA 최대 복제본.
 	// +kubebuilder:validation:Minimum=1
-	MaxClientConn *int32 `json:"maxClientConn,omitempty"`
+	// +optional
+	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+
+	// TargetCPU 는 HPA CPU 사용률 목표 (%).
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=70
+	// +optional
+	TargetCPU int32 `json:"targetCPU,omitempty"`
+
+	// TargetActiveConnections 는 HPA active connection 목표.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=1000
+	// +optional
+	TargetActiveConnections int32 `json:"targetActiveConnections,omitempty"`
 }
 
-// RouterSpec은 stateless QueryRouter 풀 설정이다(RFC 0004).
+// RouterSpec 는 무상태 QueryRouter Deployment 설정이다 (RFC 0001 §3.1, RFC 0004).
 //
-// 본 구조체에는 Storage 필드가 의도적으로 부재한다. RFC 0004 무상태 강제를
-// 타입 차원에서 표현하며, 사용자는 YAML에 storage를 쓸 수 없다.
+// 본 구조체에는 Storage 필드가 의도적으로 부재한다 — 라우터의 무상태성을
+// 타입 차원에서 강제한다.
 type RouterSpec struct {
-	// Replicas는 라우터 Pod 수. ≥1.
-	// HPA를 부착하는 경우에도 본 필드는 minimum 역할.
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Required
-	Replicas int32 `json:"replicas"`
+	// Enabled 는 라우터 활성화 여부. shardingMode=native 시 default true.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 
-	// Resources는 라우터 컨테이너 리소스 요구사항.
+	// Replicas 는 라우터 Pod 수. HPA 부착 시 minimum 역할.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=2
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// Autoscale 은 HPA 설정.
+	// +optional
+	Autoscale *RouterAutoscaleSpec `json:"autoscale,omitempty"`
+
+	// Resources 는 라우터 컨테이너 리소스 요구사항.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// PgBouncer는 사이드카 설정.
-	// +optional
-	PgBouncer PgBouncerSpec `json:"pgbouncer,omitempty"`
 }
 
-// ExtensionSpec은 활성화할 PG extension 하나를 지정한다.
-// 본 SDK의 ExtensionPlugin Registry에 등록된 이름이어야 한다.
-type ExtensionSpec struct {
-	// +kubebuilder:validation:Required
-	Name string `json:"name"`
-
-	// Version은 extension의 minor 단위 버전. 빈 문자열이면 호환 매트릭스 기본값.
+// AutoSplitTriggers 는 자동 샤드 분할 트리거 임계치들이다 (모두 AND 의미).
+type AutoSplitTriggers struct {
+	// SizeThresholdGB 는 단일 샤드 크기 임계치 (GB). 0 이면 미사용.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
-	Version string `json:"version,omitempty"`
+	SizeThresholdGB int32 `json:"sizeThresholdGB,omitempty"`
+
+	// P99LatencyMs 는 단일 샤드 P99 latency 임계치 (ms). 0 이면 미사용.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	P99LatencyMs int32 `json:"p99LatencyMs,omitempty"`
+
+	// CPUPercent 는 단일 샤드 평균 CPU 사용률 임계치 (%). 0 이면 미사용.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	CPUPercent int32 `json:"cpuPercent,omitempty"`
+
+	// DurationMinutes 는 위 임계치들이 지속되어야 하는 시간 (분). 0 이면 즉시.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	DurationMinutes int32 `json:"durationMinutes,omitempty"`
 }
 
-// PostgresClusterSpec은 PostgresCluster CR의 Spec이다.
-type PostgresClusterSpec struct {
-	// Version은 PostgreSQL 버전.
-	// +kubebuilder:validation:Required
-	Version VersionSpec `json:"version"`
-
-	// Coordinator는 분산 SQL coordinator HA RS.
-	// +kubebuilder:validation:Required
-	Coordinator CoordinatorSpec `json:"coordinator"`
-
-	// Workers는 worker pool들. ≥1.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinItems=1
-	Workers []WorkerPoolSpec `json:"workers"`
-
-	// Routers는 stateless QueryRouter 풀.
-	// +kubebuilder:validation:Required
-	Routers RouterSpec `json:"routers"`
-
-	// Extensions는 활성화할 확장 목록.
+// AutoSplitSpec 는 자동 샤드 분할 정책이다 (RFC 0001 §3.1, RFC 0003 후속).
+type AutoSplitSpec struct {
+	// Enabled 는 자동 분할 활성화 여부. P2+ 에서 의미를 갖는다.
+	// +kubebuilder:default=false
 	// +optional
-	Extensions []ExtensionSpec `json:"extensions,omitempty"`
+	Enabled bool `json:"enabled,omitempty"`
 
-	// Sharding은 자체 분산 sharding 백엔드 설정 (RFC 0001~0005).
-	// 미지정 시 single-node PostgreSQL (default). 지정 시 등록된 ShardingPlugin
-	// 백엔드 ("native-fdw" — Phase P3+ 후속)가 활성화된다. 외부 AGPL/BUSL 백엔드는
-	// ADR 0003에 의해 영구 금지된다.
+	// RequireApproval 은 자동 분할 대상 후보를 ShardSplitJob 으로 제출하되 수동
+	// 승인 annotation 후에만 실행하도록 강제한다 (production safety).
+	// +kubebuilder:default=true
 	// +optional
-	Sharding *ShardingSpec `json:"sharding,omitempty"`
+	RequireApproval bool `json:"requireApproval,omitempty"`
 
-	// Deployment는 production|development 모드(디폴트 production).
-	// +kubebuilder:default=production
+	// Triggers 는 분할 임계치 집합.
 	// +optional
-	Deployment DeploymentMode `json:"deployment,omitempty"`
+	Triggers *AutoSplitTriggers `json:"triggers,omitempty"`
 }
 
-// ShardingSpec은 자체 분산 sharding 백엔드 설정 (RFC 0001~0005 entry).
+// ClusterBackupRetentionSpec 는 PostgresCluster.spec.backup.retention 정책.
 //
-// 본 구조체는 internal/plugin/sharding.ShardingSpec과 의미 1:1 매핑이지만, CRD
-// schema 노출용으로 별도 정의한다(controller-gen이 internal package를 schema로
-// 직렬화하지 않음). reconciler가 본 구조체를 sharding.ShardingSpec으로 변환한다.
-type ShardingSpec struct {
-	// Backend는 ShardingPlugin.Name 식별자.
-	// "native-fdw": postgres_fdw 기반 hash sharding (Apache-2.0, Phase P3+ 후속).
-	// 외부 AGPL/BUSL 백엔드는 ADR 0003에 의해 등록 금지.
-	// +kubebuilder:validation:Enum=native-fdw
-	// +kubebuilder:validation:Required
-	Backend string `json:"backend"`
-
-	// DistributedTables는 distributed table 정의 목록.
+// 명명 prefix 는 BackupJob CRD 의 BackupRetentionSpec 과의 type 충돌을 회피한다
+// (둘 다 v1alpha1 패키지). BackupJob 은 atomic 작업 단위, 본 구조체는 cluster
+// 레벨 정기 백업의 보존 정책으로 의미가 다르다.
+type ClusterBackupRetentionSpec struct {
+	// Full 은 full 백업 보존 기간 (duration: "7d", "168h" 등).
 	// +optional
-	DistributedTables []DistributedTableSpec `json:"distributedTables,omitempty"`
+	Full string `json:"full,omitempty"`
 
-	// ReferenceTables는 broadcast 테이블 이름 목록 (스키마 포함, e.g. "public.dim_country").
+	// Incremental 은 incremental 백업 보존 기간.
 	// +optional
-	ReferenceTables []string `json:"referenceTables,omitempty"`
+	Incremental string `json:"incremental,omitempty"`
 
-	// DefaultShardCount는 DistributedTableSpec.ShardCount=0 일 때 fallback. 0이면 백엔드 default.
-	// +kubebuilder:validation:Minimum=0
+	// WALArchive 는 WAL 아카이브 보존 기간.
 	// +optional
-	DefaultShardCount int32 `json:"defaultShardCount,omitempty"`
+	WALArchive string `json:"walArchive,omitempty"`
 }
 
-// DistributedTableSpec은 단일 distributed table 정의.
-type DistributedTableSpec struct {
-	// Name은 스키마 포함 테이블 이름 (e.g. "public.events").
+// ClusterBackupRepoSpec 는 백업 저장소 설정.
+type ClusterBackupRepoSpec struct {
+	// Type 은 저장소 종류 (s3 | gcs | azure | filesystem).
+	// +kubebuilder:validation:Enum=s3;gcs;azure;filesystem
+	// +optional
+	Type string `json:"type,omitempty"`
+
+	// Bucket 은 object storage 버킷 이름.
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
+
+	// Region 은 object storage 리전.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// Endpoint 는 S3 호환 endpoint URL (선택).
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Path 는 filesystem 경로 (Type=filesystem).
+	// +optional
+	Path string `json:"path,omitempty"`
+}
+
+// ClusterBackupSpec 는 cluster 레벨 백업/PITR 정책 (RFC 0001 §3.1, RFC 0004).
+type ClusterBackupSpec struct {
+	// Enabled 는 백업 정책 활성화 여부 (사용자 명시 opt-in).
+	// +kubebuilder:default=false
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Schedule 은 cron expression (예: "0 2 * * *").
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+
+	// Retention 은 백업 보존 정책.
+	// +optional
+	Retention *ClusterBackupRetentionSpec `json:"retention,omitempty"`
+
+	// Repo 는 백업 저장소 설정.
+	// +optional
+	Repo *ClusterBackupRepoSpec `json:"repo,omitempty"`
+}
+
+// ServiceMonitorSpec 는 Prometheus ServiceMonitor 자동 배포 설정.
+type ServiceMonitorSpec struct {
+	// Enabled 는 ServiceMonitor 생성 여부.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Interval 은 scrape interval (예: "30s").
+	// +kubebuilder:default="30s"
+	// +optional
+	Interval string `json:"interval,omitempty"`
+}
+
+// PrometheusRuleSpec 는 PrometheusRule 자동 배포 설정.
+type PrometheusRuleSpec struct {
+	// Enabled 는 PrometheusRule 생성 여부.
+	// +kubebuilder:default=true
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// MonitoringSpec 는 monitoring 통합 설정 (RFC 0001 §3.1).
+type MonitoringSpec struct {
+	// ServiceMonitor 는 Prometheus operator ServiceMonitor 자동 배포.
+	// +optional
+	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+
+	// PrometheusRule 은 알람 규칙 자동 배포.
+	// +optional
+	PrometheusRule *PrometheusRuleSpec `json:"prometheusRule,omitempty"`
+}
+
+// PostgresClusterSpec 는 PostgresCluster CR 의 desired state 다 (RFC 0001 §3).
+//
+// CEL 검증 (kubebuilder v0.15+):
+//
+// +kubebuilder:validation:XValidation:rule="self.shardingMode != 'native' || self.shards.initialCount >= 1",message="native sharding requires shards.initialCount >= 1"
+// +kubebuilder:validation:XValidation:rule="!has(self.router) || self.shardingMode == 'native'",message="router is only valid when shardingMode=native"
+// +kubebuilder:validation:XValidation:rule="!has(self.autoSplit) || self.autoSplit.enabled == false || self.shardingMode == 'native'",message="autoSplit requires shardingMode=native"
+type PostgresClusterSpec struct {
+	// PostgresVersion 은 메이저 버전 문자열. 0.3.0-alpha 는 18 만 GA, 17 호환 유지.
+	// +kubebuilder:validation:Enum="17";"18"
+	// +kubebuilder:default="18"
+	// +optional
+	PostgresVersion string `json:"postgresVersion,omitempty"`
+
+	// ShardingMode 는 단일 샤드 (none) 또는 자체 분산 SQL (native).
+	// +kubebuilder:default=none
+	// +optional
+	ShardingMode ShardingMode `json:"shardingMode,omitempty"`
+
+	// Shards 는 샤드 토폴로지.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
+	Shards ShardsSpec `json:"shards"`
+
+	// Router 는 무상태 QueryRouter 풀. shardingMode=native 시에만 의미.
+	// +optional
+	Router *RouterSpec `json:"router,omitempty"`
+
+	// AutoSplit 은 자동 샤드 분할 정책.
+	// +optional
+	AutoSplit *AutoSplitSpec `json:"autoSplit,omitempty"`
+
+	// Backup 은 백업/PITR 정책.
+	// +optional
+	Backup *ClusterBackupSpec `json:"backup,omitempty"`
+
+	// Monitoring 은 monitoring 통합 설정.
+	// +optional
+	Monitoring *MonitoringSpec `json:"monitoring,omitempty"`
+}
+
+// ClusterPhase 는 cluster 의 상위 단계.
+// +kubebuilder:validation:Enum=Provisioning;Ready;Reconfiguring;Degraded
+type ClusterPhase string
+
+const (
+	ClusterPhaseProvisioning  ClusterPhase = "Provisioning"
+	ClusterPhaseReady         ClusterPhase = "Ready"
+	ClusterPhaseReconfiguring ClusterPhase = "Reconfiguring"
+	ClusterPhaseDegraded      ClusterPhase = "Degraded"
+)
+
+// ShardEndpoint 는 샤드 멤버 (primary 또는 replica) 1 개의 관찰 상태.
+type ShardEndpoint struct {
+	// Pod 는 K8s Pod 이름.
+	// +optional
+	Pod string `json:"pod,omitempty"`
+
+	// Endpoint 는 호스트:포트 형태의 접속 endpoint.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// Ready 는 readiness 통과 여부.
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+
+	// LagBytes 는 replica 의 WAL lag (bytes). primary 는 0 또는 미설정.
+	// +optional
+	LagBytes int64 `json:"lagBytes,omitempty"`
+}
+
+// ShardStatus 는 단일 샤드의 관찰 상태.
+type ShardStatus struct {
+	// Name 은 샤드 식별자 (예: "shard-0").
 	Name string `json:"name"`
 
-	// DistributionCol은 shard key column 이름.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	DistributionCol string `json:"distributionCol"`
+	// Ordinal 은 샤드 순서 (0-based).
+	Ordinal int32 `json:"ordinal"`
 
-	// ShardCount는 shard 개수. 0이면 ShardingSpec.DefaultShardCount 또는 백엔드 default.
-	// +kubebuilder:validation:Minimum=0
+	// Primary 는 현재 primary endpoint.
 	// +optional
-	ShardCount int32 `json:"shardCount,omitempty"`
+	Primary *ShardEndpoint `json:"primary,omitempty"`
 
-	// ColocateWith는 같은 distribution을 갖는 다른 테이블과 collocate. 빈 문자열이면 standalone.
+	// Replicas 는 현재 replica endpoint 목록.
 	// +optional
-	ColocateWith string `json:"colocateWith,omitempty"`
+	Replicas []ShardEndpoint `json:"replicas,omitempty"`
 
-	// Strategy는 shard 분배 전략 ("hash" | "range"). 빈 문자열이면 "hash" default.
-	// +kubebuilder:validation:Enum=hash;range
+	// SizeBytes 는 샤드 데이터 크기 (bytes). 0 이면 미관측.
 	// +optional
-	Strategy string `json:"strategy,omitempty"`
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+
+	// LastSplit 은 마지막 분할 완료 시각. 분할 이력 없음 = nil.
+	// +optional
+	LastSplit *metav1.Time `json:"lastSplit,omitempty"`
 }
 
-// NodeStatus는 단일 PG 인스턴스(coordinator 또는 worker pool)의 상태다.
-type NodeStatus struct {
-	// Primary는 현재 primary Pod 이름.
+// ClusterRouterStatus 는 라우터 풀의 관찰 상태.
+type ClusterRouterStatus struct {
+	// Replicas 는 desired 라우터 Pod 수.
 	// +optional
-	Primary string `json:"primary,omitempty"`
+	Replicas int32 `json:"replicas,omitempty"`
 
-	// Replicas는 현재 standby Pod 이름들.
+	// ReadyReplicas 는 ready 상태 라우터 Pod 수.
 	// +optional
-	Replicas []string `json:"replicas,omitempty"`
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// LeaseHolder는 K8s lease 보유자(primary와 동일한 것이 정상).
+	// Endpoint 는 라우터 Service endpoint.
 	// +optional
-	LeaseHolder string `json:"leaseHolder,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
-// DistNodeRef는 분산 SQL 메타데이터에 등록된 node 정보를 K8s에 반영한다(RFC 0002).
-type DistNodeRef struct {
-	GroupID          int32  `json:"groupId"`
-	NodeName         string `json:"nodeName"`
-	NodePort         int32  `json:"nodePort"`
-	ShouldHaveShards bool   `json:"shouldHaveShards"`
-}
-
-// WorkerPoolStatus는 worker pool 하나의 상태다.
-type WorkerPoolStatus struct {
-	Name string `json:"name"`
-
-	// Node는 본 worker pool의 RS 상태.
-	Node NodeStatus `json:"node"`
-
-	// DistNode는 분산 SQL 메타데이터 등록 결과(RFC 0002).
-	// +optional
-	DistNode *DistNodeRef `json:"distNode,omitempty"`
-}
-
-// RouterPoolStatus는 라우터 풀 상태다.
-type RouterPoolStatus struct {
-	// ReadyReplicas는 Ready 조건을 통과한 라우터 Pod 수.
-	ReadyReplicas int32 `json:"readyReplicas"`
-
-	// MaxMetadataLagSeconds는 모든 라우터 Pod 중 router_metadata_lag_seconds
-	// 메트릭의 최댓값. 임계치 초과 시 라우터 Pod readiness가 실패한다(RFC 0004).
-	// +optional
-	MaxMetadataLagSeconds *string `json:"maxMetadataLagSeconds,omitempty"`
-}
-
-// TopologyStatus는 토폴로지 현재 상태다.
-type TopologyStatus struct {
-	Coordinator NodeStatus         `json:"coordinator"`
-	Workers     []WorkerPoolStatus `json:"workers,omitempty"`
-	Routers     RouterPoolStatus   `json:"routers"`
-}
-
-// PostgresClusterStatus는 PostgresCluster CR의 Status다.
+// PostgresClusterStatus 는 PostgresCluster CR 의 관찰 상태 (RFC 0001 §3.2).
 type PostgresClusterStatus struct {
-	// Conditions는 표준 K8s Condition 집합. 권장 종류:
-	// Ready, CoordinatorReady, WorkersReady, RoutersReady, MetadataInSync.
+	// Phase 는 cluster 의 상위 단계.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Phase ClusterPhase `json:"phase,omitempty"`
 
-	// Topology는 reconcile된 현재 토폴로지.
-	// +optional
-	Topology TopologyStatus `json:"topology,omitempty"`
-
-	// Channel은 활성 릴리즈 채널(stable | beta | preview-pg18).
-	// internal/version/matrix.go의 Combo.Channel 결과를 반영한다.
-	// +optional
-	Channel string `json:"channel,omitempty"`
-
-	// ObservedGeneration은 reconcile된 spec의 metadata.generation.
+	// ObservedGeneration 은 reconciler 가 관측한 spec.metadata.generation.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Shards 는 샤드별 관찰 상태 배열 (ordinal 오름차순).
+	// +optional
+	Shards []ShardStatus `json:"shards,omitempty"`
+
+	// Router 는 라우터 풀 관찰 상태 (shardingMode=native 시).
+	// +optional
+	Router *ClusterRouterStatus `json:"router,omitempty"`
+
+	// Conditions 는 K8s 표준 condition 집합.
+	// 권장 type: Ready / Progressing / BackupHealthy / AutoSplitEligible / RouterReady.
+	// +optional
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=pgc
-// +kubebuilder:printcolumn:name="PG",type=string,JSONPath=".spec.version.postgres"
-// +kubebuilder:printcolumn:name="Workers",type=integer,JSONPath=".spec.workers[*].members"
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Shards",type=integer,JSONPath=".spec.shards.initialCount"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"
-// +kubebuilder:printcolumn:name="Channel",type=string,JSONPath=".status.channel"
+// +kubebuilder:printcolumn:name="Version",type=string,JSONPath=".spec.postgresVersion"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 
-// PostgresCluster는 K8s-native 자체 분산 PostgreSQL 클러스터의 선언적 표현이다(ADR 0001).
+// PostgresCluster 는 K8s-native 자체 분산 PostgreSQL 클러스터의 선언적 표현이다 (ADR 0001).
 type PostgresCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -327,7 +431,7 @@ type PostgresCluster struct {
 
 // +kubebuilder:object:root=true
 
-// PostgresClusterList는 PostgresCluster의 컬렉션이다.
+// PostgresClusterList 는 PostgresCluster 의 컬렉션이다.
 type PostgresClusterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

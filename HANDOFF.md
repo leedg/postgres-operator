@@ -2,55 +2,48 @@
 
 > 다음 세션이 *컨버세이션 컨텍스트 없이* 재개 가능해야 한다. 시작 의식: 본 파일 → `TASKS.md` → 마지막 commit log 순서로 읽는다.
 
-## 현재 상태 (2026-05-02)
+## 현재 상태 (2026-05-03)
 
-- **마지막 commit (HEAD)**: df1f2e1 `feat!: 0.3.0-alpha redesign reset — 자체 분산 SQL, 의존 제로`
-- **브랜치**: main (릴리스 게이트는 로컬, RFC 0002 archive 적용)
-- **현재 phase**: **P0 완료**. T01~T14 모두 100%. P1 (0.4.0 single-shard production-ready) 진입 대기.
-- **검증 결과**: make lint 0 issues / make test ALL PASS / make validate PASS / helm lint --strict PASS / runtime artifact citus refs 0건.
-- **이전 미커밋 변경 (이미 commit 됨)**:
-  - `docs/adr/_archive/v0.x/` 디렉토리 신설 + 기존 ADR 0001~0010 이동 (`git mv`, history 보존)
-  - `docs/rfcs/_archive/v0.x/` 디렉토리 신설 + 기존 RFC 0001~0005 이동
-  - 신규 `docs/adr/0001-self-built-distributed-sql.md` ~ `0005-versioning-and-channels.md` (5 파일, 약 380 줄)
-  - 신규 `docs/rfcs/0001-postgrescluster-crd-v2.md` ~ `0005-distributed-transactions.md` (5 파일, 약 1635 줄)
-  - `README.md` 재작성 (자체 분산 SQL 정체성)
-  - `TASKS.md` 재작성 (P0 작업 표)
-  - `HANDOFF.md` 본 파일
-  - `CHANGELOG.md` `## [0.3.0-alpha]` 항목 추가 (breaking change 명시)
+- **마지막 commit (HEAD 직전)**: df1f2e1 `feat!: 0.3.0-alpha redesign reset — 자체 분산 SQL, 의존 제로`
+- **본 세션 신규 commit (예정)**: `feat!(api): RFC 0001 PostgresCluster CRD v2 schema 실장 (F01a — types/webhook only)`
+- **브랜치**: main (RFC 0002 archive 적용 — GH Actions 0)
+- **현재 phase**: **P1 진행 중**. F01a 완료. F01b ~ F05 대기.
+- **검증 결과 (F01a)**: `make lint` 0 issues / `make test` 모든 패키지 PASS / `make validate` helm lint --strict PASS / `make manifests` idempotent.
 
-## 의사결정 기록 (본 세션 누적)
+## 본 세션 (F01a) 의사결정 기록
 
-1. **2026-05-02 사용자 결정**: 풀 자체 분산 SQL (옵션 C) + 모든 외부 backend 의존 제거 + Single chart + flags. ADR-0001 (신규) 가 keystone.
-2. ADR-0010 (legacy, Citus AGPL 격리) 와 RFC-0005 (legacy, native sharding plugin) 는 supersede 됨 (`_archive/v0.x/`).
-3. 6+년 timeline (P0~P7) 정직 공시. 각 phase 끝에 production-deployable 보장.
-4. 외부 의존 정책 (ADR-0003): BSD/Apache/MIT/PG License + v1+ stability 만. AGPL/BUSL/CSL/SSPL 영구 금지.
-5. CRD 라이프사이클은 operator manager 가 소유 (ADR-0004) — Helm `crds/` 폐기 (T10 다음 세션).
+1. **2026-05-03 사용자 결정**: API 버전 점프 (v1alpha1 → v1beta1) 가 아닌 **v1alpha1 in-place schema 교체**. 이유: RFC 0001 §2.2 시나리오 YAML + §7 P1 작업 항목이 `api/v1alpha1/` 디렉토리 유지 명시. 0.3.0-alpha 의 alpha 채널 정책이 schema 자체의 breaking change 를 정당화하므로 ADR 추가 불필요.
+2. **2026-05-03 사용자 결정**: F01 영향 범위 (~16 파일, ~1500 라인) 측정 후 T2 → T3 재판정. **F01a (types + webhook + deepcopy + minimal stub)** 와 **F01b (reconciler/builders/envtest 새 spec 기반 재작성)** 으로 분할. F01a 가 본 세션 산출물.
+3. webhook 의 cron / duration parse 정밀 검증은 F01b 또는 F02 로 연기 — F01a 범위에서 외부 의존 (`robfig/cron`) 추가 회피.
+4. envtest 2 종 (`postgrescluster_controller_test.go`, `cascade_delete_test.go`) 삭제 결정 — 옛 spec 기반이라 의미 상실. F01b 에서 RFC 0001 spec 기준 새 envtest 로 재작성.
+5. `internal/controller/builders.go` 의 helper 5 개 (`buildConfigMap`/`buildHeadlessService`/`buildClientService`/`renderSharedPreloadLibraries`/`renderPostgresConf`) 는 `//nolint:unused` directive 로 보존 — F01b 가 reconcile 본체에서 호출. sentinel 패턴은 staticcheck unused linter 가 dead-store 로 잡으므로 함수 단위 nolint 가 정답.
 
-## 다음 단계 (P1 진입 — 0.4.0 single-shard production-ready)
+## 다음 단계 (F01b 진입)
 
-P0 완료 (commit df1f2e1). 다음 세션은 P1 부터 시작. TASKS.md §"다음 Phase 미리보기" 의 F01~F05 가 진입점:
+**F01b — RFC 0001 spec 기반 reconcile 본체 + builders 재배선 + envtest 재작성**
 
-1. **F01 — RFC 0001 PostgresCluster CRD v2 실장** (kubebuilder/CEL marker, Sharding spec 재정의). 본 commit 의 placeholder ShardingSpec 을 RFC 0001 정의로 교체.
-2. **F02 — instance manager P2-T3+** (postgres 프로세스 supervise + promote/demote 실장). `cmd/instance/main.go` 의 todo 주석 ("supervise postgres process + 분산 SQL metadata 갱신 (RFC 0002 후속)") 가 진입점.
-3. **F03 — RFC 0003 election / fencing 인터페이스 위에 실장 완성**.
-4. **F04 — pgBackRest 통합** (`internal/controller/backup/`).
-5. **F05 — single-shard E2E 테스트 시나리오 재설계** (chaos-mesh primary kill → failover < 30s).
+진입점:
+1. `internal/controller/postgrescluster_controller.go` 의 noop Reconcile 본체 — 새 ShardsSpec / RouterSpec → StatefulSet (shard 별) + headless Service + ConfigMap + Router Deployment + ClusterIP Service 생성.
+2. `internal/controller/builders.go` helper 들의 호출 패턴 재정립 — pool 식별자가 `worker-<pool>` 에서 `shard-<ordinal>` 로 변경됨에 따라 `WorkerStatefulSetName` 등 `internal/controller/names.go` 의 명명 함수도 `ShardStatefulSetName(cluster, ordinal)` 로 추가 (worker* 함수는 deprecated 또는 제거).
+3. `internal/controller/status.go` 의 Condition 카탈로그 — `ConditionCoordinatorReady` / `ConditionWorkersReady` 폐기, 새 `ConditionShardsReady` / `ConditionRouterReady` 도입 (RFC 0001 §3.4 권장 condition 카탈로그 그대로).
+4. envtest 재작성: `internal/controller/postgrescluster_controller_test.go` (새 spec 기반 single-shard 시나리오) + `internal/controller/cascade_delete_test.go` (ADR 0008 회귀 — 새 shard 자원 OwnerReference 검증).
+5. `internal/plugin/sharding/api.go` 의 doc comment 갱신 — `PostgresClusterSpec.Sharding.Backend 와 일치` 문구는 더 이상 정확하지 않음 (새 spec 에 `sharding.backend` 부재). F01b 또는 별도 PR 에서 정정.
 
-후속 정리 작업 (별도 PR 권장):
-- `docs/roadmap.md` 새 8-Phase (P0~P7) 로 본문 재작성 — 현재 deprecated stub.
-- `docs/concepts/`, `docs/how-to/`, `docs/reference/` 의 Citus 의존 표현 정리 (ADR 본문은 의도적 보존).
-- TASKS.md "Phase: P1" 섹션 신규 작성 + F01~F05 분해.
+## 후속 정리 작업 (F01b 와 분리)
+
+- `docs/roadmap.md` 새 8-Phase (P0~P7) 본문 재작성 — 현재 deprecated stub.
+- `docs/concepts/` / `docs/how-to/` / `docs/reference/` 의 v0.x spec 표현 (`coordinator/workers/routers`) 정리.
+- F02 진입점: `cmd/instance/main.go` 의 todo 주석 ("supervise postgres process + 분산 SQL metadata 갱신").
 
 ## 차단점
 
-- 없음. P1 진입은 RFC 0001 CRD v2 정의를 따라 mechanical 진행 가능.
+없음. F01b 는 F01a 의 type 정의 위에서 mechanical 진행 가능.
 
 ## 근거 링크
 
-- 플랜: `/Users/phil/.claude/plans/eager-wobbling-torvalds.md` (사용자 승인 2026-05-02)
-- 비교 분석: `/Users/phil/.claude/plans/eager-wobbling-torvalds-agent-a335628aa15778167.md`
-- 신규 keystone ADR: `docs/adr/0001-self-built-distributed-sql.md`
-- 신규 RFC 묶음: `docs/rfcs/0001-postgrescluster-crd-v2.md` ~ `0005-distributed-transactions.md`
-- standards 적용: `~/Documents/ai-dev/standards/principles.md` §1, §2, §3, §4
-- standards CI: `~/Documents/ai-dev/standards/ci.md` (4-layer 로컬 게이트)
-- 폐기된 결정: `docs/adr/_archive/v0.x/0010-license-and-sharding-strategy.md`, `docs/rfcs/_archive/v0.x/0005-native-sharding-plugin.md`
+- 본 세션 plan: `/Users/phil/.claude/plans/nifty-tumbling-marshmallow.md` (F01a/F01b 분할 결정 포함)
+- RFC 0001: `docs/rfcs/0001-postgrescluster-crd-v2.md`
+- ADR 0001 (keystone): `docs/adr/0001-self-built-distributed-sql.md`
+- ADR 0004 (CRD managed by operator): `docs/adr/0004-crd-managed-by-operator.md`
+- standards 적용: `~/Documents/ai-dev/standards/principles.md` §3 Surgical Changes (분할 결정의 근거)
+- 이전 phase HANDOFF: 본 파일 git history (commit df1f2e1 전).

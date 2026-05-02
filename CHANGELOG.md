@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **PostgresCluster CRD schema 재정의 (RFC 0001 v2 — F01a)**: `spec.coordinator` / `spec.workers[]` / `spec.routers` / `spec.extensions` / `spec.sharding.backend` / `spec.deployment` 모두 폐기. 새 6-필드 구조 (`postgresVersion` / `shardingMode` / `shards` / `router` / `autoSplit` / `backup` / `monitoring`) 로 교체. status 도 `topology` / `channel` 폐기, `phase` / `shards[]` / `router` 신설. v0.x manifest 는 호환되지 않음 (alpha 채널 정책).
+- CRD 자체에 RFC 0001 §3.3 의 3 개 CEL XValidation 규칙 (`shardingMode↔shards`, `router↔native`, `autoSplit↔native`) 박힘 — K8s API server 가 직접 거절.
+- webhook 검증 단순화: PostgresVersion matrix lookup + autoSplit trigger 일관성 + backup schedule 비어있지 않음만 강제. cron 정밀 parse / duration parse 는 F01b/F02 에서 외부 의존 추가 후 도입.
+
+### Deferred to F01b
+
+- 새 spec 기반 reconcile 본체 (ShardsSpec → StatefulSet 토폴로지, RouterSpec → Deployment, BackupSpec → BackupJob 자동 생성). 본 turn 에서는 `// TODO(F01b)` 주석 + minimal noop reconcile (`status.phase=Provisioning`, `Ready=False reason=NotApplicable`).
+- `internal/controller/builders.go` 의 helper 들은 시그너처 보존 + `//nolint:unused` directive — F01b 에서 reconcile 본체가 호출.
+- envtest 2 종 (`postgrescluster_controller_test.go`, `cascade_delete_test.go`) 삭제 — F01b 에서 RFC 0001 spec 기반으로 새로 작성.
+
 ## [0.3.0-alpha] - 2026-05-02
 
 ### Changed (BREAKING)

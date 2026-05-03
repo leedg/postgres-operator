@@ -4,13 +4,18 @@
 
 ## 현재 상태 (2026-05-03)
 
-- **HEAD (예정)**: F02 — `feat(instance): supervise 패키지 + election callback wiring` (commit 직전)
-- **HEAD~1**: T15 — `refactor(instance)!: election lease 명명 규약 shard ordinal 모델로 마이그레이션`
-- **HEAD~2**: F01b — `feat(controller): RFC 0001 spec 기반 reconcile 본체 + envtest 재작성`
-- **HEAD~3**: F01a — `feat!(api): RFC 0001 PostgresCluster CRD v2 schema 실장`
-- **브랜치**: main
-- **현재 phase**: **P1 진행 중**. F01a + F01b + T15 완료. **F02 60% (구현)** — controller env 주입 + readiness HTTP 후속.
-- **검증 결과 (F02)**: `make lint` 0 issues / `go test ./... -count=1` 모든 패키지 PASS (supervise 신규 ~10 tests pass).
+- **HEAD**: F02 cycle 5 — `docs(deployment): kind smoke script + operator-guide 배포 가이드` (commit 직전)
+- **HEAD~1..4**: F02 cycle 1~4 — sample CR / Dockerfile.pg / env+probes / RBAC+initdb / /readyz IsReady
+- **HEAD~5**: F02 wiring (a548d37) — supervise 패키지 + election callback
+- **HEAD~6**: T15 — election lease shard ordinal 마이그레이션
+- **HEAD~7**: F01b — controller reconcile 본체
+- **브랜치**: feat/ha-alpha-c1c2
+- **현재 phase**: **P1 진행 중**. F01a + F01b + T15 + **F02 90% (테스트)** 완료.
+- **F02 deployable 검증 결과**:
+  - `make lint`: 0 issues
+  - `go test ./... -count=1`: 모든 패키지 PASS
+  - `make validate`: kustomize + helm lint --strict + build-installer 통과
+  - 미실측 (다음 세션): `hack/smoke.sh` 로 kind 클러스터 적용 — Pod Ready + psql round-trip 검증.
 
 ## 본 세션 (F02 supervise wiring) 의사결정 기록
 
@@ -31,7 +36,16 @@
 6. **2026-05-03**: Reconcile cyclomatic complexity 가 31 (>30) → status 갱신부를 `applyClusterConditions` 헬퍼로 분리. 단일 책임 + 테스트 가능성 향상.
 7. **2026-05-03**: `internal/plugin/sharding/api.go` Name() doc comment 의 `PostgresClusterSpec.Sharding.Backend 와 일치` → `PostgresClusterSpec.ShardingMode 가 "native" 일 때 활성화` 로 정정. 새 spec 에 sharding 필드 부재.
 
-## 다음 단계 (F02 잔여 + F03 진입)
+## 다음 단계 (F02 100% 도달 + F03 진입)
+
+**즉시 (F02 90% → 100%)** — 외부 환경 의존:
+
+1. `./hack/smoke.sh` 실행 — kind 클러스터에 quickstart sample apply 후 Pod Ready + psql round-trip 검증.
+   첫 실행 시 발견되는 모든 환경 이슈 (image push, fsGroup propagation, RBAC 빠진 권한, Pod sandbox 초기화 race 등) 는 fix-forward.
+2. (선택) `ghcr.io/keiailab/pg:18` push 자동화 — 현재는 `make docker-build-pg && make docker-push-pg` 수동.
+3. WAL lag 측정 — `pg_stat_replication` 폴러를 instance manager 에 추가 + Status.Shards[].Replicas[].LagBytes 갱신.
+
+**F02 잔여 (별도 plan)**:
 
 F02 의 supervise + wiring 60% 완료 — 잔여 40% 는 *operator 측 통합* 이라 별도 PR 권장:
 

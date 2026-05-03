@@ -32,8 +32,12 @@ import (
 )
 
 var (
-	// managerImage is the manager image to be built and loaded for testing.
-	managerImage = "example.com/postgresql-operator:v0.0.1"
+	// managerImage 는 dist/install.yaml 의 controller image (config/manager/kustomization.yaml
+	// newTag = Chart.yaml appVersion = 0.3.0-alpha) 와 정렬돼야 한다. kubebuilder
+	// 기본값 (`example.com/postgresql-operator:v0.0.1`) 을 그대로 두면 install.yaml 이
+	// IfNotPresent 정책으로 ghcr.io 의 :0.3.0-alpha 를 pull 시도 → kind 노드에 부재 →
+	// ImagePullBackOff. 동일 출처 (appVersion) 정렬로 drift 차단.
+	managerImage = "ghcr.io/keiailab/postgres-operator:0.3.0-alpha"
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 )
@@ -59,6 +63,26 @@ var _ = BeforeSuite(func() {
 	By("loading the manager image on Kind")
 	err = utils.LoadImageToKindClusterWithName(managerImage)
 	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to load the manager image into Kind")
+
+	By("installing operator + CRDs (kubectl apply -f dist/install.yaml)")
+	// dist/install.yaml 는 build-installer 타겟이 생성한다. e2e go test 의 prerequisites
+	// (manifests/generate/fmt/vet) 만으로는 install.yaml 까지 도달하지 않으므로 명시적 호출.
+	cmd = exec.Command("make", "build-installer", fmt.Sprintf("IMG=%s", managerImage))
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to run build-installer")
+
+	cmd = exec.Command("kubectl", "apply", "-f", "dist/install.yaml")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply dist/install.yaml")
+
+	By("waiting for operator manager Deployment to become Available")
+	cmd = exec.Command("kubectl",
+		"-n", "postgresql-operator-system",
+		"wait", "--for=condition=Available",
+		"deployment/postgresql-operator-controller-manager",
+		"--timeout=180s")
+	_, err = utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "operator manager Deployment did not become Available")
 
 	setupCertManager()
 })

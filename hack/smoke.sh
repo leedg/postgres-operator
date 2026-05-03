@@ -26,10 +26,18 @@ if [[ "${1:-}" == "--keep" ]]; then
 fi
 
 CLUSTER_NAME="${CLUSTER_NAME:-postgres-operator-smoke}"
-NS="${NS:-default}"
+# NS 는 sample CR (config/samples/...) 의 metadata.namespace 와 정합돼야 한다.
+# sample 이 'default' 로 hardcoded 이므로 env override 를 받지 않는다 (false-negative
+# 회피 — 이전 cycle 에서 부모 shell 의 NS=dev 가 STS wait 를 dev 로 보내 timeout).
+NS="default"
 CR_NAME="${CR_NAME:-quickstart}"
 PG_IMG="${PG_IMG:-ghcr.io/keiailab/pg:18}"
-OPERATOR_IMG="${OPERATOR_IMG:-ghcr.io/keiailab/postgres-operator:smoke}"
+# install.yaml 이 config/manager/kustomization.yaml 의 newTag 를 사용하고, 그 값은
+# charts/postgresql-operator/Chart.yaml 의 appVersion 과 동기화돼 있다 (Makefile §3 IMAGE_TAG).
+# smoke.sh 가 다른 태그 (예: ":smoke") 로 빌드/로드하면 kubelet 이 install.yaml 의 태그를
+# pull 하려다 실패한다. drift 방지를 위해 단일 출처에서 태그 도출.
+OPERATOR_TAG="${OPERATOR_TAG:-$(awk '/^appVersion:/ { gsub(/"/, "", $2); print $2; exit }' charts/postgresql-operator/Chart.yaml)}"
+OPERATOR_IMG="${OPERATOR_IMG:-ghcr.io/keiailab/postgres-operator:${OPERATOR_TAG}}"
 
 log() { printf '\n[smoke] %s\n' "$*" >&2; }
 
@@ -69,7 +77,7 @@ kubectl apply -f dist/install.yaml
 
 # operator Pod Ready 대기
 log "Waiting for operator manager Pod"
-kubectl -n postgres-operator-system wait --for=condition=Available deployment \
+kubectl -n postgresql-operator-system wait --for=condition=Available deployment \
     -l control-plane=controller-manager --timeout=180s
 
 # 4. sample CR

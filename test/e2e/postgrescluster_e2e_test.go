@@ -135,7 +135,7 @@ var _ = Describe("PostgresCluster", Ordered, Label("p1"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "statefulset",
 				"-n", pgClusterNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", pgClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", pgClusterName),
 				"-o", "jsonpath={.items[0].metadata.name}")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -147,7 +147,7 @@ var _ = Describe("PostgresCluster", Ordered, Label("p1"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "statefulset",
 				"-n", pgClusterNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", pgClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", pgClusterName),
 				"-o", "jsonpath={.items[0].status.readyReplicas}")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -159,7 +159,7 @@ var _ = Describe("PostgresCluster", Ordered, Label("p1"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-n", pgClusterNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", pgClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", pgClusterName),
 				"-o", "jsonpath={.items[0].status.conditions[?(@.type=='Ready')].status}")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -172,7 +172,7 @@ var _ = Describe("PostgresCluster", Ordered, Label("p1"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-n", pgClusterNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", pgClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", pgClusterName),
 				"-o", fmt.Sprintf("jsonpath={.items[0].metadata.annotations.%s}",
 					// jsonpath 는 dot 을 escape 해야 함.
 					strings.ReplaceAll(pgInstanceStatusAnno, ".", `\.`)))
@@ -219,7 +219,7 @@ var _ = Describe("PostgresCluster", Ordered, Label("p1"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-n", pgClusterNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", pgClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", pgClusterName),
 				"-o", "jsonpath={.items[0].metadata.name}")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

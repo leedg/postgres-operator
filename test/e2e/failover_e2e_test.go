@@ -113,7 +113,7 @@ var _ = Describe("Failover", Ordered, Label("p2"), func() {
 		Eventually(func(g Gomega) {
 			cmd := exec.Command("kubectl", "get", "pods",
 				"-n", failoverNamespace,
-				"-l", fmt.Sprintf("postgres.keiailab.io/cluster=%s", failoverClusterName),
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", failoverClusterName),
 				"-o", "jsonpath={range .items[*]}{.metadata.name}={.status.conditions[?(@.type=='Ready')].status};{end}")
 			out, err := utils.Run(cmd)
 			g.Expect(err).NotTo(HaveOccurred())

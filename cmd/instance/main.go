@@ -221,18 +221,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		// election 부트스트랩 중에는 503, leader/follower 결정 후에는 200.
-		// (P12 라우터 사이드카는 별도로 router_metadata_lag_seconds 임계 검사)
-		switch elect.Status() {
-		case election.StatusStarting:
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = fmt.Fprintf(w, "starting election\n")
-		default:
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, "%s\n", elect.Status())
-		}
-	})
+	mux.HandleFunc("/readyz", makeReadyzHandler(elect, sup))
 
 	srv := &http.Server{
 		Addr:              probeAddr,
@@ -298,6 +287,34 @@ func main() {
 	}
 	gracefulStopSupervisor(sup, logger)
 	logger.Info("Instance manager exited cleanly")
+}
+
+// makeReadyzHandler 는 /readyz HTTP handler 를 생성한다.
+//
+// 두 단계 검사:
+//  1. election 부트스트랩 — Starting 이면 503 ("starting election").
+//  2. postgres round-trip — sup != nil 이고 IsReady false 면 503 ("postgres not ready").
+//
+// 둘 다 OK 일 때 200 + election Status 본문 출력.
+func makeReadyzHandler(elect election.Election, sup supervise.Supervisor) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if elect.Status() == election.StatusStarting {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, "starting election\n")
+			return
+		}
+		if sup != nil {
+			pgCtx, cancel := context.WithTimeout(req.Context(), 2*time.Second)
+			defer cancel()
+			if !sup.IsReady(pgCtx) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "postgres not ready\n")
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "%s\n", elect.Status())
+	}
 }
 
 // buildFencer 는 fencingDisabled 가 true 면 Mock fencer 를, false 면 Real fencer

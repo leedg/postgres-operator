@@ -116,9 +116,13 @@ func main() {
 	leaseName := election.PrimaryLeaseName(cluster, role, int32(shardOrdinal))
 	logger.Info("Resolved lease name", "lease", leaseName)
 
+	// dataDir — election callback 의 standby.signal lifecycle (RFC 0006 R3) 와
+	// supervise.NewReal 양쪽에서 사용. 한 번만 읽고 클로저로 캡쳐한다.
+	dataDir := envOrDie("POSTGRES_DATA_DIR")
+
 	// Supervisor — postgres 자식 fork + Promote/Stop SQL 추상.
 	// supervise-disabled 모드에서는 nil 로 두고 callback 안에서 분기.
-	sup := buildSupervisor(superviseDisabled, logger)
+	sup := buildSupervisor(superviseDisabled, dataDir, logger)
 
 	// Fencing — Null(disabled) 또는 Real. fencer는 election callback에서
 	// 호출되며 fence 위반 시 fencingErrCh로 신호를 보내 main이 exit non-zero
@@ -142,39 +146,7 @@ func main() {
 	var elect election.Election
 	cb := election.Callbacks{
 		OnStartedLeading: func(ctx context.Context) {
-			// Promote 직전 PVC fence 검사 — split-brain 보호의 단일 동기 게이트.
-			if err := fencer.VerifyNotFenced(ctx); err != nil {
-				logger.Error("PVC is fenced — refusing to promote",
-					"identity", podName, "lease", leaseName, "error", err)
-				select {
-				case fencingErrCh <- err:
-				default:
-				}
-				return
-			}
-			if sup != nil {
-				// postgres unix socket 가 listen 시작할 때까지 대기 (race 회피).
-				// 30s 타임아웃 — 정상 부팅 시간보다 충분.
-				if err := waitSupReady(ctx, sup, 30*time.Second); err != nil {
-					logger.Error("postgres readiness wait failed", "identity", podName, "error", err)
-					select {
-					case fencingErrCh <- fmt.Errorf("readiness: %w", err):
-					default:
-					}
-					return
-				}
-				if err := sup.Promote(ctx); err != nil {
-					logger.Error("Promote failed", "identity", podName, "error", err)
-					select {
-					case fencingErrCh <- fmt.Errorf("promote: %w", err):
-					default:
-					}
-					return
-				}
-			}
-			logger.Info("Leadership acquired — postgres promoted to primary",
-				"identity", podName, "lease", leaseName,
-				"todo", "분산 SQL metadata 갱신 (RFC 0002 ShardRange 후속)")
+			runOnStartedLeading(ctx, fencer, sup, dataDir, podName, leaseName, fencingErrCh, logger)
 		},
 		OnStoppedLeading: func() {
 			// 자기 PVC를 fence 처리하여 좀비 부활 시 split-brain 방지.
@@ -192,6 +164,12 @@ func main() {
 			// (SIGINT) 으로 primary 를 종료. 본 instance 는 ExitCh 가 fire 하면
 			// 통째 exit → K8s 가 Pod 재시작 → 다음 부팅 시 standby 로 진입
 			// (standby.signal 재구성 로직은 F03 후속).
+			// RFC 0006 R3: 다음 부팅 시 standby 로 진입하도록 signal 파일을
+			// 미리 생성. best-effort — 실패해도 demote 자체는 진행 (Pod 재시작 +
+			// bootstrap init container 가 보조 mechanism).
+			if err := supervise.CreateStandbySignal(dataDir); err != nil {
+				logger.Error("CreateStandbySignal failed (best-effort)", "identity", podName, "error", err)
+			}
 			if sup != nil {
 				demoteCtx, demoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer demoteCancel()
@@ -303,6 +281,67 @@ func main() {
 	}
 	gracefulStopSupervisor(sup, logger)
 	logger.Info("Instance manager exited cleanly")
+}
+
+// runOnStartedLeading 은 election leader acquisition 시 실행되는 promote 시퀀스다.
+// 단일 함수로 추출하여 main 의 cyclomatic complexity 를 30 이하로 유지한다.
+//
+// 시퀀스:
+//  1. PVC fence 검사 — fenced 면 promote 거절 + fencingErrCh 로 신호.
+//  2. postgres readiness 대기 (30s).
+//  3. standby.signal 제거 (RFC 0006 R3) — 실패 시 promote 차단.
+//  4. pg_promote() 호출.
+func runOnStartedLeading(
+	ctx context.Context,
+	fencer fencing.Fencer,
+	sup supervise.Supervisor,
+	dataDir, podName, leaseName string,
+	fencingErrCh chan<- error,
+	logger *slog.Logger,
+) {
+	if err := fencer.VerifyNotFenced(ctx); err != nil {
+		logger.Error("PVC is fenced — refusing to promote",
+			"identity", podName, "lease", leaseName, "error", err)
+		select {
+		case fencingErrCh <- err:
+		default:
+		}
+		return
+	}
+	if sup != nil {
+		// postgres unix socket 가 listen 시작할 때까지 대기 (race 회피).
+		// 30s 타임아웃 — 정상 부팅 시간보다 충분.
+		if err := waitSupReady(ctx, sup, 30*time.Second); err != nil {
+			logger.Error("postgres readiness wait failed", "identity", podName, "error", err)
+			select {
+			case fencingErrCh <- fmt.Errorf("readiness: %w", err):
+			default:
+			}
+			return
+		}
+		// RFC 0006 R3: pg_promote() 호출 전 standby.signal 정리. 실패 시
+		// promote 를 차단해야 — 파일이 남아 있는 상태로 promote 가 성공해도
+		// 다음 재시작 때 다시 standby 로 돌아가 split-role 이 발생.
+		if err := supervise.RemoveStandbySignal(dataDir); err != nil {
+			logger.Error("RemoveStandbySignal failed", "identity", podName, "error", err)
+			select {
+			case fencingErrCh <- fmt.Errorf("standby-signal cleanup: %w", err):
+			default:
+			}
+			return
+		}
+		if err := sup.Promote(ctx); err != nil {
+			logger.Error("Promote failed", "identity", podName, "error", err)
+			select {
+			case fencingErrCh <- fmt.Errorf("promote: %w", err):
+			default:
+			}
+			return
+		}
+	}
+	logger.Info("Leadership acquired — postgres promoted to primary",
+		"identity", podName, "lease", leaseName,
+		"todo", "분산 SQL metadata 갱신 (RFC 0002 ShardRange 후속)")
 }
 
 // startStatusReporterIfPossible 는 clientset 이 사용 가능하면 status reporter goroutine 을
@@ -498,14 +537,14 @@ func buildFencer(
 // buildSupervisor 는 superviseDisabled 가 false 면 supervise.NewReal 로 production
 // supervisor 를 생성, true 면 nil 을 반환한다 (callback 측에서 nil 분기).
 // 환경 변수 부재 시 envOrDie 가 즉시 종료한다.
-func buildSupervisor(superviseDisabled bool, logger *slog.Logger) supervise.Supervisor {
+func buildSupervisor(superviseDisabled bool, dataDir string, logger *slog.Logger) supervise.Supervisor {
 	if superviseDisabled {
 		logger.Warn("Supervise disabled — postgres child not forked. Use only in development.")
 		return nil
 	}
 	sup, err := supervise.NewReal(supervise.Config{
 		BinDir:     envOrDie("POSTGRES_BIN_DIR"),
-		DataDir:    envOrDie("POSTGRES_DATA_DIR"),
+		DataDir:    dataDir,
 		ConfigFile: envOrDie("POSTGRES_CONFIG_FILE"),
 		HbaFile:    envOrDie("POSTGRES_HBA_FILE"),
 		LocalDSN:   envOrDie("POSTGRES_LOCAL_DSN"),

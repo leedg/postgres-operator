@@ -30,6 +30,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -41,11 +42,14 @@ import (
 	"syscall"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/keiailab/postgres-operator/internal/instance/election"
 	"github.com/keiailab/postgres-operator/internal/instance/fencing"
+	"github.com/keiailab/postgres-operator/internal/instance/statusapi"
 	"github.com/keiailab/postgres-operator/internal/instance/supervise"
 )
 
@@ -266,6 +270,8 @@ func main() {
 	}()
 	logger.Info("Election started", "identity", elect.Identity(), "lease", leaseName)
 
+	startStatusReporterIfPossible(ctx, clientset, namespace, podName, cluster, int32(shardOrdinal), elect, sup, logger)
+
 	select {
 	case <-ctx.Done():
 		logger.Info("Received shutdown signal")
@@ -297,6 +303,117 @@ func main() {
 	}
 	gracefulStopSupervisor(sup, logger)
 	logger.Info("Instance manager exited cleanly")
+}
+
+// startStatusReporterIfPossible 는 clientset 이 사용 가능하면 status reporter goroutine 을
+// 띄운다. clientset 부재 (election+fencing 모두 disabled 인 dev 시나리오) 시 silent skip.
+func startStatusReporterIfPossible(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName, cluster string,
+	shardOrdinal int32,
+	elect election.Election,
+	sup supervise.Supervisor,
+	logger *slog.Logger,
+) {
+	if clientset == nil {
+		return
+	}
+	endpoint := fmt.Sprintf("%s.%s-shard-%d-headless.%s.svc.cluster.local:5432",
+		podName, cluster, shardOrdinal, namespace)
+	go runStatusReporter(ctx, clientset, namespace, podName, endpoint, elect, sup, logger)
+}
+
+// runStatusReporter 는 5s 주기로 Pod annotation 에 Status 를 patch 한다 (RFC 0006 R2).
+//
+// ctx 종료 시 마지막 한 번 더 RoleStopping 으로 patch 후 return — controller 가 즉시
+// "shutdown 진행 중" 상태로 인지 가능 (failover 가시성).
+//
+// patch 실패는 error 로 expose 안 함 — 일시적 API 실패가 instance 본체를 죽이면
+// 안 됨 (status reporting 은 best-effort).
+func runStatusReporter(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName, endpoint string,
+	elect election.Election,
+	sup supervise.Supervisor,
+	logger *slog.Logger,
+) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+
+	patchOnce := func(role statusapi.Role) {
+		ready := false
+		if sup != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
+			ready = sup.IsReady(probeCtx)
+			cancel()
+		} else {
+			ready = role == statusapi.RolePrimary || role == statusapi.RoleReplica
+		}
+		st := statusapi.Status{
+			Role:       role,
+			Ready:      ready,
+			Endpoint:   endpoint,
+			LagBytes:   -1, // pg_stat_replication 측정은 RFC 0006 R3 후속
+			LastUpdate: time.Now().UTC(),
+		}
+		if err := patchPodAnnotation(ctx, clientset, namespace, podName, st); err != nil {
+			logger.Warn("status reporter patch failed (best-effort)", "error", err)
+		}
+	}
+
+	// 즉시 첫 patch — Pod 부팅 직후 controller 가 Starting 인지하도록.
+	patchOnce(roleFromElection(elect.Status()))
+
+	for {
+		select {
+		case <-ctx.Done():
+			// 종료 마커 — controller 가 stale annotation 검사 시 보조.
+			finalCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			st := statusapi.Status{Role: statusapi.RoleStopping, LastUpdate: time.Now().UTC()}
+			_ = patchPodAnnotation(finalCtx, clientset, namespace, podName, st)
+			return
+		case <-tick.C:
+			patchOnce(roleFromElection(elect.Status()))
+		}
+	}
+}
+
+// roleFromElection 은 election Status 를 statusapi.Role 로 매핑한다.
+func roleFromElection(s election.Status) statusapi.Role {
+	switch s {
+	case election.StatusLeader:
+		return statusapi.RolePrimary
+	case election.StatusFollower:
+		return statusapi.RoleReplica
+	case election.StatusStarting:
+		return statusapi.RoleStarting
+	default:
+		return statusapi.RoleUnknown
+	}
+}
+
+// patchPodAnnotation 은 자기 Pod 의 annotation 에 status JSON 을 strategic merge
+// patch 로 갱신한다. RBAC 은 instance Role 의 pods/get;patch 에 의존.
+func patchPodAnnotation(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName string,
+	st statusapi.Status,
+) error {
+	body, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	// strategic merge patch 의 metadata.annotations 합성 — 기존 다른 annotation 보존.
+	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`,
+		statusapi.AnnotationKey, string(body))
+	_, err = clientset.CoreV1().Pods(namespace).Patch(
+		ctx, podName, types.StrategicMergePatchType, patch, metav1.PatchOptions{},
+	)
+	return err
 }
 
 // waitSupReady 는 sup.IsReady 가 true 일 때까지 polling 한다 (500ms interval).

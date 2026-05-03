@@ -319,6 +319,13 @@ func buildInstanceRole(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.Role {
 				Resources: []string{"events"},
 				Verbs:     []string{"create", "patch"},
 			},
+			// RFC 0006 R2 — instance manager 가 자기 Pod annotation 에
+			// statusapi.Status 를 patch (status feedback channel).
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"get", "patch"},
+			},
 		},
 	}
 }

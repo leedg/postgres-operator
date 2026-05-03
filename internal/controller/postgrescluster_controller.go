@@ -62,6 +62,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=statefulsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
@@ -154,15 +155,18 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if !primaryReady {
 			allShardPrimaryReady = false
 		}
-		shardStatuses = append(shardStatuses, postgresv1alpha1.ShardStatus{
-			Name:    fmt.Sprintf("shard-%d", ord),
-			Ordinal: ord,
-			Primary: &postgresv1alpha1.ShardEndpoint{
+		// RFC 0006 R2 — Pod annotation 기반 live aggregation. 우선 시도 후
+		// 결과가 비면 STS readyReplicas 기반 fallback (annotation 부재 시).
+		shardStat := aggregateShardStatus(ctx, r.Client, &cluster, ord, svcName)
+		if shardStat.Primary == nil || shardStat.Primary.Pod == "" {
+			// fallback — STS-time 근사값 (annotation 미수집 / Pod 부팅 전 일시).
+			shardStat.Primary = &postgresv1alpha1.ShardEndpoint{
 				Pod:      fmt.Sprintf("%s-0", stsName),
 				Endpoint: fmt.Sprintf("%s-0.%s.%s.svc.cluster.local:%d", stsName, svcName, cluster.Namespace, pgPort),
 				Ready:    primaryReady,
-			},
-		})
+			}
+		}
+		shardStatuses = append(shardStatuses, shardStat)
 	}
 
 	// 2. router 자원 3종 — shardingMode=native && Router.Enabled 일 때만.

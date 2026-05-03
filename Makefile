@@ -247,6 +247,19 @@ docker-build: ## Build docker image with the manager.
 docker-push: ## Push docker image with the manager.
 	$(CONTAINER_TOOL) push ${IMG}
 
+# PG runtime image (instance manager + postgres). PG_MAJOR 는 image tag 와 동일.
+# 빌드: make docker-build-pg PG_MAJOR=18 PG_IMG=ghcr.io/keiailab/pg:18
+PG_MAJOR ?= 18
+PG_IMG ?= ghcr.io/keiailab/pg:$(PG_MAJOR)
+
+.PHONY: docker-build-pg
+docker-build-pg: ## Build PG runtime image (instance manager + postgres).
+	$(CONTAINER_TOOL) build -f Dockerfile.pg --build-arg PG_MAJOR=$(PG_MAJOR) -t $(PG_IMG) .
+
+.PHONY: docker-push-pg
+docker-push-pg: ## Push PG runtime image.
+	$(CONTAINER_TOOL) push $(PG_IMG)
+
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
 # - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/

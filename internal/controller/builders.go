@@ -360,8 +360,14 @@ func buildInstanceRoleBinding(cluster *postgresv1alpha1.PostgresCluster) *rbacv1
 //
 // 결정 흐름:
 //   - PG_VERSION 존재 → skip (재실행 안전)
-//   - SHARD_ORDINAL=0 또는 PRIMARY_ENDPOINT 빈 값 → initdb
+//   - POD_ORDINAL=0 또는 PRIMARY_ENDPOINT 빈 값 → initdb
 //   - 그 외 → pg_basebackup + standby.signal + primary_conninfo (postgresql.auto.conf)
+//
+// 분기 키는 *Pod ordinal* (StatefulSet 안에서 Pod 마다 다른 값) 이다. SHARD_ORDINAL
+// 은 한 shard 의 모든 Pod 가 동일 PodTemplateSpec 을 공유하므로 같은 값을 받아
+// pod 별 분기에 사용 불가 — RFC 0005 multi-shard 에서 lease 명명 등 다른 용도로
+// 보존만 한다. POD_NAME 은 downward API (metadata.name) 로 주입되며 StatefulSet
+// 의 ordinal-stable 명명 규약 (`<sts>-<ordinal>`) 에 따라 마지막 `-` 뒤가 ordinal.
 //
 // standby.signal 은 instance manager 가 leader election 결과에 따라 OnStartedLeading
 // 에서 제거하고 OnStoppedLeading 에서 재생성한다 (RFC 0006 R3 Task A).
@@ -370,14 +376,17 @@ func buildBootstrapContainer(image, pgMajor string, shardOrdinal int32, primaryE
 	script := `set -eu
 DATA="` + pgDataSubdir + `"
 PRIMARY_ENDPOINT="${PRIMARY_ENDPOINT:-}"
-SHARD_ORDINAL="${SHARD_ORDINAL:-0}"
+POD_ORDINAL="${POD_NAME##*-}"
 
 if [ -f "$DATA/PG_VERSION" ]; then
   echo "PGDATA already initialized at $DATA — skipping bootstrap"
   exit 0
 fi
 
-if [ "$SHARD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]; then
+# pod ordinal 0 = primary slot (initdb on first cluster boot, primary thereafter via election).
+# pod ordinal != 0 = standby slot (basebackup from current primary if available).
+# PRIMARY_ENDPOINT empty = no live primary observed yet → fallback to initdb (cold-start of cluster).
+if [ "$POD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]; then
   mkdir -p "$DATA"
   chmod 0700 "$DATA"
   ` + binDir + `/initdb -D "$DATA" --auth-local=trust --auth-host=scram-sha-256 --username=postgres --encoding=UTF8 --locale=C
@@ -401,6 +410,12 @@ fi
 		Env: []corev1.EnvVar{
 			{Name: "SHARD_ORDINAL", Value: fmt.Sprintf("%d", shardOrdinal)},
 			{Name: "PRIMARY_ENDPOINT", Value: primaryEndpoint},
+			{
+				Name: "POD_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+				},
+			},
 		},
 		SecurityContext: dataplaneContainerSecurityContext(),
 		VolumeMounts: append([]corev1.VolumeMount{

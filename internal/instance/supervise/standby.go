@@ -24,6 +24,12 @@ You may obtain a copy of the License at
 //
 // postgres 의존이 없는 순수 file ops 함수만 두어 테스트 격리가 용이하도록 설계
 // — supervise.go / sql.go 와 분리한 이유.
+//
+// 알려진 알파 한계 (RFC 0007 후속): instance manager 가 panic / SIGKILL 으로
+// 종료되어 OnStoppedLeading 이 실행되지 않으면 standby.signal 이 남지 않아 다음
+// 부팅 시 옛 leader 가 primary 로 부팅 가능. PVC fence 가 promote 측에서 검사하므로
+// 데이터 분기는 회피되나, 일시적 ambiguity 가 있다. 후속: bootstrap 이 PG_VERSION
+// 존재 + clear-primary marker 부재 시 standby.signal 자동 생성.
 package supervise
 
 import (

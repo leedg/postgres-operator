@@ -227,6 +227,7 @@ var _ = Describe("Failover", Ordered, Label("p2"), func() {
 		}, 1*time.Minute, 2*time.Second).Should(Succeed())
 
 		_, _ = fmt.Fprintf(GinkgoWriter, "[failover] killing primary %s\n", oldPrimary)
+		// t0 = "operator/사용자가 kill 명령 발행한 시점" 기준 RTO. apiserver round-trip 포함.
 		t0 := time.Now()
 
 		// (2) primary force delete (grace 0).

@@ -210,27 +210,43 @@ func TestBuildBootstrapContainer_OrdinalZero_RunsInitdb(t *testing.T) {
 	if !strings.Contains(script, "initdb") {
 		t.Error("script must contain initdb")
 	}
+	// POD_ORDINAL 은 downward API 로 주입된 POD_NAME 의 마지막 `-` 뒤를 추출.
+	// StatefulSet 명명 규약 (`<sts>-<ordinal>`) 에 의존.
+	if !strings.Contains(script, `POD_ORDINAL="${POD_NAME##*-}"`) {
+		t.Error(`script must contain POD_ORDINAL extraction: POD_ORDINAL="${POD_NAME##*-}"`)
+	}
 	// 연산자 반전 가드: bash 분기 조건의 `||` 연산자가 `&&` 등으로 뒤집히면
 	// ENV 기반 검증만으로는 잡히지 않으므로 리터럴 substring 으로 고정한다.
-	const wantBranchOperator = `[ "$SHARD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]`
+	// POD_ORDINAL 키잉 (SHARD_ORDINAL 아님) — 같은 shard 의 pod 별 분기 보장.
+	const wantBranchOperator = `[ "$POD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]`
 	if !strings.Contains(script, wantBranchOperator) {
 		t.Errorf("script must contain branch operator %q (operator inversion guard)", wantBranchOperator)
 	}
-	// NOTE: 단일 bash 스크립트에 양쪽 분기가 모두 들어 있으므로 "pg_basebackup
-	// 미포함" 검사는 무의미. 대신 ENV (SHARD_ORDINAL=0, PRIMARY_ENDPOINT="") 가
-	// 런타임에 initdb path 를 강제하는지로 검증한다.
-	envByName := map[string]string{}
+	envByName := map[string]corev1.EnvVar{}
 	for _, e := range c.Env {
-		envByName[e.Name] = e.Value
+		envByName[e.Name] = e
 	}
-	if got := envByName["SHARD_ORDINAL"]; got != "0" {
+	if got := envByName["SHARD_ORDINAL"].Value; got != "0" {
 		t.Errorf("SHARD_ORDINAL env = %q, want 0", got)
 	}
-	if got := envByName["PRIMARY_ENDPOINT"]; got != "" {
+	if got := envByName["PRIMARY_ENDPOINT"].Value; got != "" {
 		t.Errorf("PRIMARY_ENDPOINT env = %q, want empty", got)
+	}
+	// POD_NAME 은 downward API (metadata.name) — Value 는 비어 있고 ValueFrom 만 설정.
+	pn, ok := envByName["POD_NAME"]
+	if !ok {
+		t.Fatal("POD_NAME env missing — downward API 미주입")
+	}
+	if pn.ValueFrom == nil || pn.ValueFrom.FieldRef == nil ||
+		pn.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+		t.Errorf("POD_NAME must use ValueFrom.FieldRef{FieldPath: \"metadata.name\"}, got %+v", pn.ValueFrom)
 	}
 }
 
+// NOTE: 본 테스트는 buildBootstrapContainer 를 shardOrdinal=1 로 호출하지만,
+// 실제 런타임 분기는 *POD_ORDINAL* (downward API 로 Pod 마다 다른 값) 으로
+// 결정된다. 단위 테스트는 downward API 를 시뮬레이트할 수 없으므로 *script
+// wiring + env injection* 만 검증하고, 분기 결과는 e2e 에서 검증한다.
 func TestBuildBootstrapContainer_NonZero_RunsBasebackup(t *testing.T) {
 	t.Parallel()
 
@@ -244,15 +260,30 @@ func TestBuildBootstrapContainer_NonZero_RunsBasebackup(t *testing.T) {
 			t.Errorf("script missing %q", want)
 		}
 	}
-	envByName := map[string]string{}
-	for _, e := range c.Env {
-		envByName[e.Name] = e.Value
+	if !strings.Contains(script, `POD_ORDINAL="${POD_NAME##*-}"`) {
+		t.Error(`script must contain POD_ORDINAL extraction: POD_ORDINAL="${POD_NAME##*-}"`)
 	}
-	if got := envByName["SHARD_ORDINAL"]; got != "1" {
+	const wantBranchOperator = `[ "$POD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]`
+	if !strings.Contains(script, wantBranchOperator) {
+		t.Errorf("script must contain branch operator %q (operator inversion guard)", wantBranchOperator)
+	}
+	envByName := map[string]corev1.EnvVar{}
+	for _, e := range c.Env {
+		envByName[e.Name] = e
+	}
+	if got := envByName["SHARD_ORDINAL"].Value; got != "1" {
 		t.Errorf("SHARD_ORDINAL env = %q, want 1", got)
 	}
-	if got := envByName["PRIMARY_ENDPOINT"]; got != "primary.svc:5432" {
+	if got := envByName["PRIMARY_ENDPOINT"].Value; got != "primary.svc:5432" {
 		t.Errorf("PRIMARY_ENDPOINT env = %q, want primary.svc:5432", got)
+	}
+	pn, ok := envByName["POD_NAME"]
+	if !ok {
+		t.Fatal("POD_NAME env missing — downward API 미주입")
+	}
+	if pn.ValueFrom == nil || pn.ValueFrom.FieldRef == nil ||
+		pn.ValueFrom.FieldRef.FieldPath != "metadata.name" {
+		t.Errorf("POD_NAME must use ValueFrom.FieldRef{FieldPath: \"metadata.name\"}, got %+v", pn.ValueFrom)
 	}
 }
 

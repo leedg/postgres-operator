@@ -313,3 +313,111 @@ func assertDataplaneSecurityContext(t *testing.T, podSpec *corev1.PodSpec, label
 		}
 	}
 }
+
+// TestBuildPGStatefulSet_ReadinessProbe_FastInitialDelay 는 readinessProbe 가
+// 빠른 Pod Ready 전환을 위해 initialDelaySeconds=5 + periodSeconds=3 으로
+// 설정되어 있는지 검증한다. instance manager 의 waitSupReady 가 postgres unix
+// socket race 를 코드 레벨에서 처리하므로 probe 가 race 회피를 중복할 필요 없다.
+// LivenessProbe 는 보수적 (initialDelaySeconds=60, PeriodSeconds=30) 유지.
+func TestBuildPGStatefulSet_ReadinessProbe_FastInitialDelay(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+	}
+	sts := buildPGStatefulSet(
+		cluster,
+		"demo-shard-0", "demo-shard-0-headless",
+		0,
+		"example.com/postgres:18", "demo-shard-0-config", "18",
+		1,
+		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+		corev1.ResourceRequirements{},
+	)
+	if got := len(sts.Spec.Template.Spec.Containers); got != 1 {
+		t.Fatalf("containers count = %d, want 1", got)
+	}
+	rp := sts.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if rp == nil {
+		t.Fatal("ReadinessProbe is nil")
+	}
+	if got := rp.InitialDelaySeconds; got != 5 {
+		t.Errorf("ReadinessProbe.InitialDelaySeconds = %d, want 5", got)
+	}
+	if got := rp.PeriodSeconds; got != 3 {
+		t.Errorf("ReadinessProbe.PeriodSeconds = %d, want 3", got)
+	}
+	// LivenessProbe 는 보수적 유지 — false positive 가 Pod restart 유발하므로.
+	lp := sts.Spec.Template.Spec.Containers[0].LivenessProbe
+	if lp == nil {
+		t.Fatal("LivenessProbe is nil")
+	}
+	if got := lp.InitialDelaySeconds; got != 60 {
+		t.Errorf("LivenessProbe.InitialDelaySeconds = %d, want 60 (보수적 유지)", got)
+	}
+	if got := lp.PeriodSeconds; got != 30 {
+		t.Errorf("LivenessProbe.PeriodSeconds = %d, want 30 (보수적 유지)", got)
+	}
+}
+
+// TestBuildPGStatefulSet_DefaultResources_BurstableQoS 는 사용자 spec.shards.resources
+// 가 비어있을 때 기본 requests (CPU 100m, Memory 256Mi) 가 적용되어 Burstable QoS
+// 가 보장되는지 검증한다. BestEffort 는 kube-scheduler eviction 1순위 — production 위험.
+func TestBuildPGStatefulSet_DefaultResources_BurstableQoS(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+	}
+	sts := buildPGStatefulSet(
+		cluster,
+		"demo-shard-0", "demo-shard-0-headless",
+		0,
+		"example.com/postgres:18", "demo-shard-0-config", "18",
+		1,
+		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+		corev1.ResourceRequirements{}, // empty — default 적용 기대
+	)
+	if got := len(sts.Spec.Template.Spec.Containers); got != 1 {
+		t.Fatalf("containers count = %d, want 1", got)
+	}
+	res := sts.Spec.Template.Spec.Containers[0].Resources
+	cpu, ok := res.Requests[corev1.ResourceCPU]
+	if !ok {
+		t.Fatal("Resources.Requests[CPU] missing — Burstable QoS 보장 실패")
+	}
+	if want := resource.MustParse("100m"); cpu.Cmp(want) != 0 {
+		t.Errorf("Resources.Requests[CPU] = %s, want 100m", cpu.String())
+	}
+	mem, ok := res.Requests[corev1.ResourceMemory]
+	if !ok {
+		t.Fatal("Resources.Requests[Memory] missing — Burstable QoS 보장 실패")
+	}
+	if want := resource.MustParse("256Mi"); mem.Cmp(want) != 0 {
+		t.Errorf("Resources.Requests[Memory] = %s, want 256Mi", mem.String())
+	}
+	// Limits 는 미설정 (Burstable). 사용자가 명시 시만 limit 적용.
+	if len(res.Limits) != 0 {
+		t.Errorf("Resources.Limits = %v, want empty (Burstable)", res.Limits)
+	}
+
+	// 사용자 명시 시 default override 안 되는지 확인.
+	customRes := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse("500m"),
+		},
+	}
+	sts2 := buildPGStatefulSet(
+		cluster,
+		"demo-shard-0", "demo-shard-0-headless",
+		0,
+		"example.com/postgres:18", "demo-shard-0-config", "18",
+		1,
+		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+		customRes,
+	)
+	gotCPU := sts2.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if want := resource.MustParse("500m"); gotCPU.Cmp(want) != 0 {
+		t.Errorf("user-specified resources overridden: CPU = %s, want 500m", gotCPU.String())
+	}
+}

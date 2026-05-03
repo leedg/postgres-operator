@@ -17,6 +17,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -427,6 +428,18 @@ func buildPGStatefulSet(
 ) *appsv1.StatefulSet {
 	labels := SelectorLabels(cluster.Name, "shard", shardOrdinal)
 
+	// QoS 기본값 — 사용자 spec.shards.resources 미지정 시 Burstable QoS 보장.
+	// BestEffort 는 kube-scheduler eviction 1순위 — production 위험.
+	// Limits 는 미설정 (Burstable). 사용자가 명시 시만 limit 적용.
+	if len(resources.Requests) == 0 && len(resources.Limits) == 0 {
+		resources = corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("256Mi"),
+			},
+		}
+	}
+
 	pvcAccessModes := storage.AccessModes
 	if len(pvcAccessModes) == 0 {
 		pvcAccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
@@ -469,7 +482,10 @@ func buildPGStatefulSet(
 							{Name: "probe", ContainerPort: instanceProbePort, Protocol: corev1.ProtocolTCP},
 						},
 						// readiness: instance manager 의 /readyz 가 election Status 반영.
-						// initialDelaySeconds 30 — initdb + postgres 부팅 + election 부트스트랩 여유.
+						// initialDelaySeconds 5 — instance manager 의 waitSupReady 가 postgres
+						// unix socket race 를 코드 레벨에서 처리 (RFC 0006 R3 prep) 하므로
+						// probe 가 race 회피 임무를 중복 수행할 필요 없음. periodSeconds 3 으로
+						// 첫 successful probe → Ready 전환 가속 (Pod Ready < 60s 목표).
 						ReadinessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{
@@ -477,8 +493,8 @@ func buildPGStatefulSet(
 									Port: intstr.FromInt32(instanceProbePort),
 								},
 							},
-							InitialDelaySeconds: 30,
-							PeriodSeconds:       10,
+							InitialDelaySeconds: 5,
+							PeriodSeconds:       3,
 							TimeoutSeconds:      3,
 							FailureThreshold:    3,
 						},

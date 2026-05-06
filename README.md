@@ -3,9 +3,12 @@
 > **K8s-native auto-sharding PostgreSQL operator** — vanilla PG18+, license-clean (Apache-2.0), zero AGPL/BUSL/CSL/SSPL dependency.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-0.3.0--alpha-orange)]()
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18%2B-blue)]()
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.28%2B-blue)]()
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://golang.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18%2B-336791?logo=postgresql)](https://www.postgresql.org/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes)](https://kubernetes.io/)
+[![Container Image](https://img.shields.io/badge/ghcr.io-keiailab%2Fpostgres--operator-blue?logo=github)](https://github.com/keiailab/postgres-operator/pkgs/container/postgres-operator)
+[![Helm Chart](https://img.shields.io/badge/dynamic/yaml?url=https://raw.githubusercontent.com/keiailab/postgres-operator/main/charts/postgresql-operator/Chart.yaml&label=helm%20v)](https://keiailab.github.io/postgres-operator)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/postgresql-operator)](https://artifacthub.io/packages/helm/postgresql-operator/postgresql-operator)
 
 ---
 

@@ -15,7 +15,8 @@ v1.0.0 GA 이후에는 LTS 정책을 별도 공지합니다.
 **공개 이슈로 보안 취약점을 보고하지 마세요.** 비공개 채널로 신고해주세요:
 
 - 이메일: `security@keiailab.io`
-- PGP 키: (TODO: 키 게시 후 fingerprint 명시)
+- PGP 키 fingerprint: `89A4 0947 6828 CB99 2338  C378 651E 51AF 520B CB78`
+  (keiailab Helm chart signing key, gh-pages `artifacthub-repo.yml` 동일).
 
 ## 응답 절차
 

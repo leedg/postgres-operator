@@ -195,10 +195,11 @@ release-preflight: require-version gate ## push 없이 릴리스 메타데이터
 release: require-version ## 전체 로컬 릴리스 파이프라인. VERSION=vX.Y.Z 필수.
 	$(MAKE) release-preflight VERSION="$(VERSION)"
 	@TARGET_VER=$$(echo "$(VERSION)" | sed 's/^v//'); \
-	echo "=== image build/push: $(IMAGE_REPOSITORY):$(VERSION), $(IMAGE_REPOSITORY):$$TARGET_VER ==="; \
-	$(CONTAINER_TOOL) build -t "$(IMAGE_REPOSITORY):$(VERSION)" -t "$(IMAGE_REPOSITORY):$$TARGET_VER" .; \
-	$(CONTAINER_TOOL) push "$(IMAGE_REPOSITORY):$(VERSION)"; \
-	$(CONTAINER_TOOL) push "$(IMAGE_REPOSITORY):$$TARGET_VER"
+	echo "=== image build/push (linux/amd64, default builder): $(IMAGE_REPOSITORY):$(VERSION), $(IMAGE_REPOSITORY):$$TARGET_VER ==="; \
+	docker --context=default buildx build --platform linux/amd64 \
+		-t "$(IMAGE_REPOSITORY):$(VERSION)" \
+		-t "$(IMAGE_REPOSITORY):$$TARGET_VER" \
+		--push .
 	git tag -a "$(VERSION)" -m "$(VERSION)"
 	git push origin "$(VERSION)"
 	@PREFLAG=""; case "$(VERSION)" in *alpha*|*beta*|*rc*) PREFLAG="--prerelease";; esac; \

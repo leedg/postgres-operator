@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.1] - 2026-05-06
+
+### Changed
+
+- Chart.yaml `version` + `appVersion` 0.3.0-alpha → 0.3.0-alpha.1 (iterative
+  pre-release 표기, mongodb-operator beta.N + valkey-operator alpha.N 패턴 정합).
+- `config/manager/kustomization.yaml` 의 `newTag` 도 동일 동기.
+- `dist/install.yaml` 재생성 (`make build-installer`) — image tag 0.3.0-alpha.1.
+
+### Fixed
+
+- `release` 타겟의 image build/push 를 `docker buildx build --platform
+  linux/amd64 --push` 로 통합 (글로벌 §2 강제 — default builder 명시).
+  단일 호출로 build + push 원자화 (`$(CONTAINER_TOOL) build` 분리 호출 제거).
+
 ### Changed (BREAKING)
 
 - **PostgresCluster CRD schema 재정의 (RFC 0001 v2 — F01a)**: `spec.coordinator` / `spec.workers[]` / `spec.routers` / `spec.extensions` / `spec.sharding.backend` / `spec.deployment` 모두 폐기. 새 6-필드 구조 (`postgresVersion` / `shardingMode` / `shards` / `router` / `autoSplit` / `backup` / `monitoring`) 로 교체. status 도 `topology` / `channel` 폐기, `phase` / `shards[]` / `router` 신설. v0.x manifest 는 호환되지 않음 (alpha 채널 정책).

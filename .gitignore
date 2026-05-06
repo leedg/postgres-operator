@@ -30,3 +30,9 @@ go.work
 *.kubeconfig
 /instance
 /cmd/instance/instance
+
+# kubebuilder make build-installer 산출물 (release artifact, repo 추적 대상 아님)
+dist/
+
+# Ralph loop state (local-only, 3-repo 정합)
+.claude/ralph-loop.local.md

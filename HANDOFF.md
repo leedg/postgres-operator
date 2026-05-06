@@ -25,6 +25,26 @@
   | Makefile 게이트 | ✓ | ✓ | ✓ | RFC 0002 L3 |
 - **다음 단계 (열린 트랙)**: F02 cycle 5 후속 (kind smoke — `hack/smoke.sh`), F02-residual (Pod env 주입 / readiness HTTP), mongodb golangci-lint 도입 (현재 staticcheck-only).
 
+## Quality baseline (2026-05-07 실측)
+
+`enforcement.md §3.4 (Coverage 합산)` 의 P2 측정 — 본 세션 baseline.
+
+```
+$ make test    # exit 0 / FAIL: 0
+internal/plugin/sharding         coverage: 100.0% of statements
+internal/webhook/v1alpha1        coverage:  88.5% of statements
+internal/version                 coverage:  73.3% of statements
+internal/plugin/extension/*      coverage:   0.0% of statements (no test files — 6 pkg)
+test/utils                       coverage:   0.0% of statements
+```
+
+**80% 목표** 대비:
+- ✓ sharding 100% / webhook 88.5% — 안정 영역
+- △ version 73.3% — 근접
+- ✗ plugin/extension/{pgaudit,pgcron,pgnodemx,pgvector,postgis,setuser} 6 pkg 0% — *최대 gap*. 강화 우선 후속 트랙.
+
+`enforcement` 의 "절대치보다 *변경된 코드의 커버 여부*가 우선" 원칙 적용 — 본 baseline 은 회귀 비교 기준점.
+
 ## 이전 상태 (2026-05-06, release pipeline 강화 — 3-repo 정합)
 
 - **HEAD `c6aec64`**: `chore(release): smoke-test SBOM+trivy 검증 강화 + step 번호 정합 + .gitignore (dist/ + .claude/)`

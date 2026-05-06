@@ -2,11 +2,28 @@
 
 > 다음 세션이 *컨버세이션 컨텍스트 없이* 재개 가능해야 한다. 시작 의식: 본 파일 → `TASKS.md` → 마지막 commit log 순서로 읽는다.
 
-## 현재 상태 (2026-05-06, T16 GitOps deploy 정합)
+## 현재 상태 (2026-05-06, release pipeline 강화 — 3-repo 정합)
 
-- **T16 완료**: mongodb-operator 패턴 따라 `deploy/overlays/prod/` + `deploy/postgres-cluster.yaml` + `deploy/README.md` 추가. ADR-0006 작성. CHANGELOG [Unreleased] 갱신. `kustomize build deploy/overlays/prod` PASS (Namespace 0). 미커밋 상태.
+- **HEAD `c6aec64`**: `chore(release): smoke-test SBOM+trivy 검증 강화 + step 번호 정합 + .gitignore (dist/ + .claude/)`
+- **이번 세션 작업 (3-repo 정합)**:
+  - SBOM (SPDX `.spdx.json`) asset 검증 step 추가 — supply chain 표준
+  - trivy image post-publish HIGH/CRITICAL fixed-only scan 추가 (`--ignore-unfixed --exit-code 1`) — 운영 후 CVE 모니터링
+  - smoke-test step 번호 [N/5] → [N/6] 정합 (재번호 누락 버그 수정)
+  - .gitignore: `dist/` (kubebuilder build-installer 산출물) + `.claude/ralph-loop.local.md`
+- **검증 인용 (mongodb 동일 변경 실측)**:
+  ```
+  $ ./scripts/release-smoke-test.sh
+  ▸ [1/6] GH Release tag + assets   → SBOM (SPDX) asset 첨부 ✓
+  ▸ [6/6] trivy image post-publish scan → 0 HIGH+CRITICAL ✓
+  RESULT: 12 PASS / 0 FAIL (v1.4.5)
+  ```
+  postgres v0.3.0-alpha.1 release 에 SBOM asset (postgresql-operator-v0.3.0-alpha.1.spdx.json) 존재 사전 확인.
+- **다음 단계 (열린 트랙)**: F02 cycle 5 후속 (kind smoke 실측 — `hack/smoke.sh`), F02-residual (Pod env 주입 / readiness HTTP endpoint).
+
+## 이전 상태 (2026-05-06, T16 GitOps deploy 정합 — *완료, PR #17 머지*)
+
+- **T16 머지됨** (`fix(deploy): namespace prod/db → data 통합 + storageClass ceph-rbd 정합 (ADR-0006) (#17)`).
 - **결정 기록**: patch target name 은 `system` (config/manager 직접 import → namePrefix 미적용). mongodb-operator 의 `system → mongodb-operator-system` 수동 수정 방식은 kubebuilder regenerate 호환성 저하로 거절.
-- **다음 단계**: 본 변경 commit (`feat(deploy): GitOps overlay + ADR-0006 (3-repo 정합)`) 후 push. F02 cycle 5 후속 (kind smoke 실측) 은 별개 트랙.
 
 ## 현재 상태 (2026-05-03)
 

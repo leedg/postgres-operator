@@ -4,8 +4,14 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.2] - 2026-05-07
+
 ### Added
 
+- `hack/smoke.sh` PG17/PG18 matrix override (`PG_MAJOR`, `POSTGRES_VERSION`,
+  `SHARD_REPLICAS`) 와 HA WAL streaming gate.
+- PG18 failover smoke gate: primary Pod delete 후 standby promote RTO 측정,
+  CR status primary 수렴, restarted old primary standby 재진입 검증.
 - `deploy/overlays/prod/` GitOps 진입점 — kubebuilder `config/{crd,rbac,manager}` 를
   prod namespace 로 정렬 + 자동 생성 Namespace 리소스 제거. ArgoCD 단방향 동기 전제.
 - `deploy/postgres-cluster.yaml` — production PostgresCluster CR sample (db ns,
@@ -13,6 +19,14 @@
 - `deploy/README.md` — 운영 런북 (사전 조건, 적용, 롤백 절차).
 - ADR-0006 — GitOps deploy 오버레이 도입 결정 (mongodb-operator / valkey-operator 와
   3-repo 구조 정합).
+
+### Fixed
+
+- election identity 를 `podName/podUID` 로 전환하여 같은 StatefulSet ordinal 이
+  재생성될 때 이전 primary lease 를 즉시 재점유하지 못하게 했다.
+- restarted ordinal-0 primary 의 `standby.signal` / `primary_conninfo` 재구성,
+  `ReleaseOnCancel=false`, status polling 을 추가해 PG18 failover smoke 에서
+  RTO 21s(<30s)를 확인했다.
 
 ## [0.3.0-alpha.1] - 2026-05-06
 

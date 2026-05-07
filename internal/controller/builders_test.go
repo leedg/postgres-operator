@@ -250,6 +250,25 @@ func TestBuildBootstrapContainer_OrdinalZero_RunsInitdb(t *testing.T) {
 	}
 }
 
+func TestBuildBootstrapContainer_ExistingPGDATA_NormalizesPermissions(t *testing.T) {
+	t.Parallel()
+
+	c := buildBootstrapContainer("img:18", "18", 0, "", 1)
+	if len(c.Args) != 1 {
+		t.Fatalf("Args length = %d, want 1", len(c.Args))
+	}
+	script := c.Args[0]
+
+	const existingPGDataBranch = `if [ -f "$DATA/PG_VERSION" ]; then
+  chmod 0700 "$DATA"`
+	if !strings.Contains(script, existingPGDataBranch) {
+		t.Errorf("existing PGDATA branch must normalize permissions with %q", existingPGDataBranch)
+	}
+	if !strings.Contains(script, "permissions normalized; skipping bootstrap") {
+		t.Error("existing PGDATA branch must log permission normalization")
+	}
+}
+
 // NOTE: 본 테스트는 buildBootstrapContainer 를 shardOrdinal=1 로 호출하지만,
 // 실제 런타임 분기는 *POD_ORDINAL* (downward API 로 Pod 마다 다른 값) 으로
 // 결정된다. 단위 테스트는 downward API 를 시뮬레이트할 수 없으므로 *script

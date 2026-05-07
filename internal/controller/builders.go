@@ -382,11 +382,12 @@ POD_ORDINAL="${POD_NAME##*-}"
 MEMBER_COUNT="${POSTGRES_MEMBER_COUNT:-1}"
 
 if [ -f "$DATA/PG_VERSION" ]; then
+  chmod 0700 "$DATA"
   if [ "$POD_ORDINAL" = "0" ] && [ "$MEMBER_COUNT" -gt 1 ] && [ ! -f "$DATA/standby.signal" ]; then
     touch "$DATA/` + restartPrimaryAsStandbyMarker + `"
     echo "existing ordinal-0 PGDATA in HA cluster; marking for standby restart"
   fi
-  echo "PGDATA already initialized at $DATA — skipping bootstrap"
+  echo "PGDATA already initialized at $DATA; permissions normalized; skipping bootstrap"
   exit 0
 fi
 

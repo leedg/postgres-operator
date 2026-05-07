@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.3] - 2026-05-07
+
+### Fixed
+
+- 기존 PGDATA 를 가진 Postgres Pod 재시작 시 kubelet `fsGroup` 적용 뒤에도
+  bootstrap init container 가 `chmod 0700 "$PGDATA"` 를 다시 수행하도록 수정했다.
+  이 회귀는 `data/argos-postgres-shard-0-0` 재생성 중 PostgreSQL 의
+  `invalid permissions` 종료로 실측됐다.
+
 ## [0.3.0-alpha.2] - 2026-05-07
 
 ### Added

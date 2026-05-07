@@ -115,3 +115,48 @@ fi
 log "SUCCESS — quickstart cluster Ready, psql SELECT 1 = 1"
 log "Cluster status:"
 kubectl -n "$NS" get postgrescluster "$CR_NAME" -o yaml | tail -40
+
+# 7. WAL lag 측정 (F02 100% 게이트, ADR-0056 Phase A1)
+#    standby 가 *진짜로 replay* 하는지 + 부하 대비 lag 측정.
+#    REPLICAS=1 일 때 standby 부재 → 측정 skip.
+log "[7/8] WAL replication lag measurement"
+REPLICAS=$(kubectl -n "$NS" get sts "$STS_NAME" -o jsonpath='{.spec.replicas}')
+if [[ "${REPLICAS:-1}" -ge 2 ]]; then
+    # primary 에서 pgbench init + 부하 (10 client × 100 txn)
+    log "  pgbench init + 부하 (10 client × 100 txn)"
+    kubectl -n "$NS" exec "$POD" -c postgres -- bash -c \
+        "pgbench -h /var/run/postgresql -U postgres -i -s 1 postgres 2>&1 | tail -3" || true
+    kubectl -n "$NS" exec "$POD" -c postgres -- bash -c \
+        "pgbench -h /var/run/postgresql -U postgres -c 10 -t 100 postgres 2>&1 | tail -2" || true
+    # primary 의 pg_stat_replication 으로 standby 의 replay_lag 조회
+    log "  pg_stat_replication.replay_lag (target: < 1s)"
+    kubectl -n "$NS" exec "$POD" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres -At \
+        -c "SELECT application_name, state, write_lag, flush_lag, replay_lag FROM pg_stat_replication;" || true
+else
+    log "  skip — REPLICAS=$REPLICAS (standby 부재)"
+fi
+
+# 8. promote / demote RTO 측정 (F02 100% 게이트 추가, ADR-0056 Phase A2-A4 prerequisite)
+#    primary kill → standby 가 새 primary 로 promote 되는 시간. RTO 목표 < 30s.
+#    SMOKE_FAILOVER=1 환경변수 설정 시에만 실행 (default skip — 데이터 plane 변경 영향).
+if [[ "${REPLICAS:-1}" -ge 2 ]] && [[ "${SMOKE_FAILOVER:-0}" == "1" ]]; then
+    log "[8/8] Failover RTO measurement (SMOKE_FAILOVER=1)"
+    KILL_TS=$(date +%s)
+    kubectl -n "$NS" delete pod "$POD" --wait=false || true
+    log "  primary killed at $(date -u -d @$KILL_TS +%FT%TZ) — waiting for new primary"
+    # 다른 pod (-1) 에서 새 primary 도달 대기 (max 60s)
+    end=$(( KILL_TS + 60 ))
+    while [[ $(date +%s) -lt $end ]]; do
+        new_primary=$(kubectl -n "$NS" exec "${STS_NAME}-1" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres -At -c 'SELECT pg_is_in_recovery();' 2>/dev/null || echo "")
+        if [[ "$new_primary" == "f" ]]; then
+            RECOVER_TS=$(date +%s)
+            RTO=$(( RECOVER_TS - KILL_TS ))
+            log "  RTO = ${RTO}s (target < 30s)"
+            [[ "$RTO" -le 30 ]] && log "  PASS: RTO < 30s" || log "  WARN: RTO > 30s — F05 chaos-mesh 검증 필요"
+            break
+        fi
+        sleep 2
+    done
+else
+    log "[8/8] skip failover RTO — SMOKE_FAILOVER=${SMOKE_FAILOVER:-unset} (set SMOKE_FAILOVER=1 to enable)"
+fi

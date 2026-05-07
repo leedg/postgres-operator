@@ -12,8 +12,15 @@ spec:
       {{- include "postgres-operator.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         {{- include "postgres-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "postgres-operator.serviceAccountName" . }}
       {{- with .Values.podSecurityContext }}
@@ -22,6 +29,24 @@ spec:
       {{- end }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName }}
+      {{- end }}
+      {{- if .Values.dnsPolicy }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- end }}
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.extraInitContainers }}
+      initContainers:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
@@ -53,22 +78,72 @@ spec:
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- end }}
+          {{- if .Values.customLivenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.customLivenessProbe | nindent 12 }}
+          {{- else }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: healthz
             initialDelaySeconds: 15
             periodSeconds: 20
+          {{- end }}
+          {{- if .Values.customReadinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.customReadinessProbe | nindent 12 }}
+          {{- else }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: healthz
             initialDelaySeconds: 5
             periodSeconds: 10
+          {{- end }}
+          {{- with .Values.customStartupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.lifecycleHooks }}
+          lifecycle:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.extraEnvVars }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.extraEnvVarsCM .Values.extraEnvVarsSecret }}
+          envFrom:
+            {{- range .Values.extraEnvVarsCM }}
+            - configMapRef:
+                name: {{ .name }}
+                {{- if hasKey . "optional" }}
+                optional: {{ .optional }}
+                {{- end }}
+            {{- end }}
+            {{- range .Values.extraEnvVarsSecret }}
+            - secretRef:
+                name: {{ .name }}
+                {{- if hasKey . "optional" }}
+                optional: {{ .optional }}
+                {{- end }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with .Values.sidecars }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -83,4 +158,11 @@ spec:
       {{- end }}
       {{- with .Values.priorityClassName }}
       priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- end }}

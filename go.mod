@@ -4,6 +4,7 @@ go 1.25.3
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
+	github.com/keiailab/operator-commons v0.3.0
 	github.com/lib/pq v1.12.3
 	github.com/onsi/ginkgo/v2 v2.27.2
 	github.com/onsi/gomega v1.38.2
@@ -44,7 +45,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/keiailab/operator-commons v0.1.2 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect

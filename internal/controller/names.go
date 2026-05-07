@@ -10,7 +10,11 @@ You may obtain a copy of the License at
 
 package controller
 
-import "fmt"
+import (
+	"fmt"
+
+	commonslabels "github.com/keiailab/operator-commons/pkg/labels"
+)
 
 // 본 파일은 reconciler가 생성하는 K8s 자원 이름을 단일 출처로 모은다.
 // 명명 규약은 RFC 0001 PostgresCluster CRD v2 의 shard ordinal 모델을 따른다:
@@ -74,13 +78,17 @@ func InstanceRoleBindingName(cluster string) string {
 //
 // router 처럼 shard 차원이 없는 자원은 ordinal=-1 을 전달한다 — 이때 pool 레이블
 // 자체가 부재한다 (router 의 backend 는 모든 shard 이므로 ordinal 분리 무의미).
+//
+// iteration 28 (2026-05-07): operator-commons/pkg/labels 위임 — 4-key
+// app.kubernetes.io/* convention 통일. postgres-specific shard label 은 별도 추가.
 func SelectorLabels(cluster, role string, shardOrdinal int32) map[string]string {
-	out := map[string]string{
-		"app.kubernetes.io/name":       "postgrescluster",
-		"app.kubernetes.io/instance":   cluster,
-		"app.kubernetes.io/component":  role,
-		"app.kubernetes.io/managed-by": "keiailab-postgres-operator",
-	}
+	out := commonslabels.Set{
+		Name:      "postgrescluster",
+		Instance:  cluster,
+		Component: role,
+		ManagedBy: "keiailab-postgres-operator",
+		// Version + PartOf 미지정 → 4-key (기존 동작 보존)
+	}.All()
 	if shardOrdinal >= 0 {
 		out["postgres.keiailab.io/shard"] = fmt.Sprintf("%d", shardOrdinal)
 	}

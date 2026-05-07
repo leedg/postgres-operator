@@ -92,7 +92,7 @@
 
 - `internal/citus/` 디렉토리 — ADR-0003 라이선스 정책 위반.
 - `internal/plugin/extension/citus/` 디렉토리.
-- `charts/postgresql-operator/` 의 Citus opt-in 메시징 (`citusLibPQ.dsn`, NOTES.txt AGPL 안내).
+- `charts/postgres-operator/` 의 Citus opt-in 메시징 (`citusLibPQ.dsn`, NOTES.txt AGPL 안내).
 
 ## [0.2.0-alpha] - 2026-05-01
 
@@ -124,7 +124,7 @@
 
 - `make validate`, `make gate`, `make release-preflight`, `make release`, `make helm-publish` 로컬 릴리스 자동화 추가.
 - `config/crd/kustomization.yaml` 추가로 `make install/uninstall` 및 CRD 렌더 경로 복구.
-- `make sync-crds` 추가로 `config/crd/bases`와 `charts/postgresql-operator/crds` drift 차단.
+- `make sync-crds` 추가로 `config/crd/bases`와 `charts/postgres-operator/crds` drift 차단.
 - Helm chart `.helmignore`, `values.schema.json`, README, Artifact Hub metadata 추가.
 - `dist/install.yaml` 단일 설치 산출물 검증 경로 추가.
 

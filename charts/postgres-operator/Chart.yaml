@@ -5,10 +5,10 @@
 apiVersion: v2
 name: postgres-operator
 description: |
-  K8s-native auto-sharding PostgreSQL operator. Apache-2.0, zero AGPL/BUSL
-  dependency (ADR 0003). Vanilla PostgreSQL 18+ baseline + 5-interface Plugin
-  SDK + stateless QueryRouter (RFC 0004). 자체 분산 SQL layer 는 RFC 0001~0005
-  로 단계 도입 (ADR 0001 keystone).
+  Apache-2.0 PostgreSQL Kubernetes Operator. PGO-class operational quality is
+  the target, but external operators/backends are not forked, embedded, or
+  wrapped. Vanilla PostgreSQL 18+ baseline with a self-built distributed SQL
+  roadmap (ADR 0001, ADR 0003).
 type: application
 kubeVersion: ">=1.26.0-0"
 
@@ -29,8 +29,8 @@ keywords:
   - operator
   - kubernetes
   - keiailab
-  - stateless-router
-  - plugin-sdk
+  - self-built-distributed-sql
+  - apache-2.0
 maintainers:
   - name: keiailab
     email: support@keiailab.com

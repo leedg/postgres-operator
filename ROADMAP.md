@@ -1,52 +1,48 @@
 # ROADMAP — postgres-operator
 
-본 ROADMAP 은 *현재* 와 *다음 6 개월* 의 우선순위를 명시합니다. 기간 기반 deadline 은 의도적으로 회피하며, *기능 단위* 로 진행을 추적합니다 (글로벌 §workflow.md "시간 기반 로드맵 금지").
+본 ROADMAP 은 날짜 약속이 아니라 검증 가능한 Gate 로 진행을 추적한다. 현재 정체성은 **Apache-2.0 PostgreSQL Kubernetes Operator** 이며, PGO-class 운영 품질을 목표로 하지만 PGO, Citus, CNPG, Patroni 같은 외부 시스템을 fork, embed, wrapper 로 사용하지 않는다.
 
-## 현재 (1.x 라인 — Active)
+## 원칙
 
-### 안정성 / 성숙도
-- [x] PodSecurity restricted compliance — TestPodSecurityComplianceStatefulSet 회귀 가드 (mongodb-operator 와 동일 패턴)
-- [x] CNPG-compatible Cluster CR — primary/standby promotion + failover quorum
-- [x] Backup / Restore — Barman + WAL archive + S3
-- [x] PgBouncer Pooler CR — read-write split + connection pooling
-- [ ] Citus integration (사실상 sharding) — schema-shard distribution + reference table
-- [ ] Logical replication — Publication / Subscription CR + drift 감지
+- **외부 설계 참고 허용**: PGO의 운영 UX, Citus의 분산 SQL 문제 분해, Vitess의 router idiom, CNPG의 Kubernetes 운영 패턴은 공개 문서와 논문 수준에서 참고할 수 있다.
+- **외부 시스템 내장 금지**: Citus extension, CNPG `Cluster`, Patroni DCS, Cockroach/Yugabyte backend, PGO controller 코드를 제품 런타임에 포함하지 않는다.
+- **신규 서비스로 구현**: operator manager, instance manager, sharding metadata, router, backup orchestration 은 본 repo 코드와 Apache-2.0 호환 의존성으로 구현한다.
+- **PGO-class는 품질 기준**: HA, backup, restore, upgrade, observability, security UX의 목표 수준을 뜻하며 특정 제품 사용을 뜻하지 않는다.
 
-### 운영 / 배포
-- [x] Helm chart `keiailab.github.io/postgres-operator` publish
-- [x] argos 클러스터 deploy — `platform-data-cnpg` ArgoCD app, `postgres-default` 3-replica cluster
-- [x] 3-repo (mongodb / postgresql / valkey) governance 자산 정합 (CODE_OF_CONDUCT / GOVERNANCE / MAINTAINERS / **ROADMAP** 본 문서)
-- [ ] Failover quorum 자동 — 2-node 시 quorum 유실 방지 가드 (현재 부분 — `failoverquorums` CRD 도입 완료)
-- [ ] release-smoke-test.sh 강화 — mongodb-operator 패턴 (image / sbom / trivy / chart index / smoke)
+## 현재 상태
 
-### 관측 / 보안
-- [x] ServiceMonitor — Prometheus 자동 노출 (cnpg metrics endpoint)
-- [ ] Grafana 대시보드 (replication lag / WAL throughput / connection saturation)
-- [ ] OpenTelemetry trace propagation — controller reconcile span
-- [x] Image SBOM (SPDX) + trivy HIGH/CRITICAL fixed-only 스캔 (3-repo 표준)
+| 항목 | 상태 | 검증 |
+|---|---|---|
+| 프로젝트/차트 이름 | `postgres-operator` | GitHub repo, Helm chart, argos GitOps path 정렬 |
+| 라이선스 | Apache-2.0 | `LICENSE`, ADR-0003 |
+| 최신 릴리스 | `0.3.0-alpha.3` | GHCR image + Helm chart publish |
+| argos 배포 | Day-0 single-shard | `PostgresCluster/argos-postgres` Ready 검증 |
+| GHCR runtime image | public pull 가능 | `ghcr.io/keiailab/pg:18` pull secret 없이 재기동 검증 |
+| HA replica | 미완료 | `replicas=0`, production DB 전환 전 필수 |
+| Backup/Restore | 미완료 | `BackupJob` 경로는 아직 production drill 미통과 |
+| 1.0.0 GA | 미완료 | HA, backup/restore, upgrade, chaos, 장기 soak 필요 |
 
-## 다음 (2.x 라인 — Planning)
+## Gate
 
-### 기능
-- [ ] PostgreSQL 18 지원 — extension 호환 + bootstrap script 갱신
-- [ ] Multi-region replication — async streaming + quorum 동기 commit 옵션
-- [ ] Cross-cluster failover — `ClusterImageCatalog` + `Cluster` 조합으로 zero-downtime upgrade
-- [ ] Online schema migration — pg_squeeze / pg_repack 기반 lock-free DDL
-- [ ] Tenant-level row security — RLS policy 자동 생성 helper
+| Gate | 목표 | 완료 조건 |
+|---|---|---|
+| G0 — Day-0 배포 | operator + single-shard PG가 GitOps로 기동 | ArgoCD Synced/Healthy, Pod 재시작 후 Ready, `psql select version()` 통과 |
+| G1 — Single-shard production | 단일 PostgreSQL 운영 DB로 사용 가능 | HA replica, failover drill, backup/restore/PITR drill, upgrade rollback runbook |
+| G2 — 운영 품질 | PGO-class 운영 표면 확보 | metrics, alerts, pooler, TLS, user/db/RBAC, security defaults, release smoke |
+| G3 — 자체 sharding foundation | 외부 Citus 없이 샤딩 메타데이터 자체 구현 | `ShardRange`, `pg-router`, manual shard placement, GitOps drift guard |
+| G4 — Online resharding | 데이터 손실 없는 split/rebalance | `ShardSplitJob` 7-step e2e, cutover rollback/forward-only 검증 |
+| G5 — Distributed SQL | cross-shard query/transaction의 명확한 지원 범위 | scatter-gather, 2PC/saga, isolation matrix, benchmark |
+| G6 — 1.0.0 GA | 상용 제품 수준 | 장기 soak, chaos, restore rehearsal, upgrade matrix, SBOM/signing, docs/runbooks 완비 |
 
-### 아키텍처
-- [ ] Controller v2 — reconcile fan-out 최적화 + work queue rate limiter 튜닝
-- [ ] CRD `Cluster` v2 — schema 안정화 + conversion webhook (현재 v1)
+## Non-Goals
 
-## Non-Goals (의식적 비대상)
-
-- **Multi-tenancy 격리** — namespace 단위 격리만 제공. 더 강한 격리는 별도 클러스터로 위임.
-- **자체 시크릿 관리** — ESO (External Secrets Operator) + OpenBao 위임. operator 자체 시크릿 회전 로직은 *추가하지 않음*.
-- **GitHub Actions** — RFC 0002 (글로벌) 영구 금지. 모든 게이트는 로컬 4 계층.
-- **Oracle / MS SQL 호환 모드** — 본 operator 는 PostgreSQL 전용. 호환성은 별도 마이그레이션 도구 (MOLT) 위임.
+- 외부 PostgreSQL operator를 내장해서 `postgres-operator` 이름으로 재포장하지 않는다.
+- Citus를 1급 내장 기능으로 제공하지 않는다. Citus는 설계 비교 대상이며 런타임 의존성이 아니다.
+- 범용 Plugin SDK를 제품 메시지의 중심으로 두지 않는다. 필요한 확장점은 안정화된 내부 인터페이스와 CRD로 좁게 공개한다.
+- GitHub Actions를 필수 release gate로 쓰지 않는다. 로컬 자동화 게이트와 실클러스터 검증을 기준으로 한다.
 
 ## 변경 이력
 
-| Date | Change | Refs |
-|---|---|---|
-| 2026-05-07 | 본 문서 신설 — 3-repo governance 자산 정합 | INC-2026-05-07 |
+| Date | Change |
+|---|---|
+| 2026-05-07 | `0.3.0-alpha.3` 배포, GHCR public pull 전환, legacy staging operator 제거, 외부 시스템 내장 금지 원칙 명시 |

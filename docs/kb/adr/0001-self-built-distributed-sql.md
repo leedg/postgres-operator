@@ -14,11 +14,11 @@
 3. **K8s 네이티브 통합** — CRD + reconciler + KEDA 기반 자동 샤딩.
 4. **자동 샤딩** (write-side scale-out) — 수동 split 만 지원하는 Citus 한계 보완.
 
-사용자 (eightynine01@gmail.com) 가 2026-05-02 본 결정 시점에 4 가지 선택지 (A: Citus packaging, B: 실용적 통합 — pgcat + Citus rebalancer 위임 + KEDA 자동 split + CNPG HA 임베드, C: 풀 자체 분산 SQL — 모든 의존 제거, custom) 중 **C** 와 **모든 외부 backend 의존 제거** 와 **single chart + flags** 를 명시 선택했다. 이는 6+년 timeline 을 인지한 야심찬 결정이며, *long-term 차별화는 invention 이 아니라 invention + 라이선스 청정 + K8s 네이티브의 동시 달성에서 나온다* 는 product 정체성 재정의이다.
+사용자 (eightynine01@gmail.com) 가 2026-05-02 본 결정 시점에 4 가지 선택지 (A: Citus packaging, B: 실용적 통합 — pgcat + Citus rebalancer 위임 + KEDA 자동 split + CNPG HA 임베드, C: 풀 자체 분산 SQL — 모든 의존 제거, custom) 중 **C** 와 **모든 외부 backend 의존 제거** 와 **single chart + flags** 를 명시 선택했다. 2026-05-07 에는 이 원칙을 더 좁혀, 외부 시스템 설계는 차용할 수 있으나 그 시스템을 그대로 내장해서 사용하는 방식이 아니라 **새로운 서비스로 개발**해야 한다고 재확인했다. 이는 6+년 timeline 을 인지한 야심찬 결정이며, *long-term 차별화는 invention 이 아니라 invention + 라이선스 청정 + K8s 네이티브의 동시 달성에서 나온다* 는 product 정체성 재정의이다.
 
 ## Decision
 
-PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축한다. Citus / CloudNativePG / Patroni / CockroachDB 패턴 코드를 의존성 그래프에서 영구히 제외한다.
+PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축한다. Citus / CloudNativePG / Patroni / CockroachDB 패턴 코드를 의존성 그래프에서 영구히 제외한다. PGO-class, Citus-class 같은 표현은 품질 기준과 문제 영역을 설명하는 비교 용어이며, 외부 제품의 controller, CRD, extension, runtime 을 내장한다는 뜻이 아니다.
 
 핵심 매개변수:
 
@@ -33,7 +33,8 @@ PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축한다. Citus / CloudNa
   - 분산 트랜잭션 coordinator — 2PC (PG `PREPARE TRANSACTION` 활용) + saga.
   - HA — instance manager 기반 (RFC 0003 P2-T1 frozen interface 활용, Patroni 미사용).
 - **재활용 자산**: pgBackRest (BSD-2), pg_query_go (PG License), controller-runtime (Apache-2.0), KEDA (Apache-2.0). 모두 ADR-0003 정책 충족.
-- **Backend 의존 제거 범위**: Citus extension, Citus 메타데이터 (`pg_dist_*`), CloudNativePG `Cluster` CR, Patroni DCS, CockroachDB range KV layer. 코드 0줄 + 문서/논문 차용만 허용.
+- **Backend 의존 제거 범위**: Citus extension, Citus 메타데이터 (`pg_dist_*`), CloudNativePG `Cluster` CR, Patroni DCS, CockroachDB range KV layer. 코드 0줄 + 문서/논문/운영 idiom 차용만 허용.
+- **Clean-room 신규 구현**: 외부 시스템의 공개 설계를 읽고 문제 분해를 참고할 수는 있지만, 구현은 본 repo 의 타입, controller, instance manager, router 로 새로 작성한다.
 - **Helm 패키징** (ADR-0002): 단일 chart + 컴포넌트 flag (router / resharder / rebalancer / keda / backup / monitoring).
 - **CRD 라이프사이클** (ADR-0004): operator manager 가 소유 (server-side apply), Helm `crds/` 폐기.
 - **버전 채널** (ADR-0005): alpha / beta / stable. CRD apiVersion v1alpha1 → v1beta1 → v1.
@@ -58,7 +59,7 @@ PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축한다. Citus / CloudNa
 - *ADR-0001 (legacy) "PGO-class + Citus 1급" 메시징 무효화* — README + roadmap + tutorials 전면 재작성.
 
 **트레이드오프**:
-- *invention vs integration* — 본 결정은 invention 측. 만약 1인 maintainer burnout 시 *복귀 경로* 는 ADR-0010 (legacy) 의 Citus 격리 plugin 모델로 *되돌리기* 가능 (ShardingPlugin 인터페이스가 RFC-0005 (legacy) 에서 frozen 되어 있어 backend 교체점 보존됨).
+- *invention vs integration* — 본 결정은 invention 측이다. 1인 maintainer burnout 이 발생하더라도 외부 backend 를 그대로 내장하는 복귀 경로는 현행 정책이 아니다. 범위를 줄일 수는 있지만, 축소 방향은 single-shard operator 품질 강화나 자체 router 범위 축소이지 Citus/CNPG/PGO wrapper 전환이 아니다.
 - *시장 진입 시기* — Citus packaging (옵션 A, 12 개월) 으로 빠르게 reach 했으면 v1.0 을 2027 에 출시 가능했음. 본 결정으로 v1.0 이 2031~2032 로 밀림. 그 사이 *경쟁 솔루션이 같은 격차를 메울 위험* 존재.
 
 ## Alternatives Considered

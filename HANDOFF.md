@@ -1,4 +1,4 @@
-# HANDOFF — postgresql-operator
+# HANDOFF — postgres-operator
 
 > 다음 세션이 *컨버세이션 컨텍스트 없이* 재개 가능해야 한다. 시작 의식: 본 파일 → `TASKS.md` → 마지막 commit log 순서로 읽는다.
 
@@ -107,7 +107,7 @@ test/utils                       coverage:   0.0% of statements
   ▸ [6/6] trivy image post-publish scan → 0 HIGH+CRITICAL ✓
   RESULT: 12 PASS / 0 FAIL (v1.4.5)
   ```
-  postgres v0.3.0-alpha.1 release 에 SBOM asset (postgresql-operator-v0.3.0-alpha.1.spdx.json) 존재 사전 확인.
+  postgres v0.3.0-alpha.1 release 에 SBOM asset (postgres-operator-v0.3.0-alpha.1.spdx.json) 존재 사전 확인.
 - **다음 단계 (열린 트랙)**: F02 cycle 5 후속 (kind smoke 실측 — `hack/smoke.sh`), F02-residual (Pod env 주입 / readiness HTTP endpoint).
 
 ## 이전 상태 (2026-05-06, T16 GitOps deploy 정합 — *완료, PR #17 머지*)

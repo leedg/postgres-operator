@@ -1,6 +1,6 @@
 # postgres-operator
 
-> **K8s-native auto-sharding PostgreSQL operator** — vanilla PG18+, license-clean (Apache-2.0), zero AGPL/BUSL/CSL/SSPL dependency.
+> **Apache-2.0 PostgreSQL Kubernetes Operator** — vanilla PG18+, license-clean, PGO-class 운영 품질을 목표로 하되 외부 operator/backend 를 fork, embed, wrapper 로 사용하지 않는 독립 신규 구현.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://golang.org/)
@@ -14,12 +14,16 @@
 
 ## 정체성
 
-본 operator 는 PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축한다. Citus / CloudNativePG / Patroni / CockroachDB 코드 의존을 *영구히* 두지 않는다. 차별화 가치:
+본 operator 는 PostgreSQL 위에 *자체 분산 SQL 레이어*를 구축하는 신규 서비스다. PGO, Citus, Vitess, CloudNativePG, Patroni, CockroachDB 같은 외부 시스템의 공개 설계와 운영 idiom 은 참고할 수 있지만, 그 시스템을 그대로 내장하거나 런타임 의존성으로 감싸서 제공하지 않는다. 코드, CRD, reconciler, instance manager, router 는 본 repo 에서 Apache-2.0 호환 방식으로 직접 구현한다.
+
+차별화 가치:
 
 - **PostgreSQL 18+ 100% 호환** — application 코드 변경 없이 분산 채택. 모든 PG extension / 타입 / 함수 사용 가능.
 - **라이선스 청정** — Apache-2.0 operator + (BSD/Apache/MIT/PG License) 의존만. SaaS 노출에 의무 없음.
-- **K8s-native auto-sharding** — `ShardRange` CRD = source of truth, KEDA 기반 자동 split, 7-step online resharding (cutover SLA p99 < 500ms).
-- **단일 endpoint** — application 은 `pg-router` Deployment 에 PG wire protocol 로 연결, 샤딩 인지 없이 동작.
+- **K8s-native auto-sharding 로드맵** — `ShardRange` CRD = source of truth, KEDA 기반 자동 split, 7-step online resharding (cutover SLA p99 < 500ms 목표).
+- **단일 endpoint 로드맵** — application 은 `pg-router` Deployment 에 PG wire protocol 로 연결, 샤딩 인지 없이 동작.
+
+PGO-class 는 *품질 기준* 이지 PGO fork 또는 PGO 내장을 의미하지 않는다. Citus-class 분산 기능도 Citus extension 을 포함한다는 뜻이 아니라, Citus 가 검증한 문제 영역을 PostgreSQL-compatible 신규 서비스로 재구현한다는 뜻이다. Plugin SDK 는 v0.x archive 의 폐기된 메시지이며, 현행 방향은 필요한 확장점을 좁게 설계한 내부 모듈과 명시적 CRD 로 관리한다.
 
 ADR 0001 (`docs/kb/adr/0001-self-built-distributed-sql.md`) 가 본 결정의 keystone 이다.
 
@@ -94,7 +98,7 @@ spec:
 YAML
 ```
 
-**현재 (0.3.0-alpha)**: 재설계 정리 단계. P1 (single-shard) 도달 시 본 명령이 동작한다.
+**현재 (0.3.0-alpha.3)**: argos production namespace 에 single-shard `PostgresCluster` 배포와 재시작 복구가 검증됐다. 단, production DB 로 쓰려면 HA replica, backup/restore drill, PITR, 장기 안정성 검증이 추가로 필요하다.
 
 ## 개발 (Contributing)
 

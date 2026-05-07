@@ -19,7 +19,7 @@
 
 ## Archived (v0.x — 재설계 이전 결정 기록)
 
-v0.x 사이클에서 *PGO-class 풀스택 + Citus 1급 + Plugin SDK* 를 목표로 했던 ADR 묶음. 2026-04-30 의 keystone 재설계 (ADR-0001 신규) 이후 *역사적 참고용으로만* 보존. 새 코드 / 새 결정은 본 archive 의 결론을 *의무적으로 따르지 않는다*. 단, 일부 archived ADR (0008 cascade delete, 0009 no-github-actions-rfc-0002) 는 *현행 운영 정책과 여전히 부합* — 본 INDEX 의 비고 컬럼 참조.
+v0.x 사이클에서 *PGO-class 풀스택 + Citus 1급 + Plugin SDK* 를 목표로 했던 ADR 묶음. 2026-04-30 의 keystone 재설계 (ADR-0001 신규) 이후 *역사적 참고용으로만* 보존한다. 새 코드 / 새 결정은 본 archive 의 결론을 *의무적으로 따르지 않는다*. 현행 원칙은 "외부 설계 참고는 가능, 외부 시스템 내장/랩핑은 금지, 신규 서비스로 직접 구현"이다. 단, 일부 archived ADR (0008 cascade delete, 0009 no-github-actions-rfc-0002) 는 *현행 운영 정책과 여전히 부합* — 본 INDEX 의 비고 컬럼 참조.
 
 | 번호 | 제목 | 비고 |
 |------|------|------|

@@ -18,6 +18,7 @@
 | [ADR-0007](0007-pre-commit-instead-of-lefthook.md) | Hook 도구로 pre-commit 채택 (글로벌 lefthook 표준 분기) | Accepted | 2026-05-06 |
 | [ADR-0008](0008-operator-commons-adoption.md) | operator-commons 채택 + Container SecurityContext invariant 강화 | Accepted | 2026-05-07 |
 | [ADR-0009](0009-webhook-accumulate-errors.md) | Webhook validate — immediate-return → accumulate-errors 변환 (commons.ValidateWithPredicate 위임) | Accepted | 2026-05-07 |
+| [ADR-0010](0010-rfc-0017-tooling-unification-adoption.md) | RFC-0017 operator tooling unification 채택 (lefthook + EventRecorder 도입 + HEALTHCHECK) | Proposed | 2026-05-09 |
 
 ## Archived (v0.x — 재설계 이전 결정 기록)
 

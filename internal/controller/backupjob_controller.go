@@ -21,10 +21,12 @@ package controller
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -38,6 +40,9 @@ type BackupJobReconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
 	Plugins *plugin.Registry
+
+	// Recorder 는 K8s Event 발행 용 (RFC-0017 §3.4). SetupWithManager 가 주입.
+	Recorder record.EventRecorder
 }
 
 // BackupJob Conditions reason 상수 (status.go의 SOT 패턴 차용).
@@ -104,10 +109,17 @@ func (r *BackupJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // markFailed는 BackupJob을 Failed로 마킹한다.
+//
+// RFC-0017 §3.4: Recorder 가 nil 이 아니면 Warning event 도 발행. SetupWithManager
+// 가 자동 주입하므로 nil 가드는 *방어적 안전망* (테스트에서 직접 reconciler 인스턴스
+// 생성 시 Recorder 미주입 가능성).
 func (r *BackupJobReconciler) markFailed(bj *postgresv1alpha1.BackupJob, reason, message string) {
 	bj.Status.Phase = postgresv1alpha1.BackupJobFailed
 	bj.Status.ObservedGeneration = bj.Generation
 	setBackupJobCondition(bj, BackupJobConditionReady, metav1.ConditionFalse, reason, message)
+	if r.Recorder != nil {
+		r.Recorder.Eventf(bj, corev1.EventTypeWarning, reason, "%s", message)
+	}
 }
 
 // statusUpdate는 conflict를 requeue로 처리하는 표준 패턴.
@@ -136,6 +148,10 @@ func setBackupJobCondition(bj *postgresv1alpha1.BackupJob, condType string, stat
 
 // SetupWithManager는 본 reconciler를 controller-runtime Manager에 등록한다.
 func (r *BackupJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// RFC-0017 §3.4: EventRecorder 자동 주입.
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("backupjob-controller")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.BackupJob{}).
 		Named("backupjob").

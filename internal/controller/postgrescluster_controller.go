@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -58,6 +59,11 @@ type PostgresClusterReconciler struct {
 	// FeatureGates 는 PG18 같은 격리 채널 활성화 결정에 사용된다.
 	// nil 이면 빈 맵으로 취급 (기본 비활성).
 	FeatureGates map[string]bool
+
+	// Recorder 는 K8s Event 발행 (kubectl describe 의 Events 표시) 용. RFC-0017
+	// §3.4. SetupWithManager 가 자동 주입 — cmd/main.go 측에서는 명시 setting
+	// 불필요. nil 이면 Eventf 호출이 panic — Setup 호출 보장 의무.
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -444,6 +450,11 @@ type logSink interface {
 
 // SetupWithManager 는 본 reconciler 를 controller-runtime Manager 에 등록한다.
 func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// RFC-0017 §3.4: EventRecorder 자동 주입. 이름 "postgrescluster-controller" 는
+	// kubectl describe 의 Events Source.Component 에 표시된다.
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("postgrescluster-controller")
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresCluster{}).
 		Owns(&appsv1.StatefulSet{}).

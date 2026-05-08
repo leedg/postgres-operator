@@ -113,6 +113,16 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return r.handleUpsertErr(ctx, err, "instance RoleBinding", logger)
 	}
 
+	// 0.5. (Pillar P7 §7 Phase 2) cert-manager Certificate CR upsert.
+	// TLS.Enabled=true + IssuerRef 명시 시 server cert Secret 자동 발급 위임.
+	// Phase 3 에서 STS volume mount + postgresql.conf ssl=on 통합 — 본 Phase 는
+	// Certificate CR 만 emit, postgres pod 는 cert 사용 안 함 (sslmode=disable 그대로).
+	if cert := buildCertificate(&cluster); cert != nil {
+		if err := r.upsert(ctx, &cluster, cert); err != nil {
+			return r.handleUpsertErr(ctx, err, "tls Certificate", logger)
+		}
+	}
+
 	// 1. shard 자원 3종 upsert (ordinal 0..InitialCount-1)
 	shardCount := cluster.Spec.Shards.InitialCount
 	members := int32(1) + cluster.Spec.Shards.Replicas

@@ -167,18 +167,31 @@ func TestValidate_StorageSize_BelowMin_Rejected(t *testing.T) {
 	}
 }
 
-func TestValidate_TLS_Enabled_Phase1_Rejected(t *testing.T) {
-	// Pillar P7 §7 Phase 1 facade — CRD field 만 정의, reconciler 미통합.
-	// enabled=true 시 NotImplemented reject (Phase 2/3 통합 후 본 테스트 제거).
+func TestValidate_TLS_Enabled_NoIssuer_Rejected(t *testing.T) {
+	// Phase 2 (alpha.6) — IssuerRef 필수. 미설정 시 reject.
 	w := newWebhook(t)
 	c := validBaseCluster()
 	c.Spec.TLS = &postgresv1alpha1.TLSSpec{Enabled: true}
 	_, err := w.ValidateCreate(context.Background(), c)
 	if err == nil {
-		t.Fatal("expected rejection for spec.tls.enabled=true (Phase 1 NotImplemented)")
+		t.Fatal("expected rejection for spec.tls.enabled=true without issuerRef (Phase 2)")
 	}
-	if !strings.Contains(err.Error(), "NotImplemented") {
-		t.Errorf("expected NotImplemented keyword in error, got: %v", err)
+	if !strings.Contains(err.Error(), "issuerRef") {
+		t.Errorf("expected issuerRef keyword in error, got: %v", err)
+	}
+}
+
+func TestValidate_TLS_Enabled_WithIssuer_Accepted(t *testing.T) {
+	// Phase 2 — TLS.Enabled=true + IssuerRef 명시 시 admission 통과.
+	// reconciler 가 Certificate CR 자동 emit. Phase 3 까지는 STS volume mount 미통합.
+	w := newWebhook(t)
+	c := validBaseCluster()
+	c.Spec.TLS = &postgresv1alpha1.TLSSpec{
+		Enabled:   true,
+		IssuerRef: &postgresv1alpha1.TLSIssuerRef{Name: "argos-ca", Kind: "ClusterIssuer"},
+	}
+	if _, err := w.ValidateCreate(context.Background(), c); err != nil {
+		t.Fatalf("tls.enabled=true with IssuerRef should be accepted, got: %v", err)
 	}
 }
 

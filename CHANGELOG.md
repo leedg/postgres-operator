@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.9] - 2026-05-08
+
+### Fixed
+
+- buildCertificate panic — unstructured.SetNestedField 의 dnsNames 를 []string → []any 변환 (deep copy 호환). alpha.8 첫 라이브 적용에서 발견.
+
 ## [0.3.0-alpha.8] - 2026-05-08
 
 ### Added (Pillar P7 §7 — TLS 통합 3-phase 완결)

@@ -73,7 +73,8 @@ func buildCertificate(cluster *postgresv1alpha1.PostgresCluster) *unstructured.U
 	}
 
 	// SAN: cluster.Name 외에 모든 shard ordinal 의 headless service DNS 포함.
-	dnsNames := []string{cluster.Name}
+	// unstructured.SetNestedField 는 []any 만 deep copy 가능 ([]string 에서 panic).
+	dnsNames := []any{cluster.Name}
 	for ord := int32(0); ord < cluster.Spec.Shards.InitialCount; ord++ {
 		svc := ShardServiceName(cluster.Name, ord)
 		dnsNames = append(dnsNames,

@@ -36,6 +36,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -413,6 +414,14 @@ func copySpec(dst, src client.Object) {
 			d.RoleRef = s.RoleRef
 		}
 		d.Labels = s.Labels
+	case *unstructured.Unstructured:
+		// cert-manager Certificate CR (Phase 2) — unstructured.Unstructured 로 emit.
+		// 전체 spec map 을 desired 로 덮어쓰기 (DeepCopy 후 fetch 된 metadata 보존).
+		s := src.(*unstructured.Unstructured)
+		if spec, found, err := unstructured.NestedMap(s.Object, "spec"); err == nil && found {
+			_ = unstructured.SetNestedField(d.Object, spec, "spec")
+		}
+		d.SetLabels(s.GetLabels())
 	default:
 		panic(fmt.Sprintf("copySpec: unsupported type %T", dst))
 	}

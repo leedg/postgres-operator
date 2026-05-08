@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.12] - 2026-05-08
+
+### Fixed
+
+- copySpec panic — *unstructured.Unstructured (cert-manager Certificate CR) 미지원. switch case 추가 (NestedMap spec + Labels).
+
 ## [0.3.0-alpha.11] - 2026-05-08
 
 ### Fixed

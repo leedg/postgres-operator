@@ -581,19 +581,19 @@ func buildPGStatefulSet(
 							TimeoutSeconds:      5,
 							FailureThreshold:    3,
 						},
-						VolumeMounts: append([]corev1.VolumeMount{
+						VolumeMounts: append(append([]corev1.VolumeMount{
 							{Name: "data", MountPath: pgDataMountPath},
 							{Name: "config", MountPath: pgConfigMountPath, ReadOnly: true},
-						}, dataplaneEphemeralVolumeMounts()...),
+						}, dataplaneEphemeralVolumeMounts()...), tlsVolumeMounts(cluster)...),
 					}},
-					Volumes: append([]corev1.Volume{{
+					Volumes: append(append([]corev1.Volume{{
 						Name: "config",
 						VolumeSource: corev1.VolumeSource{
 							ConfigMap: &corev1.ConfigMapVolumeSource{
 								LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 							},
 						},
-					}}, dataplaneEphemeralVolumes()...),
+					}}, dataplaneEphemeralVolumes()...), tlsVolumes(cluster)...),
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{

@@ -4,6 +4,19 @@
 
 ## [Unreleased]
 
+## [0.3.0-alpha.8] - 2026-05-08
+
+### Added (Pillar P7 §7 — TLS 통합 3-phase 완결)
+
+- **Phase 1 (alpha.5)**: `spec.tls` field facade — `TLSSpec{Enabled, IssuerRef, CertSecretName}`. `enabled=true` 시 webhook NotImplemented reject.
+- **Phase 2 (alpha.6)**: cert-manager `Certificate` CR 자동 emit (unstructured, cert-manager Go SDK 의존 0). IssuerRef 명시 + Enabled=true 시 reconciler 가 `<cluster>-tls` Secret 자동 발급 위임. SAN = cluster name + 모든 shard headless service DNS 4 form. ECDSA P-256 + rotationPolicy=Always.
+- **Phase 3a (alpha.7)**: STS `Volumes` + `VolumeMounts` 의 server cert mount (`/etc/ssl/postgres`, `defaultMode=0o400` PG 키 파일 권한 검사 통과).
+- **Phase 3b (alpha.8)**: `postgresql.conf` 의 `ssl=on` + `ssl_cert_file`/`ssl_key_file`/`ssl_ca_file` + `ssl_min_protocol_version=TLSv1.2`. `pg_hba.conf` 의 `host` → `hostssl` 강제 (외부 client plaintext connection 차단, replication 은 pod-to-pod 신뢰 boundary 라 host 유지).
+
+### Refactored
+
+- `Reconcile` 의 cyclomatic complexity 절감 — `reconcileInstanceRBAC` (3 upsert 단일화) + `reconcileTLS` helper extract. gocyclo < 30 baseline 정합.
+
 ## [0.3.0-alpha.4] - 2026-05-08
 
 ### Fixed

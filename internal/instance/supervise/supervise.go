@@ -167,6 +167,36 @@ func NewReal(cfg Config) (*Real, error) {
 	}, nil
 }
 
+// cleanStaleSocket 는 postgres unix socket dir 의 stale lock + socket 파일을
+// 제거한다. INC-2026-05-09: EmptyDir 운영 환경 (instance manager pod) 에서
+// container restart 후 잔존 socket lock 이 다음 postmaster 의 bind 거부 의
+// 원인 ("FATAL: lock file ... already exists"). PostgreSQL 자체는 *동일
+// PID 의 lock* 만 stale 처리, *다른 PID 의 socket lock* 은 거부 — 따라서
+// supervisor 가 명시적으로 정리해야 함.
+//
+// 안전성: 본 메소드는 Start() 의 mu Lock 보호 하에서 child fork 직전 호출됨.
+// instance manager (PID 1) 와 동일 pod 내 다른 postmaster 가 *동시 실행 불가
+// 능* (child 이전 없음) 이므로 모든 socket 파일은 stale.
+//
+// DataDir 의 postmaster.pid 는 PostgreSQL 자체가 PID-alive 검사 후 stale 처리
+// 하므로 본 메소드 범위 외.
+func (r *Real) cleanStaleSocket() {
+	socketDir := "/var/run/postgresql"
+	port := r.cfg.Port
+	if port == 0 {
+		port = 5432
+	}
+	pattern := filepath.Join(socketDir, fmt.Sprintf(".s.PGSQL.%d*", port))
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		// pattern syntax error — 무시 (defensive, 실제로 발생 불가).
+		return
+	}
+	for _, m := range matches {
+		_ = os.Remove(m) // best-effort — 파일 부재는 정상 (cold start).
+	}
+}
+
 // resolveBinPath 는 BinPath 또는 BinDir/postgres 를 결정한다.
 func (r *Real) resolveBinPath() string {
 	if r.cfg.BinPath != "" {
@@ -182,6 +212,12 @@ func (r *Real) Start(ctx context.Context) error {
 	if r.started {
 		return errors.New("supervise: already started")
 	}
+	// INC-2026-05-09 (argos-postgres CrashLoopBackOff 42h+): postgres unix socket
+	// dir 가 EmptyDir 운영 시 container restart 후 stale lock file 잔존 →
+	// "FATAL: lock file ... already exists" 무한 fail. Instance manager 가 PID 1
+	// 이고 본 메소드는 *child fork 직전* 호출되므로 동일 pod 내 살아있는
+	// postmaster 부재 — 무조건 정리 안전.
+	r.cleanStaleSocket()
 	bin := r.resolveBinPath()
 	args := []string{
 		"-D", r.cfg.DataDir,

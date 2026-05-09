@@ -78,6 +78,14 @@ type ShardsSpec struct {
 	// Tolerations 는 샤드 Pod 노드 toleration.
 	// +optional
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// PriorityClassName 은 샤드 Pod priorityClass 명. modern HA Layer 3 (evict 우선순위).
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// TopologySpreadConstraints 는 샤드 Pod multi-node 분산 정책. modern HA Layer 2 (SPOF 차단).
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 }
 
 // RouterAutoscaleSpec 는 라우터 HPA 설정이다 (RFC 0001 §3.1).

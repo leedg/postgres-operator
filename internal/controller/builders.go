@@ -612,6 +612,14 @@ func buildPGStatefulSet(
 							},
 						},
 					}}, dataplaneEphemeralVolumes()...), tlsVolumes(cluster)...),
+					// argos cycle 21 stop hook 26차: modern HA 5-layer 활성.
+					// Layer 2 TopologySpreadConstraints (multi-node 분산 SPOF 차단)
+					// + Layer 3 PriorityClassName (evict 우선순위) — CR Spec.Shards
+					// 의 신규 fields 사용. Affinity + Tolerations 도 동시 적용.
+					Affinity:                  cluster.Spec.Shards.Affinity,
+					Tolerations:               cluster.Spec.Shards.Tolerations,
+					PriorityClassName:         cluster.Spec.Shards.PriorityClassName,
+					TopologySpreadConstraints: cluster.Spec.Shards.TopologySpreadConstraints,
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{{

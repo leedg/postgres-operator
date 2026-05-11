@@ -1,6 +1,6 @@
 # RFC-0007: HA Leader Election + PVC Fencing 프로토콜
 
-- **Status**: Draft
+- **Status**: Accepted (2026-05-11 — 구현 완료 산출물 retrospective 문서)
 - **Date**: 2026-05-11
 - **Authors**: @keiailab/maintainers (재발행 — 이전 0003 슬롯은 shardsplitjob 으로 재할당, 본 RFC 가 정식 슬롯)
 - **Refs**: archived [ADR 0002 — Patroni 미사용](../kb/adr/_archive/v0.x/0002-no-patroni-instance-manager.md), 운영 가이드 [`docs/operator-guide/ha-election.md`](../operator-guide/ha-election.md)

@@ -28,7 +28,7 @@ make test            # envtest + 단위 테스트
 make lint            # golangci-lint
 make e2e             # kind 기반 e2e (5~10분)
 make build           # operator 바이너리 빌드
-make docker-build    # 컨테이너 이미지 (buildx + masblue-builder)
+make docker-build    # 컨테이너 이미지 (docker buildx 기본 빌더)
 ```
 
 ## PR 절차
@@ -38,7 +38,7 @@ make docker-build    # 컨테이너 이미지 (buildx + masblue-builder)
 3. **Commit message**: [Conventional Commits](https://www.conventionalcommits.org/) 권장 (`feat:`, `fix:`, `docs:`, `chore:`).
 4. **Sign-off**: `git commit -s -m "feat: ..."`.
 5. **PR 본문**: PR 템플릿을 채우고, 관련 이슈를 `Closes #N`으로 링크.
-6. **CI 그린**: 모든 워크플로 통과 필수.
+6. **로컬 게이트 통과**: `pre-commit run --all-files` + `make lint test validate` 모두 통과 필수 (RFC-0002 GitHub Actions 미사용).
 7. **리뷰**: CODEOWNERS 자동 할당. 일반 변경은 1 maintainer LGTM, 아키텍처 변경은 2명.
 
 ## 큰 변경은 RFC

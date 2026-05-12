@@ -1,351 +1,108 @@
 # HANDOFF — postgres-operator
 
-> 다음 세션이 *컨버세이션 컨텍스트 없이* 재개 가능해야 한다. 시작 의식: 본 파일 → `TASKS.md` → 마지막 commit log 순서로 읽는다.
+> The next session must be able to resume *without conversation
+> context*. Reading order on startup: this file → `TASKS.md` → the
+> latest commit log.
 
-## 2026-05-10 v0.3.0-alpha.16 release + OperatorHub bundle scaffold 운영 배포
+## Current state (2026-05-12, 0.3.0-alpha.18)
 
-본 세션 (Ralph loop, 2026-05-10) 의 결정적 산출:
+- Release: `0.3.0-alpha.18` — GHCR image + Helm chart published.
+  Chart `version` and `appVersion` plus `config/manager/kustomization.yaml`
+  `newTag` and the `dist/install.yaml` image tag are all aligned (a
+  `make validate` assertion blocks future drift).
+- OLM bundle: `bundle/manifests/` is aligned to **8 owned CRDs**
+  (PostgresCluster, BackupJob, ScheduledBackup, Pooler,
+  PostgresDatabase, PostgresUser, ImageCatalog, ClusterImageCatalog),
+  with alm-examples for 7 of them and CSV descriptions for all 8.
+  `operator-sdk bundle validate --select-optional suite=operatorframework`
+  is clean. Bundle package name: `keiailab-postgres-operator`.
+- community-operators draft PR:
+  [k8s-operatorhub/community-operators#8109](https://github.com/k8s-operatorhub/community-operators/pull/8109).
+  Remaining: maintainer-owned bundle image push to
+  `ghcr.io/keiailab/postgres-operator-bundle:0.3.0-alpha.18` (requires a
+  PAT with `write:packages` scope) → CI green → flip to Ready → merge.
+- argos production cluster: ArgoCD `platform-data-postgres-operator`
+  Synced/Healthy, `PostgresCluster/argos-postgres` Ready=True (Day-0
+  single-shard, no HA replicas yet).
 
-| 영역 | PR | 결과 |
+## Active work
+
+| Task | Stage / % | Notes |
 |---|---|---|
-| OSS hygiene (CITATION.cff) | #23 | merged |
-| OperatorHub bundle scaffold (PR-B9, ADR-0013) | #24 | merged |
-| Makefile bundle target 정합 (PR-B9.4) | #25 | merged |
-| release v0.3.0-alpha.16 prep (Chart bump) | #26 | merged |
-| CSV icon 빈 블록 제거 (community-operators 정합) | #27 | merged |
-| lint nolint (SA1019 + gocyclo, mongodb ADR-0022 정합) | direct main | merged |
-| CHANGELOG v0.3.0-alpha.16 entry | direct main | merged |
+| T26 OSS/OLM standards alignment | Complete 100% | spdystream CVE fix, OLM bundle, CHANGELOG/SUPPORT, README, 4 new `make validate` gates, lefthook DCO enforced. |
+| T27 Live kind smoke + Pooler built-in auth + password rotation | Implementation 95% | `SMOKE_DATABASE` / `SMOKE_USER` / `SMOKE_SCHEDULEDBACKUP` / `SMOKE_IMAGECATALOG` scenarios + built-in auth (`keiailab_pooler_pgbouncer`) + rotation annotation. Live PG18 kind run still iterating. |
+| T28 community-operators PR | Implementation 60% | Draft PR opened (#8109). Awaiting bundle image push + CI. |
+| T29 Pooler TLS auto-issuance | Implementation 70% | cert-manager `Certificate` CR auto-issuance via `spec.pgbouncer.autoTLS` (stage 1 spec + stage 2 controller). Live cert-manager kind drill still pending. |
 
-### v0.3.0-alpha.16 production 배포
+## Local 4-layer gate
 
-- GHCR image: `ghcr.io/keiailab/postgres-operator:v0.3.0-alpha.16`
-- Git tag v0.3.0-alpha.16 / GH Release / Helm gh-pages publish (fa10bb4)
-- argos-platform-data PR #10 (umbrella 0.1.5 → 0.1.6) merged
-- ArgoCD sync 후 운영 `platform-data-postgres-operator-controller-manager` 가
-  v0.3.0-alpha.16 image active
+The release gate is enforced locally (GitHub Actions is permanently
+forbidden per ADR-0009 / RFC-0002).
 
-### OperatorHub.io 등록 신청 (외부)
-
-community-operators PR [#8093](https://github.com/k8s-operatorhub/community-operators/pull/8093)
-(`keiailab-postgres-operator` 0.3.0-alpha.15, Zalando 의 기존 `postgres-operator` namespace
-충돌 회피 위해 `keiailab-` prefix). CSV icon 빈 블록 lint fail 후 force push fix. CI
-재실행 진행 중.
-
-### 후속 (다음 ralph-loop iteration)
-
-1. community-operators PR #8093 CI 재검증 + reviewer 응답.
-2. logo (postgres + Keiailab) base64 PNG 추가 후속 PR.
-3. F02 잔여 (Pod env 주입 / readiness HTTP) — pre-existing 트랙.
-4. P1 production-ready (HA replica + backup/restore drill + PITR + 장기 soak) — pre-existing.
-
----
-
-## 2026-05-09 Sprint A 진입 (PR-A7) + Sprint B 예고 (PR-B3) — Helm 차트 비교 plan
-
-> Plan: `~/.claude/plans/1-https-artifacthub-io-packages-helm-clo-synthetic-gem.md`
->
-> postgres-operator 측은 *비대칭 보존 결정* (ADR-0008 cascade-delete-by-
-> OwnerReference) 으로 인해 RFC-0018 의 pkg/finalizer 미채택. pkg/status
-> 만 채택.
-
-### PR-A7: pkg/status migration + ADR-0008 갱신 (T3, Sprint A)
-
-- **의존**: operator-commons v0.6.0 tag 머지.
-- **변경 범위**:
-  - `internal/controller/status.go` 의 `setCondition` 호출 → commons
-    `SetReady` / `SetReadyFalse` / `SetAvailable` 위임.
-  - 도메인 ConditionType 보존: `ShardsReady`, `RouterReady`, `BackupHealthy`,
-    `AutoSplitEligible` — generic 4종 (Ready/Progressing/Degraded/Available)
-    만 commons 사용.
-  - **pkg/finalizer 비대칭**: ADR-0008 cascade-delete-by-OwnerReference
-    결정 *유지*. 본 PR 은 pkg/finalizer 미채택, ADR-0008 본문에 사유 명시
-    추가.
-- **ADR**:
-  - ADR-0008 갱신: "operator-commons/pkg/finalizer 미채택 사유 — cascade
-    delete by OwnerReference + BackupCleanupJob CRD 가 외부 자원 cleanup
-    분리 처리".
-  - 신규 ADR (현재 postgres INDEX 최신 +1): `docs/kb/adr/NNNN-rfc-0018-
-    pkg-status-adoption.md`.
-- **회귀**: `cascade_delete_test.go` 검증 강화.
-
-### PR-B3 예고: matrix.go → commons/pkg/version generic Matrix[E] 위임 (T3, Sprint B)
-
-- **의존**: commons v0.7.0 (PR-B1 의 `pkg/version` generic `Matrix[E any]`
-  추가).
-- **변경 범위**:
-  - `internal/version/matrix.go` 의 `Combo`/`Channel`/`FeatureGate`
-    타입을 commons `Matrix[Combo]` 로 위임.
-  - export 표면 (`commonsversion.NewSupportedAllOf` 호출부) 무변경.
-- **ADR**: ADR-0005 (versioning-and-channels) 갱신 + commons ADR (별개).
-- **회귀**: webhook unit test (`internal/webhook/*`) + `internal/version/matrix_test.go`.
-
-### 차단점
-
-- PR-A7: commons v0.6.0 의존 (PR-A1 tag).
-- PR-B3: commons v0.7.0 의존 (PR-B1 — Sprint B 의 첫 PR).
-
-### 근거 링크
-
-- Plan §2 D11 (postgres pkg/status migration), D12 (matrix.go generic).
-- RFC-0018 §3.2 Migration 단계 2 (postgres pkg/finalizer 비대칭 보존).
-- ADR-0008 (postgres): cascade-delete-by-OwnerReference (보존 대상).
-
----
-
-## 현재 상태 (2026-05-08, v0.3.0-alpha.4 실제 argos 배포 + Day-0 마일스톤 반영)
-
-- **이번 세션**:
-  - v0.3.0-alpha.4 release 를 기준으로 GitOps rollout 을 강제하고 live digest 를 검증했다.
-  - argos production source of truth 는 `argos-platform-data` 의 `platform/data/postgres-operator` Helm wrapper 이다. repo 의 `deploy/` 는 대체 Kustomize 진입점으로 유지한다.
-  - milestone 표기는 `0.3.0-alpha.4 Day-0 alpha-deployable 실제 배포 완료` 까지만 올린다. P1 0.4.0 production-ready 는 HA replica, backup/restore drill, PITR, 장기 soak 가 남아 있어 완료가 아니다.
-- **live 검증 인용**:
-  ```
-  $ kubectl -n argocd get app platform-data-postgres-operator -o wide
-  platform-data-postgres-operator   Synced   Healthy   cc662773f1a286d6b11a768af151db0ccd47b63f
-
-  $ kubectl -n data get deploy platform-data-postgres-operator-controller-manager \
-      -o jsonpath='{.status.readyReplicas}/{.status.replicas} {.spec.template.spec.containers[0].image} {.spec.template.metadata.annotations.argos\.io/release-index-digest}{"\n"}'
-  1/1 ghcr.io/keiailab/postgres-operator:0.3.0-alpha.4 sha256:394ec5eb4aa09d316d957a3c751bb7283f21bfa71f19a9d2871ccbc7ec974f2f
-
-  $ kubectl -n data get pod -l control-plane=controller-manager \
-      -o jsonpath='{range .items[?(@.metadata.name contains "platform-data-postgres-operator")]}{.metadata.name} {.status.containerStatuses[0].ready} {.status.containerStatuses[0].imageID}{"\n"}{end}'
-  platform-data-postgres-operator-controller-manager-6666494x22sx true ghcr.io/keiailab/postgres-operator@sha256:394ec5eb4aa09d316d957a3c751bb7283f21bfa71f19a9d2871ccbc7ec974f2f
-
-  $ kubectl -n data get postgrescluster argos-postgres \
-      -o jsonpath='{.status.phase} {.status.conditions[?(@.type=="Ready")].status} {.status.conditions[?(@.type=="Progressing")].status}{"\n"}'
-  Ready True False
-  ```
-- **다음 진입점**:
-  - release-smoke retry 패턴 이식, release tag 시 SBOM 자동 업로드, P1 HA/backup/PITR 순으로 계속 진행.
-
-<!-- live-verified: 2026-05-08 -->
-
-## 현재 상태 (2026-05-07, T20 SBOM 타겟 + v0.3.0-alpha.3 SBOM backfill — 통합 plan T0-1 postgres 부분 종결)
-
-- **이번 세션 (it49 — ~/.claude/plans/wondrous-tumbling-porcupine.md T0-1 cross-cut)**:
-  - `Makefile` 의 `release-notes` 타겟 직후 `.PHONY: sbom` 8 라인 블록 삽입. valkey-operator/Makefile L465-472 의 syft 패턴 byte-identical 이식 — chart name `postgres-operator` 만 치환.
-  - `make help` 자동 출력에 sbom 타겟 즉시 등록 — Makefile help target 의 awk parse-by-`##` 컨벤션 덕분.
-  - v0.3.0-alpha.3 GitHub Release 에 retroactive `postgres-operator-v0.3.0-alpha.3.spdx.json` (811455 bytes, SPDX-2.3, 90 packages) `gh release upload`.
-  - `release-smoke-test.sh v0.3.0-alpha.3` 결과 SBOM FAIL 1건 → **12 PASS / 0 FAIL** 회복. install.yaml 자산도 release smoke 가 인식 (postgres only).
-  - mongodb-operator T22 (it48 e898c30) 의 cross-cut. 4 repo SSoT (valkey ↔ mongodb ↔ postgres) 향한 첫 번째 정합 단계.
-- **검증 인용**:
-  ```
-  $ syft version
-  Application:   syft
-  Version:       1.44.0  (Homebrew)
-
-  $ make sbom VERSION=v0.3.0-alpha.3
-  ✓ SBOM: /tmp/postgres-operator-v0.3.0-alpha.3.spdx.json (811455 bytes)
-
-  $ jq '{spdxVersion, name, packages: (.packages | length)}' /tmp/postgres-operator-v0.3.0-alpha.3.spdx.json
-  {"spdxVersion": "SPDX-2.3", "name": "ghcr.io/keiailab/postgres-operator", "packages": 90}
-
-  $ gh release upload v0.3.0-alpha.3 /tmp/postgres-operator-v0.3.0-alpha.3.spdx.json -R keiailab/postgres-operator
-  (silent success)
-
-  $ ./scripts/release-smoke-test.sh v0.3.0-alpha.3
-  ✓ release v0.3.0-alpha.3 존재
-  ✓ chart .tgz asset 첨부
-  ✓ SBOM (SPDX) asset 첨부 — supply chain 표준
-  ✓ image ghcr.io/keiailab/postgres-operator:v0.3.0-alpha.3 (digest: sha256:9a976910e893...)
-  ✓ Pages status=built / index.yaml fetch (20181 bytes) / version: 0.3.0-alpha.3 존재
-  ✓ helm pull / helm template (default + features.cluster/backup/autoscaling=true)
-  ✓ trivy image: 0 HIGH+CRITICAL (fixed CVE 없음)
-  RESULT: 12 PASS / 0 FAIL
-  ```
-- **mongodb 와 비교**: postgres 90 packages vs mongodb 103 — postgres 가 dep tree 더 가벼움. chart .tgz 19773 bytes (postgres) vs 69824 (mongodb) — postgres alpha 가 functionality 면에서 더 작음.
-- **다음 진입점 (it50+)**:
-  - **C-P0-4 cross-cut**: postgres / valkey 의 `release-smoke-test.sh` 에 mongodb it45 retry_check 패턴 이식 (gh-pages CDN flake 흡수, 본 cycle 의 자연 후속).
-  - **T0-2 자동화**: release tag 시 `make sbom && gh release upload` 자동화 (mongodb + postgres `release.sh` 또는 Makefile release 타겟 통합).
-  - **A-P0 평행 진행**: NOTICE (valkey + commons) / ADOPTERS.md (3 operator) / GOVERNANCE 임계 수치화 / Scorecard badge — 사용자 결정 불필요, 즉시 가능.
-
-<!-- live-verified: 2026-05-07 -->
-
-## 이전 현재 상태 (2026-05-07, PG17/PG18 HA smoke + PG18 failover smoke 통과)
-
-- **이번 세션**:
-  - `hack/smoke.sh` 에 `PG_MAJOR` / `POSTGRES_VERSION` / `NS` / `SHARD_REPLICAS` override 지원 추가.
-  - hardcoded dev sample apply 대신 smoke 스크립트가 quickstart `PostgresCluster` 를 지정 namespace/version 으로 생성한다.
-  - PG17 + PG18 각각 Kind 에서 runtime image build/load → operator deploy → PostgresCluster Ready → `psql SELECT 1` round-trip PASS.
-  - `SHARD_REPLICAS=1` smoke 로 primary+standby 2 Pod, `pg_stat_replication WHERE state='streaming'` 을 PG17/PG18 양쪽에서 PASS.
-  - `SMOKE_FAILOVER=1` false-pass 제거: RTO 미측정/standby 미승격은 exit 1 로 처리. macOS `date -d` 의존 제거.
-  - PG18 failover 차단 원인 수정: election identity 를 `podName/podUID` 로 바꾸고, `ReleaseOnCancel=false`, restarted ordinal-0 standby marker, `POSTGRES_MEMBER_COUNT`, CR status polling 을 추가했다.
-  - PG18 `SHARD_REPLICAS=1 SMOKE_FAILOVER=1` smoke 재실행 결과 standby `*-1` 이 primary 로 승격, 기존 `*-0` 은 standby 로 재진입, CR status primary 도 `*-1` 로 수렴했다.
-- **검증 인용**:
-  ```
-  $ ./hack/smoke.sh
-  SUCCESS — quickstart cluster Ready, psql SELECT 1 = 1  # PG18 default
-
-  $ CLUSTER_NAME=postgres-operator-smoke-17 PG_MAJOR=17 POSTGRES_VERSION=17 CR_NAME=quickstart17 ./hack/smoke.sh
-  SUCCESS — quickstart cluster Ready, psql SELECT 1 = 1
-  spec.postgresVersion: "17"
-
-  $ CLUSTER_NAME=postgres-operator-smoke-18 PG_MAJOR=18 POSTGRES_VERSION=18 CR_NAME=quickstart18 ./hack/smoke.sh
-  SUCCESS — quickstart cluster Ready, psql SELECT 1 = 1
-  spec.postgresVersion: "18"
-
-  $ CLUSTER_NAME=postgres-operator-smoke-17-ha PG_MAJOR=17 POSTGRES_VERSION=17 CR_NAME=quickstart17ha SHARD_REPLICAS=1 ./hack/smoke.sh
-  walreceiver|streaming|00:00:00.00007|00:00:00.000244|00:00:00.000283
-
-  $ CLUSTER_NAME=postgres-operator-smoke-18-ha PG_MAJOR=18 POSTGRES_VERSION=18 CR_NAME=quickstart18ha SHARD_REPLICAS=1 ./hack/smoke.sh
-  walreceiver|streaming|00:00:00.000096|00:00:00.000277|00:00:00.000279
-
-  $ CLUSTER_NAME=postgres-operator-smoke-18-failover PG_MAJOR=18 POSTGRES_VERSION=18 CR_NAME=quickstart18fo SHARD_REPLICAS=1 SMOKE_FAILOVER=1 ./hack/smoke.sh
-  walreceiver|streaming|00:00:00.000093|00:00:00.000321|00:00:00.000367
-  RTO = 21s (target < 30s)
-  PASS: RTO < 30s
-  PASS: CR status reflects quickstart18fo-shard-0-1 and restarted old primary is standby
-
-  $ make test
-  PASS (non-e2e all packages)
-
-  $ make lint
-  0 issues
-
-  $ make validate
-  helm lint --strict PASS, helm template CRD count PASS, dist/install.yaml generated
-  ```
-- **남은 리스크**:
-  - PG18 primary Pod delete smoke 는 RTO < 30s 로 통과했다. 다만 chaos-mesh 기반 kill/network partition, multi-node 장애, pgBackRest 결합, 일반화된 fencing/old-primary 재합류는 아직 F03/F05 범위로 남아 있다.
-
-## 현재 상태 (2026-05-07, governance 표준 정합 — P0+P1 baseline 도달)
-
-- **이번 세션 (상용 제품 수준 trajectory)**:
-  - **ADR 경로 표준화**: `docs/adr/` → `docs/kb/adr/` (`git mv` 16 files, history 보존). 8 file 의 참조 갱신 (CHANGELOG/README/HANDOFF/deploy/README/docs/rfcs).
-  - **ADR INDEX.md 신규** — 활성 6 + archived 10 의 v0.x 처리 명시 (Superseded / 활성 / 비고).
-  - **ADR-0007 신규**: Hook 도구로 pre-commit 채택 (글로벌 lefthook 표준 분기) — RFC 0002 4 계층 매핑 명시 정합 + 마이그레이션 트리거 정의.
-  - **deps log seed**: `docs/kb/deps/2026-05.md` (P1 추적성, enforcement.md §2.4).
-- **검증 인용**:
-  ```
-  $ make lint
-  golangci-lint v2.8.0 build → 0 issues. ✓ (3-repo 모두 PASS)
-  ```
-- **3-repo governance 정합 매트릭스**:
-  | 항목 | mongodb | postgres | valkey | 비고 |
-  |---|---|---|---|---|
-  | ADR 경로 | docs/kb/adr ✓ | docs/kb/adr ✓ | docs/kb/adr ✓ | 표준 정합 |
-  | ADR INDEX | ✓ | ✓ (신규) | ✓ (정렬) | 표준 정합 |
-  | deps log | ✓ (신규) | ✓ (신규) | ✓ (신규) | seed 완료 |
-  | hook 도구 | pre-commit | pre-commit | lefthook | mongodb+postgres 는 ADR-0011/0007 정당화 |
-  | GH workflows 0 | ✓ | ✓ | ✓ | RFC 0002 |
-  | Makefile 게이트 | ✓ | ✓ | ✓ | RFC 0002 L3 |
-- **다음 단계 (열린 트랙)**: F02 cycle 5 후속 (kind smoke — `hack/smoke.sh`), F02-residual (Pod env 주입 / readiness HTTP), mongodb golangci-lint 도입 (현재 staticcheck-only).
-
-## Quality baseline (2026-05-07 실측)
-
-`enforcement.md §3.4 (Coverage 합산)` 의 P2 측정 — 본 세션 baseline.
-
-```
-$ make test    # exit 0 / FAIL: 0
-internal/plugin/sharding         coverage: 100.0% of statements
-internal/webhook/v1alpha1        coverage:  88.5% of statements
-internal/version                 coverage:  73.3% of statements
-internal/plugin/extension/*      coverage:   0.0% of statements (no test files — 6 pkg)
-test/utils                       coverage:   0.0% of statements
+```bash
+make hooks-install       # lefthook pre-commit / commit-msg / pre-push
+make gate                # lint + test + audit + validate (one-shot)
+make validate            # CRD count + 18 monitoring grep + version drift + sdk validate + kube-linter
+make audit               # govulncheck + trivy fs HIGH/CRITICAL + gosec
 ```
 
-**80% 목표** 대비:
-- ✓ sharding 100% / webhook 88.5% — 안정 영역
-- △ version 73.3% — 근접
-- ✗ plugin/extension/{pgaudit,pgcron,pgnodemx,pgvector,postgis,setuser} 6 pkg 0% — *최대 gap*. 강화 우선 후속 트랙.
+`make validate` enforces (among others):
 
-`enforcement` 의 "절대치보다 *변경된 코드의 커버 여부*가 우선" 원칙 적용 — 본 baseline 은 회귀 비교 기준점.
+- `bundle/manifests/postgres.keiailab.io_*.yaml` count ≥ 8.
+- `operator-sdk bundle validate ./bundle` (default + operatorframework suite).
+- Chart `appVersion` ↔ kustomize `newTag` ↔ dist image-tag drift.
+- `.github/workflows/` absence (RFC-0002 / ADR-0009).
+- kube-linter on `dist/install.yaml` and the helm-template output.
 
-## 이전 상태 (2026-05-06, release pipeline 강화 — 3-repo 정합)
+## Next-session entry points
 
-- **HEAD `c6aec64`**: `chore(release): smoke-test SBOM+trivy 검증 강화 + step 번호 정합 + .gitignore (dist/ + .claude/)`
-- **이번 세션 작업 (3-repo 정합)**:
-  - SBOM (SPDX `.spdx.json`) asset 검증 step 추가 — supply chain 표준
-  - trivy image post-publish HIGH/CRITICAL fixed-only scan 추가 (`--ignore-unfixed --exit-code 1`) — 운영 후 CVE 모니터링
-  - smoke-test step 번호 [N/5] → [N/6] 정합 (재번호 누락 버그 수정)
-  - .gitignore: `dist/` (kubebuilder build-installer 산출물) + `.claude/ralph-loop.local.md`
-- **검증 인용 (mongodb 동일 변경 실측)**:
+### To finish T28 (community-operators)
+
+1. Maintainer obtains a PAT carrying `write:packages` scope and authenticates:
+   `gh auth refresh -s write:packages` or
+   `echo $PAT | docker login ghcr.io -u eightynine01 --password-stdin`.
+2. `make bundle-build VERSION=0.3.0-alpha.18` (already passes; just rebuild if needed).
+3. `docker push ghcr.io/keiailab/postgres-operator-bundle:0.3.0-alpha.18`.
+4. On PR [#8109](https://github.com/k8s-operatorhub/community-operators/pull/8109)
+   wait for the community-operators CI; flip the PR to Ready when green.
+
+### To finish T29 (Pooler TLS)
+
+- Stage 3 — live cert-manager kind drill: install cert-manager, create an
+  `Issuer` (or self-signed root), apply
+  `config/samples/postgres_v1alpha1_pooler_autotls.yaml`, and confirm the
+  Pooler Deployment mounts the cert-manager-issued Secret.
+- Stage 4 — self-signed fallback for cert-manager-less environments.
+- Stage 5 — automatic rotation observability (status condition that tracks
+  cert-manager `Certificate.status.notAfter`).
+
+### To finish T27 (live kind smoke)
+
+- Run the 5 scenarios × PG17 / PG18 matrix:
+  ```bash
+  SMOKE_DATABASE=1 SMOKE_USER=1 SMOKE_POOLER=1 \
+  SMOKE_SCHEDULEDBACKUP=1 SMOKE_IMAGECATALOG=1 \
+  CR_NAME=quickPG18 SHARD_REPLICAS=0 \
+  ./hack/smoke.sh
   ```
-  $ ./scripts/release-smoke-test.sh
-  ▸ [1/6] GH Release tag + assets   → SBOM (SPDX) asset 첨부 ✓
-  ▸ [6/6] trivy image post-publish scan → 0 HIGH+CRITICAL ✓
-  RESULT: 12 PASS / 0 FAIL (v1.4.5)
-  ```
-  postgres v0.3.0-alpha.1 release 에 SBOM asset (postgres-operator-v0.3.0-alpha.1.spdx.json) 존재 사전 확인.
-- **다음 단계 (열린 트랙)**: F02 cycle 5 후속 (kind smoke 실측 — `hack/smoke.sh`), F02-residual (Pod env 주입 / readiness HTTP endpoint).
+  Repeat with `PG_MAJOR=17 POSTGRES_VERSION=17 CR_NAME=quickPG17`.
+- Record the result in `docs/operator-guide/cross-validation-cnpg.md`
+  (move the matching rows from ⚠️ → ✅).
 
-## 이전 상태 (2026-05-06, T16 GitOps deploy 정합 — *완료, PR #17 머지*)
+### To rotate the Pooler built-in auth password (T27 ⑥)
 
-- **T16 머지됨** (`fix(deploy): namespace prod/db → data 통합 + storageClass ceph-rbd 정합 (ADR-0006) (#17)`).
-- **결정 기록**: patch target name 은 `system` (config/manager 직접 import → namePrefix 미적용). mongodb-operator 의 `system → mongodb-operator-system` 수동 수정 방식은 kubebuilder regenerate 호환성 저하로 거절.
+```bash
+kubectl annotate pooler <name> postgres.keiailab.io/rotate-pooler-password=true --overwrite
+# The operator runs ALTER ROLE, updates the userlist.txt Secret in place,
+# strips the annotation, and records status.builtinAuthLastRotation.
+```
 
-## 현재 상태 (2026-05-03)
+## Reference
 
-- **HEAD**: F02 cycle 5 — `docs(deployment): kind smoke script + operator-guide 배포 가이드` (commit 직전)
-- **HEAD~1..4**: F02 cycle 1~4 — sample CR / Dockerfile.pg / env+probes / RBAC+initdb / /readyz IsReady
-- **HEAD~5**: F02 wiring (a548d37) — supervise 패키지 + election callback
-- **HEAD~6**: T15 — election lease shard ordinal 마이그레이션
-- **HEAD~7**: F01b — controller reconcile 본체
-- **브랜치**: feat/ha-alpha-c1c2
-- **현재 phase**: **P1 진행 중**. F01a + F01b + T15 + **F02 90% (테스트)** 완료.
-- **F02 deployable 검증 결과**:
-  - `make lint`: 0 issues
-  - `go test ./... -count=1`: 모든 패키지 PASS
-  - `make validate`: kustomize + helm lint --strict + build-installer 통과
-  - 미실측 (다음 세션): `hack/smoke.sh` 로 kind 클러스터 적용 — Pod Ready + psql round-trip 검증.
-
-## 본 세션 (F02 supervise wiring) 의사결정 기록
-
-1. **2026-05-03**: `TestReal_StopTimeoutSendsSIGKILL` race 진단 — fake-postgres trap 설치 직전에 SIGTERM 도착 시 default 동작 (즉시 종료) 발동 → exitCh 가 ctx.Done 보다 먼저 fire. Reload 테스트의 stderr "FAKE_POSTGRES_PID=" 대기 패턴을 `waitForStderr` 헬퍼로 추출 후 timeout 테스트에도 적용.
-2. **2026-05-03**: TERM_DELAY=10 → 2 로 단축. SIGKILL 후에도 trap 의 sleep 자식이 orphan 되어 Go cmd.Wait() 가 stderr pipe EOF 를 기다리며 block (Go cmd.Stderr 가 non-os.File 일 때 내부 pipe 사용). ctx (1s) 보다 크되 ExitCh 대기 (3s) 안에 끝나야 함.
-3. **2026-05-03**: `--supervise-disabled` flag 추가 — election/fencing 과 동일 패턴. dev/local 모드 + 단위 테스트에서 postgres binary 부재 시 fork 회피.
-4. **2026-05-03**: OnStoppedLeading 의 demote 는 `sup.Stop(ctx, fast=true)` (SIGINT) 만 호출 — PG 는 native pg_demote 부재. 본 instance 는 ExitCh fire 시 통째 exit → K8s Pod 재시작 → 다음 부팅에 standby 진입. standby.signal 재구성 로직은 F03 후속.
-5. **2026-05-03**: gocyclo 31 (>30) 해소를 위해 `buildSupervisor` / `startSupervisor` / `gracefulStopSupervisor` / `buildFencer` 4 helper 추출. F01b 의 `applyClusterConditions` 추출 패턴 동일. main 흐름이 한 줄 의도로 압축됨.
-6. **2026-05-03**: ExitCh watcher goroutine 이 supExitCh 에 송출 → main select 의 5번째 case → `os.Exit(1)`. postgres child 가 죽으면 instance 도 함께 죽음 (PID 1 모델 ADR 0002 그대로).
-
-## 이전 세션 (F01b) 의사결정 기록
-
-1. **2026-05-03**: helper 시그니처는 호출자 결정형 유지 (`buildConfigMap(cluster, name, role, shardOrdinal, reg)` 등). 응집형 (`buildShardConfigMap(cluster, ordinal, reg)`) 도 후보였으나 plan 의 "5개 helper 시그니처 통일" 명시에 따라 §3 Surgical 우선 — pool string → shardOrdinal int32 만 적용하고 함수 갯수/이름은 보존.
-2. **2026-05-03**: `SelectorLabels(cluster, role, shardOrdinal int32)` 의 ordinal=-1 sentinel 로 router 의 "shard 차원 부재" 표현. 별도 `RouterSelectorLabels()` 분리 회피 (§2 Simplicity — 단일 사용 코드에 추상화 금지).
-3. **2026-05-03**: envtest 의 STS/Deployment controller 부재 ↔ `Status.ReadyReplicas` 자동 진행 불가. `markSTSReady` 헬퍼로 mock + spec annotation bump 로 reconcile re-trigger. 이는 envtest 의 표준 패턴이며 실 클러스터에서는 STS controller 가 자동 처리.
-4. **2026-05-03**: cascade-delete envtest 는 GC controller 부재로 *직접 삭제 관측 불가* — 대신 OwnerReference (Controller=true, BlockOwnerDeletion=true, UID 일치) 부착 자체를 검증. K8s GC 의 cascade 동작은 본 메타데이터를 단일 진실로 사용하므로 이 검증이 cascade GC 의 *전제 조건* 을 보장한다.
-5. **2026-05-03**: `r.upsert` 직후 같은 reconcile 내에서 `r.Get(STS)` 시 cache propagation 지연으로 NotFound 가 잠깐 나타날 수 있다 → graceful fallback (readiness=false 로 단순화, 다음 reconcile 에 진짜 status 관측). 동일 패턴을 router Deployment 에도 적용.
-6. **2026-05-03**: Reconcile cyclomatic complexity 가 31 (>30) → status 갱신부를 `applyClusterConditions` 헬퍼로 분리. 단일 책임 + 테스트 가능성 향상.
-7. **2026-05-03**: `internal/plugin/sharding/api.go` Name() doc comment 의 `PostgresClusterSpec.Sharding.Backend 와 일치` → `PostgresClusterSpec.ShardingMode 가 "native" 일 때 활성화` 로 정정. 새 spec 에 sharding 필드 부재.
-
-## 다음 단계 (F02 100% 도달 + F03 진입)
-
-**즉시 (F02 90% → 100%)** — 외부 환경 의존:
-
-1. `./hack/smoke.sh` 실행 — kind 클러스터에 quickstart sample apply 후 Pod Ready + psql round-trip 검증.
-   첫 실행 시 발견되는 모든 환경 이슈 (image push, fsGroup propagation, RBAC 빠진 권한, Pod sandbox 초기화 race 등) 는 fix-forward.
-2. (선택) `ghcr.io/keiailab/pg:18` push 자동화 — 현재는 `make docker-build-pg && make docker-push-pg` 수동.
-3. WAL lag 측정 — `pg_stat_replication` 폴러를 instance manager 에 추가 + Status.Shards[].Replicas[].LagBytes 갱신.
-
-**F02 잔여 (별도 plan)**:
-
-F02 의 supervise + wiring 60% 완료 — 잔여 40% 는 *operator 측 통합* 이라 별도 PR 권장:
-
-**F02-residual (별도 plan)** — 100% 도달까지:
-1. `internal/controller/postgrescluster_controller.go` 의 `buildShardStatefulSet` 등에 Pod env 주입: `POSTGRES_BIN_DIR` (init container 또는 runtime image path), `POSTGRES_DATA_DIR`, `POSTGRES_CONFIG_FILE`, `POSTGRES_HBA_FILE`, `POSTGRES_LOCAL_DSN`. ConfigMap mount + 결정 (별도 ADR — config file path convention).
-2. Readiness probe HTTP endpoint — `/readyz` 에 `sup.IsReady(ctx)` 통합. 현재는 election Status 만 반영.
-3. WAL lag 측정 — `pg_stat_replication` query → metrics endpoint.
-4. `Status.Shards[].Primary.Endpoint` 갱신 — sidecar patch vs controller active probe (별도 ADR).
-
-**F03 진입점** — RFC 0003 election/fencing receiver 측 → active 측 완성:
-- Demote 후 standby.signal 재구성 로직 (지금은 sup.Stop 만 — restart 시 어떻게 standby 로 부팅할지 결정).
-- Fence 해제 정책 (운영자 수동 vs 자동 timeout).
-- multi-shard 동시 fail 시 election 우선순위.
-
-## 후속 정리 작업 (F02 이후, 별도 PR)
-
-- `docs/roadmap.md` 새 8-Phase (P0~P7) 본문 재작성 — 현재 deprecated stub.
-- `docs/concepts/`, `docs/how-to/`, `docs/reference/` 의 v0.x 어휘 (coordinator/workers/routers) → 새 spec 어휘 (shard/router) 정리.
-- F04 진입점: `internal/controller/backup/` — RFC 0001 `spec.backup` reconcile + BackupJob CRD 연결.
-
-## 차단점
-
-없음. F02 는 controller 와 별도 layer (instance binary) 라 mechanical 진행 가능.
-
-## 근거 링크
-
-- 본 세션 plan: `/Users/phil/.claude/plans/mighty-wiggling-hamming.md` (F01b 7-파일 wiring 결정)
-- RFC 0001: `docs/rfcs/0001-postgrescluster-crd-v2.md` §3.1 (필드) + §3.4 (Condition 카탈로그)
-- ADR 0008 (cascade delete, archived as v0.x): `docs/kb/adr/_archive/v0.x/0008-finalizer-avoidance-policy.md`
-- standards 적용: `~/Documents/ai-dev/standards/principles.md` §2 (Simplicity), §3 (Surgical)
-- 이전 세션 HANDOFF: 본 파일 git history (commit f01894e 시점).
+- `README.md` — quickstart and the 8 CRD surface table.
+- `ROADMAP.md` and `docs/roadmap.md` — Gates G0–G6 with sub-task checklists.
+- `TASKS.md` — full P1 task table (F01a–T29) and the next-phase preview.
+- `CHANGELOG.md` — Keep-a-Changelog history through 0.1.1-alpha → 0.3.0-alpha.18.
+- `docs/operator-guide/cross-validation-cnpg.md` — feature matrix vs CloudNativePG.
+- `docs/operator-guide/community-operators-onboarding.md` — community-operators PR procedure.
+- `SUPPORT.md` / `SECURITY.md` / `CONTRIBUTING.md` / `GOVERNANCE.md` / `MAINTAINERS.md` — community policy surface.

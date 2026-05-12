@@ -84,6 +84,7 @@ func (r *PostgresUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		if apierrors.IsNotFound(err) {
 			message := "Referenced PostgresCluster " + user.Spec.Cluster.Name + " not found in namespace " + user.Namespace
 			markPostgresUserStatus(&user, false, PostgresUserReasonClusterNotFound, message)
+			logger.Info("PostgresUser target cluster not found", "cluster", user.Spec.Cluster.Name)
 			return ctrl.Result{}, r.statusUpdate(ctx, &user)
 		}
 		return ctrl.Result{}, err
@@ -93,6 +94,9 @@ func (r *PostgresUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if !ok {
 		message := "ready primary Pod for PostgresCluster " + cluster.Name + " not found"
 		markPostgresUserStatus(&user, false, PostgresUserReasonPrimaryNotReady, message)
+		logger.Info("PostgresUser primary not ready — requeue",
+			"cluster", cluster.Name,
+			"shardCount", len(cluster.Status.Shards))
 		if err := r.statusUpdate(ctx, &user); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -125,6 +129,9 @@ func (r *PostgresUserReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	user.Status.PasswordSecretResourceVersion = passwordSecretResourceVersion
 	markPostgresUserStatus(&user, true, PostgresUserReasonReconciled,
 		"PostgresUser "+user.Spec.Name+" reconciled")
+	logger.Info("PostgresUser reconciled",
+		"spec.name", user.Spec.Name,
+		"passwordSecretRV", passwordSecretResourceVersion)
 	return ctrl.Result{}, r.statusUpdate(ctx, &user)
 }
 

@@ -116,8 +116,11 @@ K8s가 namespace 안에서 POD_NAME을 unique 보장하므로, 동일 노드에 
 
 ## 8. 알려진 한계 (M1+P2-T2)
 
-- **Failover controller 미구현** — election holder 변경이 PG primary promote/demote로 이어지는 supervise 로직은 P2-T3 후속(현재는 election callback 시그니처 + fence 라이프사이클만 동결).
-- **`pg_rewind` 자동화 미구현** — fence 표시 *후*의 인-flight write 회수는 P2-T4가 처리.
+- **Failover controller 검증 범위 제한** — controller-layer promotion exec 와 status 수렴 경로는 구현됐지만, network partition/STONITH 계열 live chaos 검증은 F05 후속이다.
+- **`pg_rewind` live drill 미완료** — former primary marker 발견 시 `pg_rewind --target-pgdata ... --source-server ...` 실행 경로와 실패 시 fresh `pg_basebackup` fallback, 실패 reason/message status 표면화는 구현됐지만, 실제 divergent WAL 을 만든 뒤 rewind 성공/실패 fallback 을 kind/chaos 로 아직 검증하지 않았다.
+- **동기 복제 live drill 미완료** — `spec.postgresql.synchronous` 는
+  `required/preferred` 설정 렌더링과 standby `application_name` wiring 까지
+  구현됐지만, 장애 주입 중 commit block/continue 동작과 RPO=0 실측은 F05 후속이다.
 - **PVC mount 외 보호 없음** — NFS·S3FS 등 강제 단독 마운트 보장이 약한 PV는 별도 StorageClass 차원 보호 필요(ADR 후속 후보).
 - **Prometheus 메트릭 미배선** — `instance_election_status`, `instance_fencing_violations_total`은 P6 (Observability) 통합 시점에 활성.
 - **이벤트 레코더 더미** — `record.FakeRecorder` 사용 중. 실 EventRecorder는 P6 통합 시 교체.
@@ -166,4 +169,4 @@ instance manager ServiceAccount는 자기 namespace의 PVC `get`/`patch` 권한 
 - [RFC-0007 — HA Election + PVC Fencing 프로토콜 (Draft)](../rfcs/0007-ha-election-and-fencing.md) (부록 A: PVC Fencing 상세)
 - [ADR 0002 — Patroni 미사용 (archived)](../kb/adr/_archive/v0.x/0002-no-patroni-instance-manager.md)
 - 코드: `internal/instance/election/`, `internal/instance/fencing/`
-- 후속 작업: P2-T3 (failover controller) / P2-T4 (pg_rewind 통합)
+- 후속 작업: F05 chaos E2E / live divergent WAL `pg_rewind` drill

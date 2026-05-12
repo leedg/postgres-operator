@@ -37,6 +37,15 @@
    - 실행: `make release VERSION=v0.1.1-alpha`
    - verify: GHCR image push, Git tag push, GitHub Release 생성, `gh-pages` Helm index 갱신이 모두 성공한다.
 
+5. Artifact Hub 등록/검색 검증
+   - 전제: Artifact Hub control panel 에 Helm repository 를 `keiailab-postgres-operator` 이름으로 추가한다.
+   - repository URL: `https://keiailab.github.io/postgres-operator`
+   - package URL: `https://artifacthub.io/packages/helm/keiailab-postgres-operator/postgres-operator`
+   - API 등록: `ARTIFACTHUB_API_KEY_ID=... ARTIFACTHUB_API_KEY_SECRET=... make artifacthub-register`
+   - verify: `make artifacthub-smoke`
+   - 실패 해석: Helm repository reachability 단계가 통과하고 Artifact Hub package registration 단계만 404이면, chart package 문제가 아니라 Artifact Hub 쪽 repository 미등록 또는 아직 미처리 상태다. `charts/artifacthub-repo.yml` 의 `repositoryID` 는 Artifact Hub repository card 에 표시되는 ID 와 일치해야 Verified publisher 가 붙는다.
+   - 현재 상태 확인: `make artifacthub-smoke` 가 `Artifact Hub repository is not registered` 로 실패하면 `https://artifacthub.io/api/v1/repositories/search?org=keiailab&kind=0` 결과에 `https://keiailab.github.io/postgres-operator` 가 없는 상태다. 등록 후 Artifact Hub tracker 는 보통 30분 주기로 재처리하므로 새 chart version 게시 또는 tracker 대기 뒤 재검증한다.
+
 ## 수동 검증 명령
 
 ```bash
@@ -46,6 +55,7 @@ make validate
 helm lint --strict charts/postgres-operator
 helm template --include-crds gate charts/postgres-operator
 helm package charts/postgres-operator -d /tmp/postgres-operator-release
+make artifacthub-smoke
 kubectl create --dry-run=client --validate=false -f dist/install.yaml
 rm -rf /tmp/postgres-operator-release
 ```

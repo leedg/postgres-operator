@@ -52,7 +52,12 @@
     },
     {
       "group": "Operator Guide",
-      "pages": ["operator-guide/ha-election"]
+      "pages": [
+        "operator-guide/deployment",
+        "operator-guide/ha-election",
+        "operator-guide/pooler-monitoring",
+        "operator-guide/cross-validation-cnpg"
+      ]
     },
     {
       "group": "ADR",

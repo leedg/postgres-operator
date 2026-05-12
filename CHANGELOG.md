@@ -74,6 +74,17 @@ This project follows SemVer.
 
 ### Added
 
+- *(api,controller)* T29 stage 4 — `Pooler.spec.pgbouncer.autoTLS.selfSigned`
+  field. When set to true (and `issuerRef` is empty), the operator
+  generates an in-process RSA-2048 self-signed CA + leaf certificate
+  (1-year validity, 30-day renewal skew) and stores it in a Secret
+  named `<pooler>-client-tls` / `<pooler>-server-tls` with
+  `tls.crt`/`tls.key`/`ca.crt` keys — same layout as a cert-manager
+  Certificate-issued Secret. Closes the cert-manager-less gap. A CEL
+  XValidation rule enforces "exactly one of {issuerRef, selfSigned}"
+  at admission. Regression test
+  `TestPoolerAutoTLS_SelfSignedCreatesSecretAndMirrorsNotAfter` +
+  sample CR.
 - *(api,controller)* T29 stage 5 — `Pooler.Status.AutoTLSClientCertNotAfter`
   + `AutoTLSServerCertNotAfter` mirror cert-manager
   `Certificate.status.notAfter` so operators can list expiring

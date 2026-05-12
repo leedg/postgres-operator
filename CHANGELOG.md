@@ -105,19 +105,23 @@ This project follows SemVer.
 
 ### Fixed
 
-- *(instance)* HA bootstrap fence race — the previous "fence on every
-  OnStoppedLeading in a memberCount>1 cluster" rule fenced a
-  bootstrap Pod's PVC even when the Pod had never actually served
-  as primary (election lease flipped while postgres was still in
-  initdb / waitSupReady). Two-layer guard added: (i) skip
-  MarkFenced when `supervise.IsStandby(dataDir)` is true; (ii)
-  track `promotedAtLeastOnce` and fence only when this Pod has
-  successfully run pg_promote. Regression test
-  `TestHandleStoppedLeading_SkipsFenceWhenNeverPromoted`.
-  SHARD_REPLICAS=0 PG18 + PG17 5/5 smoke regression confirmed.
-  Deeper election-design follow-up tracked as T30 (election
-  should prefer ordinal-0 or defer to operator-provided primary
-  hint during bootstrap).
+- *(instance)* HA bootstrap fence race — final fix. The original
+  "fence-on-every-leader-stop in memberCount>1 clusters" rule
+  fenced a bootstrap Pod's PVC and seeded standby.signal on any
+  transient lease-renewal lapse, causing the next boot to take
+  the Follower branch forever. Three-layer fix shipped:
+  (i) `supervise.IsStandby(dataDir)` short-circuit;
+  (ii) `promotedAtLeastOnce atomic.Bool` flag that gates fencing
+  on actually-promoted state; (iii) **standby-pod election
+  downgrade** — pods that boot with standby.signal on disk take
+  the Follower election (never contest the lease). On top of
+  that, `handleStoppedLeading` is now side-effect-free —
+  failover is exclusively operator-driven via
+  `executeClusterPromotion`. PG18 / PG17 SHARD_REPLICAS=1 HA
+  smoke 5/5 PASS + WAL replication verified; SHARD_REPLICAS=0
+  5/5 regression confirmed. New regression test
+  `TestHandleStoppedLeading_NeverFencesOrDemotes` pins the
+  no-op contract.
 - *(controller)* PostgresDatabase / PostgresUser psql invocation
   defaulted to the OS user `pg-keiailab` (the Dockerfile.pg USER
   directive). With the iter#5 `eval` bug removed, this surfaced as

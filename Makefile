@@ -275,6 +275,14 @@ validate: manifests generate kustomize build-installer test-scripts ## CRD, Kust
 	else \
 		echo "operator-sdk 미설치: bundle validate 생략 (brew install operator-sdk)"; \
 	fi
+	@if command -v kube-linter >/dev/null 2>&1; then \
+		echo "=== kube-linter lint dist/install.yaml ==="; \
+		kube-linter lint dist/install.yaml; \
+		echo "=== kube-linter lint helm template ==="; \
+		helm template gate "$(HELM_CHART)" --include-crds | kube-linter lint -; \
+	else \
+		echo "kube-linter 미설치: lint-k8s 생략 (brew install kube-linter)"; \
+	fi
 	@rm -f /tmp/postgres-operator-crd.yaml /tmp/postgres-operator-default.yaml /tmp/postgres-operator-helm.yaml /tmp/postgres-operator-helm-monitoring.yaml
 
 .PHONY: gate

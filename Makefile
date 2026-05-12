@@ -245,6 +245,11 @@ validate: manifests generate kustomize build-installer test-scripts ## CRD, Kust
 	else \
 		echo "kubectl API server 미연결: dist/install.yaml client dry-run 생략"; \
 	fi
+	@if [ -d .github/workflows ] && [ -n "$$(ls .github/workflows/ 2>/dev/null)" ]; then \
+		echo "[error] .github/workflows/ 가 비어 있지 않음 — ADR-0009 / RFC-0002 GitHub Actions 영구 금지 정책 위반"; \
+		ls -la .github/workflows/; \
+		exit 1; \
+	fi
 	@APP_VERSION="$$(grep -E '^appVersion:' charts/postgres-operator/Chart.yaml | sed -E 's/^appVersion:[[:space:]]*\"?([^\"]*)\"?$$/\1/')"; \
 		KUST_TAG="$$(grep -E '^[[:space:]]*newTag:' config/manager/kustomization.yaml | awk '{print $$2}')"; \
 		DIST_TAG="$$(grep -m 1 -E 'image:[[:space:]]+ghcr.io/keiailab/postgres-operator:' dist/install.yaml | sed -E 's/.*:([^[:space:]]+)$$/\1/')"; \

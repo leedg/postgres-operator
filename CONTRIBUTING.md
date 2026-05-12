@@ -23,7 +23,8 @@
 git clone https://github.com/keiailab/postgres-operator.git
 cd postgres-operator
 brew install lefthook   # 또는 go install github.com/evilmartians/lefthook@latest
-lefthook install        # pre-commit / commit-msg / pre-push hook 설치
+make hooks-install      # lefthook install wrapper — pre-commit/commit-msg/pre-push hook 설치
+make hooks-check        # hook 활성 상태 확인 (DCO + Conventional Commits 검사 자동화)
 make test            # envtest + 단위 테스트
 make lint            # golangci-lint
 make e2e             # kind 기반 e2e (5~10분)

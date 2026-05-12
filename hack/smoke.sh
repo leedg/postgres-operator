@@ -29,9 +29,10 @@
 #   7. SMOKE_HIBERNATION=1 이면 cnpg.io/hibernation=on/off + PVC data 보존 검증
 #   8. SMOKE_POOLER=1 이면 Pooler Service 경유 psql round-trip 검증
 #   9. SMOKE_DATABASE=1 이면 PostgresDatabase CR → status.applied + pg_database 검증
-#   10. replicas>=1 이면 streaming standby 를 pg_stat_replication 으로 확인
-#   11. SMOKE_FAILOVER=1 이면 primary Pod 삭제 후 standby promote RTO 측정
-#   12. cleanup (--keep 미지정 시 cluster 삭제)
+#   10. SMOKE_USER=1 이면 PostgresUser CR → status.applied + pg_roles 검증
+#   11. replicas>=1 이면 streaming standby 를 pg_stat_replication 으로 확인
+#   12. SMOKE_FAILOVER=1 이면 primary Pod 삭제 후 standby promote RTO 측정
+#   13. cleanup (--keep 미지정 시 cluster 삭제)
 
 set -euo pipefail
 
@@ -330,7 +331,7 @@ kubectl -n "$NS" get postgrescluster "$CR_NAME" -o yaml | tail -40
 
 # 7. Declarative hibernation smoke (선택 실행)
 if [[ "${SMOKE_HIBERNATION:-0}" == "1" ]]; then
-    log "[7/10] Declarative hibernation smoke (cnpg.io/hibernation=on/off)"
+    log "[7/13] Declarative hibernation smoke (cnpg.io/hibernation=on/off)"
     HIBERNATION_MARKER="smoke-$(date +%s)"
     kubectl -n "$NS" exec "$POD" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres \
         -v ON_ERROR_STOP=1 \
@@ -386,7 +387,7 @@ if [[ "${SMOKE_HIBERNATION:-0}" == "1" ]]; then
     fi
     log "  PASS: rehydrated and preserved PVC data marker"
 else
-    log "[7/10] skip hibernation smoke — SMOKE_HIBERNATION=${SMOKE_HIBERNATION:-unset} (set SMOKE_HIBERNATION=1 to enable)"
+    log "[7/13] skip hibernation smoke — SMOKE_HIBERNATION=${SMOKE_HIBERNATION:-unset} (set SMOKE_HIBERNATION=1 to enable)"
 fi
 
 # 8. Pooler Service psql smoke (선택 실행)
@@ -397,7 +398,7 @@ if [[ "${SMOKE_POOLER:-0}" == "1" ]]; then
     escaped_pooler_password="${POOLER_PASSWORD//\'/\'\'}"
     escaped_userlist_password="${POOLER_PASSWORD//\"/\"\"}"
 
-    log "[8/10] Pooler Service psql smoke (Pooler=$POOLER_NAME)"
+    log "[8/13] Pooler Service psql smoke (Pooler=$POOLER_NAME)"
     kubectl -n "$NS" exec "$POD" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres \
         -v ON_ERROR_STOP=1 -c "ALTER USER postgres PASSWORD '${escaped_pooler_password}'"
     kubectl -n "$NS" create secret generic "$POOLER_AUTH_SECRET" \
@@ -536,14 +537,14 @@ EOF
     fi
     log "  PASS: Pooler config hash changed, in-place reload completed, Pods unchanged, SELECT 1 = 1"
 else
-    log "[8/12] skip Pooler Service psql smoke — SMOKE_POOLER=${SMOKE_POOLER:-unset} (set SMOKE_POOLER=1 to enable)"
+    log "[8/13] skip Pooler Service psql smoke — SMOKE_POOLER=${SMOKE_POOLER:-unset} (set SMOKE_POOLER=1 to enable)"
 fi
 
 # 9. PostgresDatabase declarative smoke (T22 / T27 — psql reconcile 검증)
 #    PostgresDatabase CR 적용 → status.applied=true → pg_database 존재 확인.
 #    databaseReclaimPolicy=delete 로 CR 삭제 시 DROP DATABASE 자동 처리도 검증.
 if [[ "${SMOKE_DATABASE:-0}" == "1" ]]; then
-    log "[9/12] PostgresDatabase declarative smoke (psql reconcile)"
+    log "[9/13] PostgresDatabase declarative smoke (psql reconcile)"
     DB_NAME="smoke_db_$(date +%s)"
     cat <<DBSPEC | kubectl -n "$NS" apply -f -
 apiVersion: postgres.keiailab.io/v1alpha1
@@ -601,13 +602,84 @@ DBSPEC
     fi
     log "  PASS: PostgresDatabase reclaim=delete finalizer DROP DATABASE 검증"
 else
-    log "[9/12] skip PostgresDatabase smoke — SMOKE_DATABASE=${SMOKE_DATABASE:-unset} (set SMOKE_DATABASE=1 to enable)"
+    log "[9/13] skip PostgresDatabase smoke — SMOKE_DATABASE=${SMOKE_DATABASE:-unset} (set SMOKE_DATABASE=1 to enable)"
 fi
 
-# 10. WAL lag 측정 (F02 100% 게이트, ADR-0056 Phase A1)
+# 10. PostgresUser declarative smoke (T22 / T27 — role/membership psql reconcile 검증)
+#    PostgresUser CR 적용 → status.applied=true → pg_roles 조회 → CR 삭제 → role 제거 검증.
+if [[ "${SMOKE_USER:-0}" == "1" ]]; then
+    log "[10/13] PostgresUser declarative smoke (psql reconcile)"
+    USER_NAME="smoke_user_$(date +%s)"
+    cat <<USERSPEC | kubectl -n "$NS" apply -f -
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: PostgresUser
+metadata:
+  name: ${USER_NAME}
+  namespace: ${NS}
+spec:
+  cluster:
+    name: ${CR_NAME}
+  name: ${USER_NAME}
+  ensure: present
+  login: true
+  createdb: false
+  createrole: false
+  replication: false
+  bypassrls: false
+  inherit: true
+  connectionLimit: 10
+  disablePassword: true
+USERSPEC
+
+    user_applied=""
+    end=$(( $(date +%s) + 120 ))
+    while [[ $(date +%s) -lt $end ]]; do
+        user_applied=$(kubectl -n "$NS" get postgresuser "$USER_NAME" -o jsonpath='{.status.applied}' 2>/dev/null || echo "")
+        if [[ "$user_applied" == "true" ]]; then
+            break
+        fi
+        sleep 3
+    done
+    if [[ "$user_applied" != "true" ]]; then
+        log "ERROR: PostgresUser status.applied != true (got=${user_applied})"
+        kubectl -n "$NS" get postgresuser "$USER_NAME" -o yaml | tail -40 || true
+        exit 1
+    fi
+
+    role_exists=$(kubectl -n "$NS" exec "$POD" -c postgres -- \
+        psql -h /var/run/postgresql -U postgres -d postgres -At \
+        -c "SELECT count(*) FROM pg_roles WHERE rolname='${USER_NAME}' AND rolcanlogin=true AND rolconnlimit=10" 2>&1 || echo "")
+    if [[ "$role_exists" != "1" ]]; then
+        log "ERROR: PostgresUser reconciler did not CREATE ROLE: pg_roles count=${role_exists}"
+        exit 1
+    fi
+    log "  PASS: PostgresUser CR applied → status.applied=true, pg_roles 존재 검증 (login=true, connlimit=10)"
+
+    kubectl -n "$NS" delete postgresuser "$USER_NAME" --wait=true --timeout=60s >/dev/null
+    role_dropped=""
+    end=$(( $(date +%s) + 60 ))
+    while [[ $(date +%s) -lt $end ]]; do
+        role_dropped=$(kubectl -n "$NS" exec "$POD" -c postgres -- \
+            psql -h /var/run/postgresql -U postgres -d postgres -At \
+            -c "SELECT count(*) FROM pg_roles WHERE rolname='${USER_NAME}'" 2>/dev/null || echo "")
+        if [[ "$role_dropped" == "0" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$role_dropped" != "0" ]]; then
+        log "ERROR: PostgresUser CR deletion did not DROP ROLE: pg_roles count=${role_dropped}"
+        exit 1
+    fi
+    log "  PASS: PostgresUser CR 삭제 → DROP ROLE 검증"
+else
+    log "[10/13] skip PostgresUser smoke — SMOKE_USER=${SMOKE_USER:-unset} (set SMOKE_USER=1 to enable)"
+fi
+
+# 11. WAL lag 측정 (F02 100% 게이트, ADR-0056 Phase A1)
 #    standby 가 *진짜로 replay* 하는지 + 부하 대비 lag 측정.
 #    REPLICAS=1 일 때 standby 부재 → 측정 skip.
-log "[10/12] WAL replication lag measurement"
+log "[11/13] WAL replication lag measurement"
 REPLICAS=$(kubectl -n "$NS" get sts "$STS_NAME" -o jsonpath='{.spec.replicas}')
 if [[ "${REPLICAS:-1}" -ge 2 ]]; then
     # primary 에서 pgbench init + 부하 (10 client × 100 txn)
@@ -650,7 +722,7 @@ fi
 #    primary kill → standby 가 새 primary 로 promote 되는 시간. RTO 목표 < 30s.
 #    SMOKE_FAILOVER=1 환경변수 설정 시에만 실행 (default skip — 데이터 plane 변경 영향).
 if [[ "${REPLICAS:-1}" -ge 2 ]] && [[ "${SMOKE_FAILOVER:-0}" == "1" ]]; then
-    log "[11/12] Failover RTO measurement (SMOKE_FAILOVER=1)"
+    log "[12/13] Failover RTO measurement (SMOKE_FAILOVER=1)"
     KILL_TS=$(date +%s)
     kubectl -n "$NS" delete pod "$POD" --wait=false || true
     log "  primary killed at $(format_utc_ts "$KILL_TS") — waiting for new primary"
@@ -704,5 +776,5 @@ if [[ "${REPLICAS:-1}" -ge 2 ]] && [[ "${SMOKE_FAILOVER:-0}" == "1" ]]; then
     fi
     log "  PASS: CR status reflects ${STS_NAME}-1 and restarted old primary is standby"
 else
-    log "[11/12] skip failover RTO — SMOKE_FAILOVER=${SMOKE_FAILOVER:-unset} (set SMOKE_FAILOVER=1 to enable)"
+    log "[12/13] skip failover RTO — SMOKE_FAILOVER=${SMOKE_FAILOVER:-unset} (set SMOKE_FAILOVER=1 to enable)"
 fi

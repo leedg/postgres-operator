@@ -25,7 +25,10 @@
 |---|---|---|
 | 프로젝트/차트 이름 | `postgres-operator` | GitHub repo, Helm chart, argos GitOps path 정렬 |
 | 라이선스 | Apache-2.0 | `LICENSE`, ADR-0003 |
-| 최신 릴리스 | `0.3.0-alpha.16` | GHCR image + Helm chart publish |
+| 최신 릴리스 | `0.3.0-alpha.18` | GHCR image + Helm chart publish + OLM bundle (community-operators PR 대기) |
+| OLM bundle | `bundle/manifests/` 8 CRD + alm-examples + CSV description 정합 | `operator-sdk bundle validate --select-optional suite=operatorframework` 통과 (T26) |
+| CNPG 호환 표면 | Pooler / PostgresDatabase / PostgresUser / ScheduledBackup / ImageCatalog / ClusterImageCatalog / externalClusters / replica cluster | T22 / T24 / T25 cycle 완료, live kind smoke 자동화 (T27) 진행 중 |
+| 로컬 4 계층 게이트 | L1 lefthook pre-commit + L2 pre-push + L3 make validate/audit + L4 PR evidence | ADR-0009 / RFC-0002, version drift assertion + bundle validate 자동화 (T26) |
 | argos 배포 | Day-0 single-shard | `PostgresCluster/argos-postgres` Ready |
 | GHCR runtime image | public pull 가능 | `ghcr.io/keiailab/pg:18` pull secret 없이 재기동 |
 | HA replica | 부분 (`Replicas` 필드만) | `api/v1alpha1/postgrescluster_types.go` |

@@ -1,0 +1,129 @@
+{{- if .Values.metrics.prometheusRule.enabled -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "postgres-operator.fullname" . }}-alerts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgres-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: monitoring
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.metrics.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: {{ .Values.metrics.prometheusRule.groupName | quote }}
+      rules:
+        - alert: PostgresOperatorMetricsDown
+          expr: |
+            absent(up{namespace="{{ .Release.Namespace }}", service="{{ include "postgres-operator.metricsServiceName" . }}"}) == 1
+            or up{namespace="{{ .Release.Namespace }}", service="{{ include "postgres-operator.metricsServiceName" . }}"} == 0
+          for: {{ .Values.metrics.prometheusRule.for.operatorDown | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: postgres-operator metrics scrape 가 중단됨
+            description: metrics Service 또는 manager /metrics endpoint 를 확인해야 한다.
+        - alert: PostgresOperatorReconcileErrors
+          expr: |
+            sum by (namespace, name) (
+              increase(postgrescluster_reconcile_errors_total[{{ .Values.metrics.prometheusRule.windows.reconcileErrors }}])
+            ) > 0
+          for: {{ .Values.metrics.prometheusRule.for.reconcileErrors | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: postgres-operator reconcile error 증가
+            description: PostgresCluster reconcile component 실패가 발생했다.
+        - alert: PostgresOperatorReconcileP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, namespace, name) (
+                rate(postgrescluster_reconcile_duration_seconds_bucket[{{ .Values.metrics.prometheusRule.windows.reconcileLatency }}])
+              )
+            ) > {{ .Values.metrics.prometheusRule.thresholds.reconcileP95Seconds }}
+          for: {{ .Values.metrics.prometheusRule.for.reconcileLatency | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: postgres-operator reconcile p95 latency 높음
+            description: Kubernetes API 지연, PVC resize, StatefulSet rollout 병목을 확인해야 한다.
+        - alert: PostgresBackupJobFailed
+          expr: |
+            postgres_operator_backupjob_phase{phase="Failed"} == 1
+          for: {{ .Values.metrics.prometheusRule.for.backupFailure | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: BackupJob 실패
+            description: BackupJob status condition 과 runner Job 또는 sidecar exec 로그를 확인해야 한다.
+        - alert: PostgresPoolerFailed
+          expr: |
+            postgres_operator_pooler_phase{phase="Failed"} == 1
+          for: {{ .Values.metrics.prometheusRule.for.poolerFailure | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: Pooler 실패
+            description: Pooler status condition, PgBouncer Deployment, auth Secret, exporter sidecar 상태를 확인해야 한다.
+        - alert: PostgresPoolerExporterCollectionFailed
+          expr: |
+            max by (namespace, pod) (
+              cnpg_pgbouncer_last_collection_error
+            ) == 1
+          for: {{ .Values.metrics.prometheusRule.for.poolerExporterCollectionFailure | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: PgBouncer exporter metric 수집 실패
+            description: exporter sidecar /metrics 는 응답하지만 PgBouncer SHOW 기반 metric collection 이 실패했다. exporter 로그, PgBouncer admin 연결, auth 설정을 확인해야 한다.
+        - alert: PostgresPoolerClientWaiting
+          expr: |
+            sum by (namespace, pod, database, user) (
+              cnpg_pgbouncer_pools_cl_waiting
+            ) > {{ .Values.metrics.prometheusRule.thresholds.poolerClientWaiting }}
+          for: {{ .Values.metrics.prometheusRule.for.poolerClientWaiting | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: PgBouncer pool 에 대기 client 발생
+            description: server connection 을 받지 못한 client 가 지속된다. pool size, PostgreSQL backend 부하, application connection 폭증을 확인해야 한다.
+        - alert: PostgresPoolerClientMaxWaitHigh
+          expr: |
+            max by (namespace, pod, database, user) (
+              cnpg_pgbouncer_pools_maxwait
+            ) > {{ .Values.metrics.prometheusRule.thresholds.poolerClientMaxWaitSeconds }}
+          for: {{ .Values.metrics.prometheusRule.for.poolerClientMaxWait | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: PgBouncer client 대기 시간이 높음
+            description: 가장 오래 기다린 client 대기 시간이 임계값을 넘었다. pool_size, max_db_connections, primary/replica 성능, application query latency 를 확인해야 한다.
+        - alert: PostgresReplicationLagHigh
+          expr: |
+            postgres_operator_postgrescluster_replication_lag_bytes{role="replica"} > {{ .Values.metrics.prometheusRule.thresholds.replicationLagBytes }}
+          for: {{ .Values.metrics.prometheusRule.for.replicationLag | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: PostgreSQL replica WAL lag 높음
+            description: PostgresCluster status shard replica lagBytes, pg_stat_replication, standby Pod 로그를 확인해야 한다.
+        - alert: PostgresDataVolumeLow
+          expr: |
+            (
+              kubelet_volume_stats_available_bytes{persistentvolumeclaim=~"data-.*"}
+              /
+              kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~"data-.*"}
+            ) < {{ .Values.metrics.prometheusRule.thresholds.dataVolumeFreeRatio }}
+          for: {{ .Values.metrics.prometheusRule.for.dataVolumeLow | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: PostgreSQL data PVC 여유 공간 부족
+            description: data-* PVC 사용량과 StorageClass online expansion 가능 여부를 확인해야 한다.
+{{- end }}

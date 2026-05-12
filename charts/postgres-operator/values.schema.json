@@ -52,11 +52,47 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "service": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "type": { "type": "string" },
+            "annotations": { "type": "object" },
+            "labels": { "type": "object" }
+          }
+        },
         "serviceMonitor": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
-            "enabled": { "type": "boolean" }
+            "enabled": { "type": "boolean" },
+            "path": { "type": "string", "minLength": 1 },
+            "interval": { "type": "string", "minLength": 1 },
+            "scrapeTimeout": { "type": "string", "minLength": 1 },
+            "bearerTokenFile": { "type": "string" },
+            "tlsConfig": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "insecureSkipVerify": { "type": "boolean" }
+              }
+            },
+            "annotations": { "type": "object" },
+            "labels": { "type": "object" }
+          }
+        },
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "groupName": { "type": "string", "minLength": 1 },
+            "annotations": { "type": "object" },
+            "labels": { "type": "object" },
+            "windows": { "type": "object", "additionalProperties": true },
+            "thresholds": { "type": "object", "additionalProperties": true },
+            "for": { "type": "object", "additionalProperties": true }
           }
         }
       }

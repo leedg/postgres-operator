@@ -143,10 +143,58 @@ metrics:
   # /metrics endpoint를 8443에서 expose. Prometheus가 scrape.
   enabled: true
   port: 8443
+  service:
+    enabled: true
+    type: ClusterIP
+    annotations: {}
+    labels: {}
   # ServiceMonitor (prometheus-operator) 자동 생성. CRD 부재 시 install fail
   # 회피 위해 helm install --skip-tests 또는 별도 disable.
   serviceMonitor:
     enabled: false
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig:
+      insecureSkipVerify: true
+    annotations: {}
+    labels: {}
+  # PrometheusRule (prometheus-operator) 자동 생성. ServiceMonitor와 독립적으로
+  # 렌더링 가능하지만 실제 scrape/alert에는 Prometheus Operator가 필요하다.
+  prometheusRule:
+    enabled: false
+    groupName: postgres-operator.rules
+    annotations: {}
+    labels: {}
+    windows:
+      reconcileErrors: 5m
+      reconcileLatency: 5m
+    thresholds:
+      reconcileP95Seconds: 10
+      dataVolumeFreeRatio: 0.15
+      replicationLagBytes: 16777216
+      poolerClientWaiting: 0
+      poolerClientMaxWaitSeconds: 30
+    for:
+      operatorDown: 5m
+      reconcileErrors: 2m
+      reconcileLatency: 10m
+      backupFailure: 1m
+      poolerFailure: 1m
+      poolerExporterCollectionFailure: 2m
+      poolerClientWaiting: 2m
+      poolerClientMaxWait: 5m
+      replicationLag: 5m
+      dataVolumeLow: 15m
+  # Grafana dashboard ConfigMap. kube-prometheus-stack sidecar 환경에서는
+  # 기본 label(grafana_dashboard=1)로 자동 import 할 수 있다.
+  grafanaDashboards:
+    enabled: false
+    labelName: grafana_dashboard
+    labelValue: "1"
+    annotations: {}
+    labels: {}
 
 # ============================================================================
 # Logging

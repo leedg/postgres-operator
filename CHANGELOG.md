@@ -74,6 +74,16 @@ This project follows SemVer.
 
 ### Added
 
+- *(api,controller)* T29 stage 5 — `Pooler.Status.AutoTLSClientCertNotAfter`
+  + `AutoTLSServerCertNotAfter` mirror cert-manager
+  `Certificate.status.notAfter` so operators can list expiring
+  certs across the fleet (`kubectl get poolers -A -o wide`
+  exposes the two new columns at `priority=1`). The reconciler
+  reads the cert-manager Certificate CR via `unstructured` (no
+  SDK dep); errors during lookup are logged at V(1) and treated
+  as "unknown" so a transient cert-manager outage does not block
+  the rest of the Pooler reconcile. Regression test
+  `TestPoolerAutoTLS_MirrorsNotAfterToStatus`.
 - *(api,controller)* `PostgresUser.spec.userReclaimPolicy` (`retain`
   default, `delete`) mirrors `PostgresDatabase.spec.databaseReclaimPolicy`.
   When set to `delete` the reconciler attaches
@@ -84,6 +94,19 @@ This project follows SemVer.
 
 ### Fixed
 
+- *(instance)* HA bootstrap fence race — the previous "fence on every
+  OnStoppedLeading in a memberCount>1 cluster" rule fenced a
+  bootstrap Pod's PVC even when the Pod had never actually served
+  as primary (election lease flipped while postgres was still in
+  initdb / waitSupReady). Two-layer guard added: (i) skip
+  MarkFenced when `supervise.IsStandby(dataDir)` is true; (ii)
+  track `promotedAtLeastOnce` and fence only when this Pod has
+  successfully run pg_promote. Regression test
+  `TestHandleStoppedLeading_SkipsFenceWhenNeverPromoted`.
+  SHARD_REPLICAS=0 PG18 + PG17 5/5 smoke regression confirmed.
+  Deeper election-design follow-up tracked as T30 (election
+  should prefer ordinal-0 or defer to operator-provided primary
+  hint during bootstrap).
 - *(controller)* PostgresDatabase / PostgresUser psql invocation
   defaulted to the OS user `pg-keiailab` (the Dockerfile.pg USER
   directive). With the iter#5 `eval` bug removed, this surfaced as

@@ -1,0 +1,34 @@
+# Pooler sample — cert-manager AutoTLS (T29).
+#
+# Prerequisite: a cert-manager Issuer (or ClusterIssuer) named `ca-issuer`
+# is already deployed in the same namespace.
+#
+# When `spec.pgbouncer.autoTLS.clientEnabled=true` and no
+# `clientTLSSecret` is set, the operator creates a cert-manager
+# `Certificate` CR with `spec.secretName=<pooler-name>-client-tls`. The
+# PgBouncer Deployment then mounts the auto-generated Secret on the
+# client TLS path.
+#
+# To also auto-issue the server-side (backend mTLS) Secret, set
+# `serverEnabled=true` and leave `serverTLSSecret` unset.
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: Pooler
+metadata:
+  name: quickstart-rw-autotls
+  namespace: default
+spec:
+  cluster:
+    name: quickstart
+  instances: 2
+  type: rw
+  pgbouncer:
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.24.1
+    poolMode: session
+    autoTLS:
+      issuerRef:
+        name: ca-issuer
+        kind: Issuer
+      clientEnabled: true
+      serverEnabled: false
+      # commonName / dnsNames are optional; defaults expand the Pooler
+      # Service in-cluster DNS forms.

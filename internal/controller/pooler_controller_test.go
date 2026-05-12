@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -1550,6 +1553,106 @@ func TestPoolerBuiltinAuth_CreatesSecretAndExecutesRoleSQL(t *testing.T) {
 	reconcilePoolerOnce(t, r, c, pooler)
 	if exec.called != 0 {
 		t.Fatalf("PodExecutor called %d times on idempotent reconcile, want 0", exec.called)
+	}
+}
+
+// TestPoolerAutoTLS_CreatesCertificate 는 spec.pgbouncer.autoTLS.clientEnabled=true 일 때
+// reconcile 이 cert-manager Certificate CR 을 자동 생성하는지 + Pooler OwnerReference 가
+// 붙는지 검증한다.
+func TestPoolerAutoTLS_CreatesCertificate(t *testing.T) {
+	t.Parallel()
+	scheme := newScheme(t)
+	cluster := newPoolerCluster()
+	pooler := newPooler()
+	pooler.Name = "demo-rw-autotls"
+	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
+		IssuerRef: postgresv1alpha1.PoolerCertIssuerRef{
+			Name: "ca-issuer",
+			Kind: "ClusterIssuer",
+		},
+		ClientEnabled: true,
+		ServerEnabled: false,
+	}
+	authSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-pooler-auth",
+		Namespace: "default",
+	}, Data: map[string][]byte{"userlist.txt": []byte(`"app" "SCRAM-SHA-256$4096:salt$stored:server"`)}}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cluster, pooler, authSecret).
+		WithStatusSubresource(&postgresv1alpha1.Pooler{}).
+		Build()
+	defer DeletePoolerMetricsFor(pooler.Namespace, pooler.Name)
+
+	r := &PoolerReconciler{Client: c, Scheme: scheme}
+	reconcilePoolerOnce(t, r, c, pooler)
+
+	// Client Certificate 가 생성됐는지 + apiVersion / kind / spec.secretName / spec.issuerRef 검증.
+	clientCert := &unstructured.Unstructured{}
+	clientCert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-client-tls",
+	}, clientCert); err != nil {
+		t.Fatalf("client Certificate get: %v", err)
+	}
+	gotSecretName, _, _ := unstructured.NestedString(clientCert.Object, "spec", "secretName")
+	if gotSecretName != pooler.Name+"-client-tls" {
+		t.Fatalf("client Certificate spec.secretName = %q, want %s-client-tls", gotSecretName, pooler.Name)
+	}
+	issuerMap, _, _ := unstructured.NestedMap(clientCert.Object, "spec", "issuerRef")
+	if issuerMap["name"] != "ca-issuer" || issuerMap["kind"] != "ClusterIssuer" {
+		t.Fatalf("client Certificate spec.issuerRef mismatch: %+v", issuerMap)
+	}
+	if !metav1.IsControlledBy(clientCert, pooler) {
+		t.Fatalf("client Certificate OwnerReference does not point to Pooler")
+	}
+
+	// ServerEnabled=false 이므로 server Certificate 는 생성되지 않아야 한다.
+	serverCert := &unstructured.Unstructured{}
+	serverCert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-server-tls",
+	}, serverCert)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("server Certificate get error = %v, want NotFound (ServerEnabled=false)", err)
+	}
+}
+
+// TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence 는 사용자가 ClientTLSSecret 을
+// 명시한 경우 AutoTLS 의 client 발급 path 가 비활성되는지 검증한다.
+func TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence(t *testing.T) {
+	t.Parallel()
+	scheme := newScheme(t)
+	cluster := newPoolerCluster()
+	pooler := newPooler()
+	pooler.Name = "demo-rw-autotls-userref"
+	pooler.Spec.PgBouncer.ClientTLSSecret = &corev1.LocalObjectReference{Name: "user-client-tls"}
+	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
+		IssuerRef:     postgresv1alpha1.PoolerCertIssuerRef{Name: "ca-issuer"},
+		ClientEnabled: true,
+	}
+	defer DeletePoolerMetricsFor(pooler.Namespace, pooler.Name)
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cluster, pooler,
+			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "user-client-tls", Namespace: "default"},
+				Data: map[string][]byte{"tls.crt": []byte("crt"), "tls.key": []byte("key")}},
+			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "demo-pooler-auth", Namespace: "default"},
+				Data: map[string][]byte{"userlist.txt": []byte(`"app" "SCRAM-SHA-256$4096:salt$stored:server"`)}}).
+		WithStatusSubresource(&postgresv1alpha1.Pooler{}).
+		Build()
+
+	r := &PoolerReconciler{Client: c, Scheme: scheme}
+	reconcilePoolerOnce(t, r, c, pooler)
+
+	clientCert := &unstructured.Unstructured{}
+	clientCert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-client-tls",
+	}, clientCert)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("client Certificate get error = %v, want NotFound (user-supplied ClientTLSSecret takes precedence)", err)
 	}
 }
 

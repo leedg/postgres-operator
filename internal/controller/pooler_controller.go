@@ -32,7 +32,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,6 +59,17 @@ const (
 	// 다음 cycle 에서 새 password 를 생성하고 annotation 을 제거하면서
 	// status.builtinAuthLastRotation 을 갱신한다.
 	PoolerRotateAuthAnnotation = "postgres.keiailab.io/rotate-pooler-password"
+
+	// poolerAutoTLSServerSecretSuffix / poolerAutoTLSClientSecretSuffix 는
+	// AutoTLS 가 cert-manager Certificate CR 로 발급하는 Secret 이름의 suffix 다.
+	// 사용자가 ServerTLSSecret / ClientTLSSecret 을 명시한 경우 그 값을 우선한다.
+	poolerAutoTLSServerSecretSuffix = "-server-tls"
+	poolerAutoTLSClientSecretSuffix = "-client-tls"
+
+	// poolerAutoTLSCertificateGroup 는 cert-manager API group + version.
+	poolerAutoTLSCertificateGroup   = "cert-manager.io"
+	poolerAutoTLSCertificateVersion = "v1"
+	poolerAutoTLSCertificateKind    = "Certificate"
 )
 
 const (
@@ -113,6 +126,7 @@ type PoolerReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=configmaps;services;secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile 은 Pooler CR 을 처리한다.
 func (r *PoolerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -143,6 +157,10 @@ func (r *PoolerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		r.markPoolerFailed(&pooler, PoolerReasonInvalidSpec, invalid)
 		return ctrl.Result{}, r.statusUpdate(ctx, &pooler)
 	}
+	if err := r.ensurePoolerAutoTLS(ctx, &pooler); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	if invalid, requeue, err := r.validatePoolerAuthSecret(ctx, &pooler, &cluster); invalid != "" || requeue != nil || err != nil {
 		if err != nil {
 			return ctrl.Result{}, err
@@ -587,6 +605,233 @@ END$$;`, poolerBuiltinRoleName, password)
 	return "", nil, nil
 }
 
+// poolerAutoTLSServerActive 는 AutoTLS 가 server 측 Secret 자동 발급을 수행해야 하는지 판정한다.
+// 사용자가 ServerTLSSecret 을 명시한 경우 자동 발급 path 는 비활성.
+func poolerAutoTLSServerActive(pooler *postgresv1alpha1.Pooler) bool {
+	if pooler.Spec.PgBouncer.AutoTLS == nil {
+		return false
+	}
+	if pooler.Spec.PgBouncer.ServerTLSSecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ServerTLSSecret.Name) != "" {
+		return false
+	}
+	return pooler.Spec.PgBouncer.AutoTLS.ServerEnabled
+}
+
+// poolerAutoTLSClientActive 는 AutoTLS 가 client 측 Secret 자동 발급을 수행해야 하는지 판정한다.
+func poolerAutoTLSClientActive(pooler *postgresv1alpha1.Pooler) bool {
+	if pooler.Spec.PgBouncer.AutoTLS == nil {
+		return false
+	}
+	if pooler.Spec.PgBouncer.ClientTLSSecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ClientTLSSecret.Name) != "" {
+		return false
+	}
+	return pooler.Spec.PgBouncer.AutoTLS.ClientEnabled
+}
+
+// poolerAutoTLSServerSecretName 은 AutoTLS server 발급 Secret 이름이다.
+func poolerAutoTLSServerSecretName(pooler *postgresv1alpha1.Pooler) string {
+	return pooler.Name + poolerAutoTLSServerSecretSuffix
+}
+
+// poolerAutoTLSClientSecretName 은 AutoTLS client 발급 Secret 이름이다.
+func poolerAutoTLSClientSecretName(pooler *postgresv1alpha1.Pooler) string {
+	return pooler.Name + poolerAutoTLSClientSecretSuffix
+}
+
+// poolerEffectiveServerTLSSecretName 은 reconcilePoolerDeployment 가 Volume 으로 mount 할 server TLS Secret 이름.
+func poolerEffectiveServerTLSSecretName(pooler *postgresv1alpha1.Pooler) string {
+	if pooler.Spec.PgBouncer.ServerTLSSecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ServerTLSSecret.Name) != "" {
+		return pooler.Spec.PgBouncer.ServerTLSSecret.Name
+	}
+	if poolerAutoTLSServerActive(pooler) {
+		return poolerAutoTLSServerSecretName(pooler)
+	}
+	return ""
+}
+
+// poolerEffectiveServerCASecretName — cert-manager 가 발급한 Secret 은 ca.crt 도 포함하므로
+// AutoTLS 시 Server TLS Secret 자체를 CA Secret 으로도 사용한다.
+func poolerEffectiveServerCASecretName(pooler *postgresv1alpha1.Pooler) string {
+	if pooler.Spec.PgBouncer.ServerCASecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ServerCASecret.Name) != "" {
+		return pooler.Spec.PgBouncer.ServerCASecret.Name
+	}
+	if poolerAutoTLSServerActive(pooler) {
+		return poolerAutoTLSServerSecretName(pooler)
+	}
+	return ""
+}
+
+// poolerEffectiveClientTLSSecretName / poolerEffectiveClientCASecretName 은 동일 패턴.
+func poolerEffectiveClientTLSSecretName(pooler *postgresv1alpha1.Pooler) string {
+	if pooler.Spec.PgBouncer.ClientTLSSecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ClientTLSSecret.Name) != "" {
+		return pooler.Spec.PgBouncer.ClientTLSSecret.Name
+	}
+	if poolerAutoTLSClientActive(pooler) {
+		return poolerAutoTLSClientSecretName(pooler)
+	}
+	return ""
+}
+
+func poolerEffectiveClientCASecretName(pooler *postgresv1alpha1.Pooler) string {
+	if pooler.Spec.PgBouncer.ClientCASecret != nil && strings.TrimSpace(pooler.Spec.PgBouncer.ClientCASecret.Name) != "" {
+		return pooler.Spec.PgBouncer.ClientCASecret.Name
+	}
+	if poolerAutoTLSClientActive(pooler) {
+		return poolerAutoTLSClientSecretName(pooler)
+	}
+	return ""
+}
+
+// poolerAutoTLSDefaultDNSNames 는 Pooler Service 의 in-cluster DNS 형식을 반환한다.
+func poolerAutoTLSDefaultDNSNames(pooler *postgresv1alpha1.Pooler) []string {
+	svc := PoolerServiceName(pooler.Name)
+	return []string{
+		svc,
+		svc + "." + pooler.Namespace,
+		svc + "." + pooler.Namespace + ".svc",
+		svc + "." + pooler.Namespace + ".svc.cluster.local",
+	}
+}
+
+// ensurePoolerAutoTLS 는 cert-manager Certificate CR 두 종 (server / client) 의
+// upsert 를 수행한다. cert-manager 가 발급한 Secret 자체가 적용되어 PgBouncer Pod 에
+// mount 되기 전까지는 Pooler 의 reconcile 이 Pending 상태로 유지될 수 있다.
+func (r *PoolerReconciler) ensurePoolerAutoTLS(ctx context.Context, pooler *postgresv1alpha1.Pooler) error {
+	if pooler.Spec.PgBouncer.AutoTLS == nil {
+		return nil
+	}
+	if poolerAutoTLSServerActive(pooler) {
+		if err := r.applyPoolerAutoCertificate(
+			ctx,
+			pooler,
+			poolerAutoTLSServerSecretName(pooler),
+			"server",
+			[]string{"server auth", "client auth"},
+		); err != nil {
+			return err
+		}
+	}
+	if poolerAutoTLSClientActive(pooler) {
+		if err := r.applyPoolerAutoCertificate(
+			ctx,
+			pooler,
+			poolerAutoTLSClientSecretName(pooler),
+			"client",
+			[]string{"server auth"},
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *PoolerReconciler) applyPoolerAutoCertificate(
+	ctx context.Context,
+	pooler *postgresv1alpha1.Pooler,
+	secretName string,
+	role string,
+	usages []string,
+) error {
+	spec := pooler.Spec.PgBouncer.AutoTLS
+	issuerKind := spec.IssuerRef.Kind
+	if issuerKind == "" {
+		issuerKind = "Issuer"
+	}
+
+	dnsNames := poolerAutoTLSDefaultDNSNames(pooler)
+	if len(spec.DNSNames) > 0 {
+		seen := map[string]struct{}{}
+		merged := make([]string, 0, len(dnsNames)+len(spec.DNSNames))
+		for _, d := range append(dnsNames, spec.DNSNames...) {
+			if _, ok := seen[d]; ok {
+				continue
+			}
+			seen[d] = struct{}{}
+			merged = append(merged, d)
+		}
+		dnsNames = merged
+	}
+	commonName := spec.CommonName
+	if commonName == "" {
+		commonName = dnsNames[0]
+	}
+
+	dnsNamesIface := make([]any, 0, len(dnsNames))
+	for _, d := range dnsNames {
+		dnsNamesIface = append(dnsNamesIface, d)
+	}
+	usagesIface := make([]any, 0, len(usages))
+	for _, u := range usages {
+		usagesIface = append(usagesIface, u)
+	}
+
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   poolerAutoTLSCertificateGroup,
+		Version: poolerAutoTLSCertificateVersion,
+		Kind:    poolerAutoTLSCertificateKind,
+	})
+	cert.SetNamespace(pooler.Namespace)
+	cert.SetName(secretName)
+	cert.SetLabels(map[string]string{
+		"app.kubernetes.io/managed-by":  "postgres-operator",
+		"postgres.keiailab.io/pooler":   pooler.Name,
+		"postgres.keiailab.io/cluster":  pooler.Spec.Cluster.Name,
+		"postgres.keiailab.io/auto-tls": role,
+	})
+
+	if err := unstructured.SetNestedField(cert.Object, secretName, "spec", "secretName"); err != nil {
+		return fmt.Errorf("set cert spec.secretName: %w", err)
+	}
+	if err := unstructured.SetNestedField(cert.Object, commonName, "spec", "commonName"); err != nil {
+		return fmt.Errorf("set cert spec.commonName: %w", err)
+	}
+	if err := unstructured.SetNestedSlice(cert.Object, dnsNamesIface, "spec", "dnsNames"); err != nil {
+		return fmt.Errorf("set cert spec.dnsNames: %w", err)
+	}
+	if err := unstructured.SetNestedSlice(cert.Object, usagesIface, "spec", "usages"); err != nil {
+		return fmt.Errorf("set cert spec.usages: %w", err)
+	}
+	if err := unstructured.SetNestedMap(cert.Object, map[string]any{
+		"name": spec.IssuerRef.Name,
+		"kind": issuerKind,
+	}, "spec", "issuerRef"); err != nil {
+		return fmt.Errorf("set cert spec.issuerRef: %w", err)
+	}
+
+	if err := controllerutil.SetControllerReference(pooler, cert, r.Scheme); err != nil {
+		return fmt.Errorf("set OwnerReference on Pooler AutoTLS Certificate: %w", err)
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(cert.GroupVersionKind())
+	key := client.ObjectKey{Namespace: cert.GetNamespace(), Name: cert.GetName()}
+	if err := r.Get(ctx, key, existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get existing Pooler AutoTLS Certificate: %w", err)
+		}
+		if err := r.Create(ctx, cert); err != nil {
+			return fmt.Errorf("create Pooler AutoTLS Certificate: %w", err)
+		}
+		return nil
+	}
+
+	// existing — spec 만 갱신 (resourceVersion / status 보존).
+	if existingSpec, ok, _ := unstructured.NestedMap(cert.Object, "spec"); ok {
+		if err := unstructured.SetNestedMap(existing.Object, existingSpec, "spec"); err != nil {
+			return fmt.Errorf("update Pooler AutoTLS Certificate spec: %w", err)
+		}
+	}
+	labels := cert.GetLabels()
+	if labels != nil {
+		existing.SetLabels(labels)
+	}
+	if err := r.Update(ctx, existing); err != nil {
+		return fmt.Errorf("update Pooler AutoTLS Certificate: %w", err)
+	}
+	return nil
+}
+
 func (r *PoolerReconciler) validatePoolerTLSSecrets(ctx context.Context, pooler *postgresv1alpha1.Pooler) (string, error) {
 	checks := []struct {
 		field string
@@ -1008,21 +1253,21 @@ func renderPgBouncerHBA(pooler *postgresv1alpha1.Pooler) string {
 }
 
 func applyPoolerTLSParameters(params map[string]string, pooler *postgresv1alpha1.Pooler) {
-	if pooler.Spec.PgBouncer.ServerTLSSecret != nil {
+	if poolerEffectiveServerTLSSecretName(pooler) != "" {
 		params["server_tls_key_file"] = poolerTLSFile("server", "tls.key")
 		params["server_tls_cert_file"] = poolerTLSFile("server", "tls.crt")
 		params["server_tls_sslmode"] = "require"
 	}
-	if pooler.Spec.PgBouncer.ServerCASecret != nil {
+	if poolerEffectiveServerCASecretName(pooler) != "" {
 		params["server_tls_ca_file"] = poolerTLSFile("server-ca", "ca.crt")
 		params["server_tls_sslmode"] = "verify-ca"
 	}
-	if pooler.Spec.PgBouncer.ClientTLSSecret != nil {
+	if poolerEffectiveClientTLSSecretName(pooler) != "" {
 		params["client_tls_key_file"] = poolerTLSFile("client", "tls.key")
 		params["client_tls_cert_file"] = poolerTLSFile("client", "tls.crt")
 		params["client_tls_sslmode"] = "require"
 	}
-	if pooler.Spec.PgBouncer.ClientCASecret != nil {
+	if poolerEffectiveClientCASecretName(pooler) != "" {
 		params["client_tls_ca_file"] = poolerTLSFile("client-ca", "ca.crt")
 		params["client_tls_sslmode"] = "verify-ca"
 	}
@@ -1341,31 +1586,24 @@ func poolerTLSRefs(pooler *postgresv1alpha1.Pooler) []poolerTLSRef {
 		{
 			role:       "server",
 			volumeName: "pgbouncer-tls-server",
-			secretName: localObjectName(pooler.Spec.PgBouncer.ServerTLSSecret),
+			secretName: poolerEffectiveServerTLSSecretName(pooler),
 		},
 		{
 			role:       "server-ca",
 			volumeName: "pgbouncer-tls-server-ca",
-			secretName: localObjectName(pooler.Spec.PgBouncer.ServerCASecret),
+			secretName: poolerEffectiveServerCASecretName(pooler),
 		},
 		{
 			role:       "client",
 			volumeName: "pgbouncer-tls-client",
-			secretName: localObjectName(pooler.Spec.PgBouncer.ClientTLSSecret),
+			secretName: poolerEffectiveClientTLSSecretName(pooler),
 		},
 		{
 			role:       "client-ca",
 			volumeName: "pgbouncer-tls-client-ca",
-			secretName: localObjectName(pooler.Spec.PgBouncer.ClientCASecret),
+			secretName: poolerEffectiveClientCASecretName(pooler),
 		},
 	}
-}
-
-func localObjectName(ref *corev1.LocalObjectReference) string {
-	if ref == nil {
-		return ""
-	}
-	return ref.Name
 }
 
 func buildPoolerService(pooler *postgresv1alpha1.Pooler) *corev1.Service {

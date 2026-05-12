@@ -1,61 +1,94 @@
-# 로컬 릴리스 절차
+# Local release process
 
-본 저장소는 ADR 0009에 따라 GitHub Actions를 사용하지 않는다. 릴리스 검증과 게시 작업은 로컬 Makefile target으로 수행한다.
+Per ADR 0009 this repository does not use GitHub Actions. Release
+verification and publishing run as local Makefile targets.
 
-## 성공 기준
+## Success criteria
 
-[기능명] Postgres Operator 릴리스
+Postgres Operator release.
 
-사용자 시나리오:
-1. maintainer는 `VERSION=vX.Y.Z`를 지정해 preflight를 실행한다.
-2. maintainer는 lint, unit/envtest, audit, manifest, Helm, install bundle 검증 결과를 확인한다.
-3. maintainer는 같은 `VERSION`으로 release를 실행한다.
-4. maintainer는 GHCR image, Git tag, GitHub Release, Helm repo index가 생성됐는지 확인한다.
+User scenario:
 
-기대 결과:
-- `make gate`가 통과한다.
-- `Chart.yaml`의 `version`과 `appVersion`이 `VERSION`에서 `v`를 제거한 값과 일치한다.
-- `CHANGELOG.md`에 동일 버전 항목이 있다.
-- `dist/install.yaml`과 Helm `--include-crds` 렌더 결과에 CRD **8개**(`postgresclusters`, `backupjobs`, `scheduledbackups`, `poolers`, `postgresdatabases`, `postgresusers`, `imagecatalogs`, `clusterimagecatalogs`)가 포함된다.
-- `bundle/manifests/postgres.keiailab.io_*.yaml` 카운트 ≥ 8 + `operator-sdk bundle validate --select-optional suite=operatorframework` 통과.
-- `kube-linter lint dist/install.yaml` + helm template 모두 0 lint errors.
-- Chart appVersion ↔ kustomize newTag ↔ dist image tag drift 0.
-- `.github/workflows/` 비어 있음 (ADR-0009 영구 금지 enforce).
-- 릴리스 전 worktree가 clean 상태다.
+1. The maintainer runs preflight with `VERSION=vX.Y.Z`.
+2. The maintainer reviews lint, unit/envtest, audit, manifest, Helm, and
+   install-bundle verification results.
+3. The maintainer runs release with the same `VERSION`.
+4. The maintainer confirms that the GHCR image, the Git tag, the GitHub
+   Release, and the Helm repo index have been published.
+
+Expected outcomes:
+
+- `make gate` passes.
+- `Chart.yaml`'s `version` and `appVersion` match `VERSION` with the
+  leading `v` stripped.
+- `CHANGELOG.md` has a matching version entry.
+- The Helm `--include-crds` render and `dist/install.yaml` contain
+  **8 CRDs** (`postgresclusters`, `backupjobs`, `scheduledbackups`,
+  `poolers`, `postgresdatabases`, `postgresusers`, `imagecatalogs`,
+  `clusterimagecatalogs`).
+- `bundle/manifests/postgres.keiailab.io_*.yaml` count ≥ 8 and
+  `operator-sdk bundle validate --select-optional suite=operatorframework`
+  is clean.
+- `kube-linter lint dist/install.yaml` and the helm template both return
+  0 lint errors.
+- Chart `appVersion` ↔ kustomize `newTag` ↔ dist image tag are all
+  aligned.
+- `.github/workflows/` is empty (ADR-0009 forbidden permanently).
+- The worktree is clean before release.
 
 ## Step → verify
 
-1. 산출물 갱신
-   - 실행: `make manifests generate build-installer`
-   - verify: `git diff -- charts/postgres-operator/crds dist/install.yaml config/crd/bases`
+1. Regenerate artifacts.
+   - Run: `make manifests generate build-installer`.
+   - Verify: `git diff -- charts/postgres-operator/crds dist/install.yaml config/crd/bases`.
 
-2. 로컬 검증
-   - 실행: `make gate`
-   - verify: lint, test, audit, validate가 모두 성공한다.
+2. Local verification.
+   - Run: `make gate`.
+   - Verify: lint, test, audit, and validate all pass.
 
-3. push 없는 릴리스 검증
-   - 실행: `make release-preflight VERSION=v0.1.1-alpha`
-   - verify: Helm package가 `/tmp/postgres-operator-release` 아래에서 생성 후 삭제되고, worktree clean 검사가 통과한다.
+3. Push-less release verification.
+   - Run: `make release-preflight VERSION=v0.1.1-alpha`.
+   - Verify: the Helm package is created under
+     `/tmp/postgres-operator-release`, cleaned up, and the worktree-clean
+     check passes.
 
-4. 실제 릴리스
-   - 실행: `make release VERSION=v0.1.1-alpha`
-   - verify: GHCR image push, Git tag push, GitHub Release 생성, `gh-pages` Helm index 갱신이 모두 성공한다.
+4. Actual release.
+   - Run: `make release VERSION=v0.1.1-alpha`.
+   - Verify: GHCR image push, Git tag push, GitHub Release creation, and
+     the `gh-pages` Helm index refresh all succeed.
 
-5. OLM bundle 재생성 + community-operators PR (선택, alpha tag 이후)
-   - 실행: `make bundle VERSION=0.3.0-alpha.N` + `make bundle-build VERSION=0.3.0-alpha.N`
-   - verify: `operator-sdk bundle validate ./bundle --select-optional suite=operatorframework` 통과, `docker push ghcr.io/keiailab/postgres-operator-bundle:0.3.0-alpha.N` 성공.
-   - 절차 상세: [docs/operator-guide/community-operators-onboarding.md](../operator-guide/community-operators-onboarding.md).
+5. OLM bundle regeneration + community-operators PR (optional, after the
+   alpha tag).
+   - Run: `make bundle VERSION=0.3.0-alpha.N` and
+     `make bundle-build VERSION=0.3.0-alpha.N`.
+   - Verify: `operator-sdk bundle validate ./bundle --select-optional
+     suite=operatorframework` is clean and
+     `docker push ghcr.io/keiailab/postgres-operator-bundle:0.3.0-alpha.N`
+     succeeds.
+   - Procedure detail:
+     [docs/operator-guide/community-operators-onboarding.md](../operator-guide/community-operators-onboarding.md).
 
-6. Artifact Hub 등록/검색 검증
-   - 전제: Artifact Hub control panel 에 Helm repository 를 `keiailab-postgres-operator` 이름으로 추가한다.
-   - repository URL: `https://keiailab.github.io/postgres-operator`
-   - package URL: `https://artifacthub.io/packages/helm/keiailab-postgres-operator/postgres-operator`
-   - API 등록: `ARTIFACTHUB_API_KEY_ID=... ARTIFACTHUB_API_KEY_SECRET=... make artifacthub-register`
-   - verify: `make artifacthub-smoke`
-   - 실패 해석: Helm repository reachability 단계가 통과하고 Artifact Hub package registration 단계만 404이면, chart package 문제가 아니라 Artifact Hub 쪽 repository 미등록 또는 아직 미처리 상태다. `charts/artifacthub-repo.yml` 의 `repositoryID` 는 Artifact Hub repository card 에 표시되는 ID 와 일치해야 Verified publisher 가 붙는다.
-   - 현재 상태 확인: `make artifacthub-smoke` 가 `Artifact Hub repository is not registered` 로 실패하면 `https://artifacthub.io/api/v1/repositories/search?org=keiailab&kind=0` 결과에 `https://keiailab.github.io/postgres-operator` 가 없는 상태다. 등록 후 Artifact Hub tracker 는 보통 30분 주기로 재처리하므로 새 chart version 게시 또는 tracker 대기 뒤 재검증한다.
+6. Artifact Hub registration / search verification.
+   - Prerequisite: register a Helm repository in the Artifact Hub control
+     panel under the name `keiailab-postgres-operator`.
+   - Repository URL: `https://keiailab.github.io/postgres-operator`.
+   - Package URL: `https://artifacthub.io/packages/helm/keiailab-postgres-operator/postgres-operator`.
+   - API registration: `ARTIFACTHUB_API_KEY_ID=... ARTIFACTHUB_API_KEY_SECRET=... make artifacthub-register`.
+   - Verify: `make artifacthub-smoke`.
+   - Failure interpretation: if the Helm-repository reachability step
+     passes but only the Artifact Hub package-registration step returns
+     404, the chart package is fine — the Artifact Hub side is either not
+     registered yet or still pending. `charts/artifacthub-repo.yml`'s
+     `repositoryID` must equal the ID shown on the Artifact Hub repository
+     card for the Verified-publisher badge to appear.
+   - Current-state check: if `make artifacthub-smoke` fails with
+     `Artifact Hub repository is not registered`, the URL
+     `https://keiailab.github.io/postgres-operator` is missing from
+     `https://artifacthub.io/api/v1/repositories/search?org=keiailab&kind=0`.
+     The Artifact Hub tracker re-processes about every 30 minutes, so wait
+     after registering or publishing a new chart version, then re-verify.
 
-## 수동 검증 명령
+## Manual verification commands
 
 ```bash
 go test $(go list ./... | grep -v /test/e2e)
@@ -71,10 +104,12 @@ rm -rf /tmp/postgres-operator-release
 
 ## L3 e2e
 
-Kind 기반 e2e는 명시 수동 게이트다. 실 dev/prod 클러스터가 아니라 전용 Kind cluster만 사용한다.
+The kind-based e2e run is an explicit manual gate. It runs on a dedicated
+kind cluster only — never on a real dev/prod cluster.
 
 ```bash
 make test-e2e PILLAR=p1
 ```
 
-테스트 cluster 이름은 `postgres-operator-test-e2e`이며 target 종료 시 삭제된다.
+The test cluster is named `postgres-operator-test-e2e` and is deleted when
+the target finishes.

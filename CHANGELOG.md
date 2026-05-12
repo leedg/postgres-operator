@@ -74,6 +74,21 @@ This project follows SemVer.
 
 ### Fixed
 
+- *(controller)* PostgresDatabase / PostgresUser reconcile script was
+  using `eval "$psql_base" -c '<SQL>'` to invoke psql; the outer shell
+  stripped the surrounding single quotes around `<SQL>` before passing
+  the arg to `eval`, which then concatenated all args with spaces and
+  re-parsed the whole string. The SQL got word-split on whitespace and
+  psql saw `-c CREATE`, `DATABASE`, `smoke_db_x`, … as separate args —
+  causing `FATAL: role "1" does not exist` and
+  `FATAL: role "DATABASE" does not exist` (PG18 kind smoke iter#5
+  observation). Replaced every `eval "$psql_base" …` call site with an
+  inline full `psql -v ON_ERROR_STOP=1 -X -q -d postgres -c '<SQL>'`
+  invocation so the SQL stays inside a single shell-quoted argument
+  and is delivered to psql atomically. Two new regression tests
+  (`TestPostgresDatabaseReconcileScriptDoesNotUseEval`,
+  `TestPostgresUserReconcileScriptDoesNotUseEval`) assert the rendered
+  script never contains `eval`.
 - *(controller)* PostgresDatabase / PostgresUser `status.applied` could
   remain unset (no condition, empty `status: {}`) even though the
   finalizer was already attached. Two root causes — *(a)* the

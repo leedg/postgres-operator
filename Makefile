@@ -230,6 +230,14 @@ validate: manifests generate kustomize build-installer test-scripts ## CRD, Kust
 	else \
 		echo "kubectl API server 미연결: dist/install.yaml client dry-run 생략"; \
 	fi
+	@test "$$(ls bundle/manifests/postgres.keiailab.io_*.yaml 2>/dev/null | wc -l)" -ge 8 || \
+		{ echo "[error] bundle/manifests/ 안 owned CRD 가 8 개 미만 — make bundle VERSION=... 재실행"; exit 1; }
+	@if command -v operator-sdk >/dev/null 2>&1; then \
+		echo "=== operator-sdk bundle validate ./bundle ==="; \
+		operator-sdk bundle validate ./bundle; \
+	else \
+		echo "operator-sdk 미설치: bundle validate 생략 (brew install operator-sdk)"; \
+	fi
 	@rm -f /tmp/postgres-operator-crd.yaml /tmp/postgres-operator-default.yaml /tmp/postgres-operator-helm.yaml /tmp/postgres-operator-helm-monitoring.yaml
 
 .PHONY: gate

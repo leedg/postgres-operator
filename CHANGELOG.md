@@ -4,7 +4,19 @@
 
 ## [Unreleased]
 
-(다음 cut 진행 중)
+### Added
+
+- *(olm,docs)* `docs/operator-guide/community-operators-onboarding.md` — k8s-operatorhub/community-operators 채널 등록 절차 (사전조건 체크리스트, bundle 이미지 빌드/push, gh pr create, upgrade graph 운영, Artifact Hub OLM 검증). T28 1 차 산출물.
+- *(ci)* `make hooks-install` / `make hooks-check` target — lefthook DCO/Conventional Commits 게이트 활성화 wrapper. CONTRIBUTING 안내 정합.
+- *(ci)* `make validate` 게이트 4 종 보강 — bundle CRD count ≥ 8, `operator-sdk bundle validate` default + `suite=operatorframework`, Chart appVersion ↔ kustomize newTag ↔ dist image tag drift assertion, `.github/workflows/` 부재 (ADR-0009 enforce).
+- *(olm)* CSV `customresourcedefinitions.owned[]` 에 ImageCatalog/ClusterImageCatalog/PostgresDatabase/PostgresUser description + displayName 추가 — operatorframework suite warning 4 건 0 화.
+- *(oss)* `SUPPORT.md` 신설 (GitHub Discussions / Issues / PR 경로, 보안 신고 분기, 응답 기대치). CHANGELOG 0.3.0-alpha.17/.18 정합.
+- *(docs)* README — 0.3.0-alpha.18 8 CRD 표면 표 + 빠른 시작 6 단계 워크플로 갱신.
+- *(docs)* TASKS T26 (cross-cut OSS/OLM 정합 완료) + T27 (신규 CRD live smoke 자동화 설계) + T28 (community-operators 등록 절차) 등록.
+
+### Fixed
+
+- *(security)* `github.com/moby/spdystream` v0.5.0 → v0.5.1 (CVE-2026-35469 HIGH, Kubelet/CRI-O/kube-apiserver DoS via SPDY streaming). trivy fs `--severity HIGH,CRITICAL --exit-code 1` 게이트 회복.
 
 ## [0.3.0-alpha.18] - 2026-05-12
 

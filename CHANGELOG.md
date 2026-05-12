@@ -16,6 +16,7 @@
 - *(smoke)* hack/smoke.sh 에 신규 CRD 4 종 시나리오 추가 — `SMOKE_DATABASE=1` (PostgresDatabase → status.applied + pg_database + reclaim=delete DROP), `SMOKE_USER=1` (PostgresUser → status.applied + pg_roles + DROP ROLE), `SMOKE_SCHEDULEDBACKUP=1` (cron immediate → BackupJob 생성 검증), `SMOKE_IMAGECATALOG=1` (ImageCatalog/ClusterImageCatalog schema + lookup). step number N/15 정합.
 - *(api)* 8 owned CRD 에 `kubebuilder:resource:categories` marker 추가 — `kubectl get postgres`/`database`/`backup`/`pooler`/`image`/`role`/`all` 카테고리 단축 명령 + OperatorHub UI 그룹핑 지원.
 - *(ci)* `make lint-k8s` target + `make validate` 통합 — kube-linter 로 dist/install.yaml + helm template 산출물의 K8s 리소스 보안/best-practice 정적 분석. liveness-port/readiness-port/non-root/readOnlyRoot/resource-limit 30+ check.
+- *(ci,olm)* `config/scorecard/` + `bundle/tests/scorecard/config.yaml` + `make scorecard` target — operator-sdk scorecard 6 test (basic-check-spec, olm-bundle-validation, olm-crds-have-validation, olm-crds-have-resources, olm-spec-descriptors, olm-status-descriptors) 자동화. 실측은 kind cluster 의존 (`make smoke` 후 `make scorecard`).
 - *(docs)* ROADMAP 현재 상태 스냅샷 — alpha.18 + OLM bundle + CNPG 호환 표면 + 로컬 4 계층 게이트 4 행 반영.
 - *(docs)* cross-validation-cnpg 매트릭스 — OLM bundle / Helm chart / Local supply chain gates / Security vulnerability scan / DCO sign-off enforcement 5 행 추가.
 

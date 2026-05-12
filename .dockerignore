@@ -9,3 +9,6 @@
 # Re-include Go module files
 !go.mod
 !go.sum
+
+# Re-include OLM bundle artifacts — bundle.Dockerfile COPY 대상.
+!bundle/**

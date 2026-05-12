@@ -1,144 +1,144 @@
-# ADR 0005 — Plugin SDK 인터페이스 모델 (in-process + gRPC)
+# ADR 0005 — Plugin SDK Interface Model (in-process + gRPC)
 
-- **상태**: Accepted (인터페이스 동결)
-- **날짜**: 2026-04-27
-- **결정자**: @keiailab/maintainers
-- **관련**: ADR 0001 v2 (미션 3축, Plugin SDK가 메타-차별화), ADR 0004 (Build, not Fork/Layer)
-- **선행 분석**: `/Users/phil/.claude/plans/squishy-squishing-harp.md` §9.5
+- **Status**: Accepted (interface frozen)
+- **Date**: 2026-04-27
+- **Decision makers**: @keiailab/maintainers
+- **Related**: ADR 0001 v2 (mission three axes, Plugin SDK as meta-differentiator), ADR 0004 (Build, not Fork/Layer)
+- **Prior analysis**: `/Users/phil/.claude/plans/squishy-squishing-harp.md` §9.5
 
-## 컨텍스트
+## Context
 
-ADR 0001 v2의 미션 3축 중 **Plugin SDK**는 본 프로젝트의 메타-차별화다. 그 가치는 다음 두 약속에 있다.
+Among the three mission axes of ADR 0001 v2, the **Plugin SDK** is the meta-differentiator of this project. Its value lies in the following two promises.
 
-1. **새 백업 도구·exporter·extension·router·auth 메커니즘 추가 = 인터페이스 구현 1주.** 핵심 reconciler 코드 변경 0.
-2. **외부 컨트리뷰터가 폐쇄 라이선스의 플러그인을 분리 배포 가능.** 프로젝트 자체는 Apache-2.0이지만 플러그인 분리 모델로 폐쇄 모듈 결합 허용.
+1. **Adding a new backup tool, exporter, extension, router, or auth mechanism = implementing an interface in a week.** Zero core reconciler code changes.
+2. **External contributors can distribute closed-license plugins separately.** The project itself is Apache-2.0, but the plugin separation model permits closed-module coupling.
 
-이 약속을 코드 차원에서 강제하려면 **인터페이스를 다른 모든 Pillar(P1~P12, P14) 진입 전에 동결**해야 한다. 늦게 도입하면 v1.0 직전 reconciler 대규모 리팩터링이 강제된다.
+To enforce these promises at the code level, the **interface must be frozen before entering any other Pillar (P1~P12, P14)**. Introducing it late forces a large-scale reconciler refactor right before v1.0.
 
-## 결정
+## Decision
 
-### 5종 인터페이스 동결
+### Five interfaces frozen
 
-`internal/plugin/api.go`에 다음 5개 Go 인터페이스를 동결한다.
+The following 5 Go interfaces are frozen in `internal/plugin/api.go`.
 
-| 인터페이스 | 책임 | 사용 Pillar |
+| Interface | Responsibility | Pillar using it |
 |---|---|---|
-| `BackupPlugin` | 백업 도구 추상화 (pgBackRest, WAL-G, Barman, custom) | P4 |
-| `ExporterPlugin` | Prometheus exporter + Grafana 대시보드 + alert rule | P6 |
-| `ExtensionPlugin` | PG extension install/preload/post-init 훅 + `SharedPreloadOrder()` | P10 |
-| `RouterPlugin` | QueryRouter Pod spec 빌더 + 도메인 readiness | P12 |
-| `AuthPlugin` | 인증 메커니즘 (SCRAM/mTLS/OIDC) + Secret 스키마 | P7 |
+| `BackupPlugin` | Backup tool abstraction (pgBackRest, WAL-G, Barman, custom) | P4 |
+| `ExporterPlugin` | Prometheus exporter + Grafana dashboard + alert rule | P6 |
+| `ExtensionPlugin` | PG extension install/preload/post-init hooks + `SharedPreloadOrder()` | P10 |
+| `RouterPlugin` | QueryRouter Pod spec builder + domain readiness | P12 |
+| `AuthPlugin` | Authentication mechanism (SCRAM/mTLS/OIDC) + Secret schema | P7 |
 
-각 인터페이스는 `Name() string`을 공통으로 가지며, 이는 `Registry`에서 조회 키로 사용된다.
+Each interface commonly has `Name() string`, which is used as the lookup key in the `Registry`.
 
-### 의존성 최소화
+### Dependency minimization
 
-본 패키지(`internal/plugin/`)는 다음 두 그룹 외 외부 의존을 갖지 않는다:
+This package (`internal/plugin/`) has no external dependencies outside these two groups:
 
 - Go stdlib (`context`, `database/sql`, `time`, `sort`, `sync`, `fmt`)
-- `k8s.io/api/core/v1` (이미 go.mod에 indirect로 존재)
+- `k8s.io/api/core/v1` (already exists as indirect in go.mod)
 
-특히 다음은 **의도적으로 배제**한다:
+In particular, the following are **intentionally excluded**:
 
-- **prometheus-operator API** — `AlertRulesYAML()`은 `[]byte`로 노출. 본 SDK가 prometheus-operator 버전에 종속되지 않음.
-- **apiextensions-apiserver의 `JSONSchemaProps`** — `SecretSchemaJSON()`도 `[]byte`로 노출. 동일 이유.
-- **HashiCorp `go-plugin`** — 아직 import 하지 않음. P13-T4에서 추가될 때 in-process API와 동등한 어댑터로만 진입.
+- **prometheus-operator API** — `AlertRulesYAML()` is exposed as `[]byte`. This SDK is not tied to prometheus-operator versions.
+- **apiextensions-apiserver's `JSONSchemaProps`** — `SecretSchemaJSON()` is also exposed as `[]byte`. Same reason.
+- **HashiCorp `go-plugin`** — not yet imported. When added in P13-T4, it enters only as an adapter equivalent to the in-process API.
 
-### 등록 모델 — in-process 우선
+### Registration model — in-process first
 
-`Registry` 구조체로 in-process(compile-time) 등록. `init()` 또는 `main()` 시점에 단일 goroutine이 등록하고, reconciler는 `RLock` 보호 조회.
+In-process (compile-time) registration via the `Registry` struct. A single goroutine registers at `init()` or `main()` time, and reconcilers look up under `RLock` protection.
 
-중복 등록 시 `panic`. 이는 init() 시점 결정성을 강제하는 선택이며, dynamic swap이 필요한 시점은 별도 메서드(`Replace*`)로 P13 후속 task에서 추가한다.
+Duplicate registration causes `panic`. This is a choice to enforce determinism at init() time; the methods to swap dynamically (`Replace*`) will be added in a follow-up P13 task when needed.
 
-### `SharedPreloadOrder()` — Crunchy PGO Issue #3194 회귀 방지
+### `SharedPreloadOrder()` — regression prevention for Crunchy PGO Issue #3194
 
-`Registry.Extensions()` 메서드는 등록된 ExtensionPlugin을 다음 순서로 정렬해 반환한다:
+`Registry.Extensions()` returns registered ExtensionPlugins sorted in the following order:
 
-1. `SharedPreloadOrder()` 오름차순 (작을수록 앞)
-2. 동률 시 `Name()` 사전순
+1. Ascending `SharedPreloadOrder()` (smaller comes first)
+2. Lexicographic `Name()` on ties
 
-권장 우선순위:
+Recommended priorities:
 
-| 우선순위 | extension | 사유 |
+| Priority | extension | Reason |
 |---|---|---|
-| 0 | citus | "Citus must be first" 규약 (PostgreSQL hook 등록 순서) |
-| 100 | pgaudit | 표준 audit 도구 |
-| 100 | pgvector | AI 워크로드 차별화 |
-| 200 | pg_cron | 스케줄러 (Citus 위에 안전) |
-| 300 | pg_partman, pgnodemx, set_user, postgis | 일반 |
+| 0 | citus | "Citus must be first" convention (PostgreSQL hook registration order) |
+| 100 | pgaudit | Standard audit tool |
+| 100 | pgvector | AI workload differentiator |
+| 200 | pg_cron | Scheduler (safe above Citus) |
+| 300 | pg_partman, pgnodemx, set_user, postgis | General |
 
-P10 reconciler는 본 메서드 결과를 `strings.Join`으로 직렬화하여 `shared_preload_libraries`에 주입한다. 정렬 정책 위반은 `internal/plugin/api_test.go:TestExtensions_PreloadOrder`로 회귀 차단.
+The P10 reconciler serializes the result of this method with `strings.Join` and injects it into `shared_preload_libraries`. Sorting policy violations are blocked from regressing by `internal/plugin/api_test.go:TestExtensions_PreloadOrder`.
 
-### 강제 메커니즘
+### Enforcement mechanism
 
-1. **golangci-lint custom 규칙(P13-T2)**: 핵심 reconciler(`internal/controller/`, `internal/webhook/`)가 `internal/plugin/<concrete>/` 하위 패키지를 직접 import 하면 PR reject.
-2. **컴파일 가드** (`api_test.go`의 `var _ BackupPlugin = (*dummyBackup)(nil)` 등): 인터페이스 시그니처 변경 시 빌드 실패.
-3. **회귀 테스트** (`TestExtensions_PreloadOrder`): SharedPreloadOrder 정책 변경 시 테스트 실패.
+1. **golangci-lint custom rule (P13-T2)**: PR reject if core reconcilers (`internal/controller/`, `internal/webhook/`) directly import `internal/plugin/<concrete>/` sub-packages.
+2. **Compile guards** (`var _ BackupPlugin = (*dummyBackup)(nil)` etc. in `api_test.go`): build fails if interface signatures change.
+3. **Regression tests** (`TestExtensions_PreloadOrder`): tests fail if the SharedPreloadOrder policy changes.
 
-### 변경 정책
+### Change policy
 
-- alpha 단계에서 **추가 메서드(non-breaking)만** 허용. 메서드 제거·시그니처 변경은 RFC 0012("Plugin SDK 안정화")에서 일괄 처리.
-- 본 ADR 변경(인터페이스 추가/제거, 의존성 도입)은 RFC 필수.
+- During alpha, **only additions of methods (non-breaking)** are permitted. Method removal or signature changes are handled together in RFC 0012 ("Plugin SDK stabilization").
+- Changes to this ADR (adding/removing interfaces, introducing dependencies) require an RFC.
 
-## 근거
+## Rationale
 
-### 왜 5개인가
+### Why five
 
-본 SDK가 추상화하는 모든 확장 지점은 다음 5가지 책임으로 분류 가능하다:
+All extension points abstracted by this SDK can be classified into the following 5 responsibilities:
 
-1. **데이터 보호** (BackupPlugin)
-2. **관측** (ExporterPlugin)
-3. **확장 기능** (ExtensionPlugin)
-4. **요청 라우팅** (RouterPlugin)
-5. **신원 검증** (AuthPlugin)
+1. **Data protection** (BackupPlugin)
+2. **Observability** (ExporterPlugin)
+3. **Extended functionality** (ExtensionPlugin)
+4. **Request routing** (RouterPlugin)
+5. **Identity verification** (AuthPlugin)
 
-PGO와 CNPG의 외부 통합 지점을 분석한 결과(plan §7), 위 5가지 외 추가 분류가 필요한 경우는 발견되지 않았다. 6번째 인터페이스가 필요해지면 ADR 갱신 후 추가.
+Analyzing the external integration points of PGO and CNPG (plan §7), no case was found that requires an additional classification beyond the above 5. If a 6th interface becomes necessary, add it after an ADR update.
 
-### 왜 의존성을 최소화하는가
+### Why minimize dependencies
 
-본 SDK는 외부 플러그인이 import 하는 wire-format이다. 의존성이 무거우면:
+This SDK is a wire format imported by external plugins. Heavy dependencies cause:
 
-- 외부 플러그인 빌드 시간 증가
-- 플러그인 격리(gRPC 모드)에서 versioning 충돌
-- 본 SDK가 모니터링 스택 메이저 변경(예: prometheus-operator v0.x → v1.0)에 끌려감
+- Increased external plugin build times
+- Versioning conflicts in plugin isolation (gRPC mode)
+- This SDK being dragged along with major changes of the monitoring stack (e.g., prometheus-operator v0.x → v1.0)
 
-`[]byte` raw 매니페스트 노출은 일견 약타이핑처럼 보이지만, **인터페이스 stability와의 trade-off에서 후자가 압도적**이다.
+Exposing `[]byte` raw manifests may look like weak typing, but **in the trade-off with interface stability, the latter is overwhelmingly more important**.
 
-### 왜 in-process 우선인가
+### Why in-process first
 
-P13-T4(gRPC out-of-process)는 외부 폐쇄 플러그인이 필요한 v1.x 시점 가치다. v1.0 GA까지는 **본 프로젝트 자체 플러그인(pgbackrest, pgmonitor, citus 등)이 in-process로 충분**하며, 그것을 우선 안정화한다.
+P13-T4 (gRPC out-of-process) is a value for the v1.x timeframe when external closed plugins are needed. Until v1.0 GA, **this project's own plugins (pgbackrest, pgmonitor, citus, etc.) in-process are sufficient**, and we stabilize them first.
 
-### 왜 중복 등록 시 panic인가
+### Why panic on duplicate registration
 
-플러그인 등록은 init() 시점 결정이다. 중복은 빌드 타임에 잡혀야 할 결함이며, runtime fallback은 다음 두 위험을 만든다:
+Plugin registration is an init() time decision. Duplicates are defects that should be caught at build time, and runtime fallback creates the following two risks:
 
-- "마지막 등록자 승" 정책은 컴파일 순서에 따라 동작이 달라짐 (Go init 순서는 import 그래프에 의존)
-- 사용자가 "왜 내 플러그인이 안 동작하지?"를 디버그할 단서가 사라짐
+- A "last registrant wins" policy makes behavior depend on compile order (Go init order depends on the import graph)
+- The user loses any clue to debug "why isn't my plugin working?"
 
-panic은 가혹하지만 결정성을 강제한다.
+Panic is harsh, but it enforces determinism.
 
-## 트레이드오프
+## Tradeoffs
 
-- **인터페이스 stability 비용**: 한 번 동결한 시그니처는 alpha 단계에서도 추가만 허용. 잘못 설계한 메서드는 RFC 0012까지 묶여 있음.
-  - **완화**: P13-T1 시점에 PGO/CNPG의 외부 통합 지점을 충분히 조사 후 동결. 본 ADR이 그 결과.
-- **`[]byte` 약타이핑의 검증 부담**: `AlertRulesYAML()` 결과를 reconciler가 직접 unmarshal 할 때 schema 검증 책임이 reconciler 측에 생김.
-  - **완화**: P6 reconciler에서 prometheus-operator schema 검증 라이브러리를 별도 import 하여 적용. SDK는 stable, 검증 로직은 갱신 가능.
-- **panic 정책의 운영 위험**: production에서 인스턴스가 init() panic 시 즉시 종료.
-  - **완화**: 등록은 init() 또는 main() 단일 호출. 외부 입력(CR, ConfigMap)은 등록 시점에 영향 없음.
+- **Cost of interface stability**: once frozen, signatures only allow additions even during alpha. Poorly designed methods are stuck until RFC 0012.
+  - **Mitigation**: at P13-T1 we sufficiently survey external integration points of PGO/CNPG before freezing. This ADR is that result.
+- **Verification burden of `[]byte` weak typing**: when the reconciler unmarshals `AlertRulesYAML()` results directly, schema verification responsibility lies on the reconciler side.
+  - **Mitigation**: in the P6 reconciler, separately import a prometheus-operator schema validation library and apply it. The SDK stays stable; the verification logic can be updated.
+- **Operational risk of panic policy**: an instance terminates immediately on init() panic in production.
+  - **Mitigation**: registration is a single init() or main() call. External inputs (CR, ConfigMap) have no effect on registration timing.
 
-## 강제 메커니즘 요약
+## Enforcement mechanism summary
 
-| 메커니즘 | 구현 위치 | 도입 시점 |
+| Mechanism | Implementation location | Introduction timing |
 |---|---|---|
-| 컴파일 가드 (`var _ Iface = (*impl)(nil)`) | `internal/plugin/api_test.go` | P13-T1 (본 ADR 채택과 동시) |
-| Registry 중복 panic | `internal/plugin/registry.go` | 동상 |
-| SharedPreloadOrder 정렬 회귀 테스트 | `internal/plugin/api_test.go:TestExtensions_PreloadOrder` | 동상 |
-| golangci-lint custom 규칙 (구체 import 차단) | `.custom-gcl.yml` | P13-T2 (별도 task) |
-| gRPC out-of-process 어댑터 | `internal/plugin/grpc/` (신규) | P13-T4 (v1.x) |
+| Compile guards (`var _ Iface = (*impl)(nil)`) | `internal/plugin/api_test.go` | P13-T1 (simultaneous with this ADR adoption) |
+| Registry duplicate panic | `internal/plugin/registry.go` | Same |
+| SharedPreloadOrder sorting regression test | `internal/plugin/api_test.go:TestExtensions_PreloadOrder` | Same |
+| golangci-lint custom rule (block concrete imports) | `.custom-gcl.yml` | P13-T2 (separate task) |
+| gRPC out-of-process adapter | `internal/plugin/grpc/` (new) | P13-T4 (v1.x) |
 
-## 결과
+## Consequences
 
-- `internal/plugin/api.go` + `internal/plugin/registry.go` + `internal/plugin/api_test.go` 동결.
-- 모든 다른 Pillar reconciler(P1~P12, P14)는 본 패키지의 인터페이스만 호출.
-- 본 ADR 변경(인터페이스 추가/제거, 의존성 도입)은 RFC 필수.
-- 다음 후속 작업: P13-T2(golangci-lint custom 규칙), P13-T3(P4/P6/P10이 실제 인터페이스 구현 형태로 작성됨을 보장), RFC 0012(SDK 안정화 + 외부 가이드).
+- `internal/plugin/api.go` + `internal/plugin/registry.go` + `internal/plugin/api_test.go` are frozen.
+- All other Pillar reconcilers (P1~P12, P14) call only this package's interfaces.
+- Changes to this ADR (adding/removing interfaces, introducing dependencies) require an RFC.
+- Following work: P13-T2 (golangci-lint custom rule), P13-T3 (guarantee that P4/P6/P10 are actually written as interface implementations), RFC 0012 (SDK stabilization + external guide).

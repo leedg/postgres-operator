@@ -1,109 +1,109 @@
-# ADR 0009 — GitHub Actions 폐기 + 로컬 4 계층 게이트 적용 (RFC 0002 적용)
+# ADR 0009 — Abandon GitHub Actions + Apply Local 4-Layer Gates (RFC 0002 application)
 
-- **상태**: Accepted
-- **날짜**: 2026-04-30
-- **결정자**: @keiailab/maintainers
-- **관련**: 글로벌 CLAUDE.md §2 (GitHub Actions 영구 금지), 글로벌 RFC 0002 (2026-04-29), `standards/ci.md` v1.0
-- **트리거**: 글로벌 §2 사고 (2026-04-28) — organization billing 1건 실패 → 전 저장소 전 PR의 모든 workflow runner 4초 만에 fail → 머지 불가 24시간+. 단일 외부 SaaS 의존이 SPOF.
+- **Status**: Accepted
+- **Date**: 2026-04-30
+- **Decision makers**: @keiailab/maintainers
+- **Related**: global CLAUDE.md §2 (permanent ban on GitHub Actions), global RFC 0002 (2026-04-29), `standards/ci.md` v1.0
+- **Trigger**: global §2 incident (2026-04-28) — one organization billing failure → all workflow runners on all PRs across all repos failed in 4 seconds → merges blocked for 24+ hours. A single external SaaS dependency is an SPOF.
 
-## 컨텍스트
+## Context
 
-본 프로젝트는 `.github/workflows/{ci,upstream-watch}.yml` 두 워크플로를 *현재 활성*. 글로벌 §2가 *RFC 0002에 따라 GitHub Actions 영구 금지*를 명문화한 시점(2026-04-29) 이후 본 프로젝트는 *마이그레이션 미적용 잔재*. 본 ADR이 그 적용 결정을 기록.
+This project currently has two active workflows: `.github/workflows/{ci,upstream-watch}.yml`. After the moment global §2 codified *permanent ban on GitHub Actions per RFC 0002* (2026-04-29), this project is *a leftover that has not been migrated*. This ADR records the decision to apply that migration.
 
-또한 PR #1 머지 직전 발견된 *e2e fail*은 *기존 main의 cert-manager 통합 미완*이 원인이며, GH Actions 자체가 *PR 머지 차단의 단일 SPOF*로 작용하는 위험을 노출.
+Also, the *e2e fail* discovered right before merging PR #1 is caused by *incomplete cert-manager integration on existing main*, and exposes the risk of GH Actions itself acting as a *single SPOF for PR merge blocking*.
 
-## 결정
+## Decision
 
-### 폐기 대상
+### Targets to abandon
 
-- `.github/workflows/ci.yml` — 5 jobs (lint, test, matrix-build, e2e, scan) 모두 *로컬 4 계층*으로 마이그레이션 후 삭제.
-- `.github/workflows/upstream-watch.yml` — Citus 신 릴리스 감지 cron. *RemoteTrigger 또는 사용자 schedule*로 대체 (본 ADR 후속 작업).
+- `.github/workflows/ci.yml` — all 5 jobs (lint, test, matrix-build, e2e, scan) migrated to *local 4 layers* and then deleted.
+- `.github/workflows/upstream-watch.yml` — cron to detect new Citus releases. Replaced by *RemoteTrigger or user schedule* (follow-up work to this ADR).
 
-### 4 계층 매핑 (글로벌 `ci.md` §1 표준)
+### Mapping to the 4 layers (global `ci.md` §1 standard)
 
-| 기존 ci.yml job | 새 위치 | 명령 |
+| Existing ci.yml job | New location | Command |
 |---|---|---|
 | lint (golangci + .custom-gcl) | **L1 pre-commit** | `make lint-config && make lint` |
 | test (Unit + envtest + go mod tidy drift) | **L2 pre-push** | `make test`, `go mod tidy && git diff --exit-code go.mod go.sum` |
-| scan (trivy fs HIGH+CRITICAL) | **L2 pre-push** | `make audit` (신규 타겟, trivy fs 호출) |
-| matrix-build (PG×Citus 3 조합) | **L3 Makefile (수동)** | release tag 시점 또는 `make build-pg-images` 수동 |
-| e2e (kind, PG 16/17, p1) | **L3 Makefile (수동)** | `make test-e2e` (kind 7-9분, pre-push 부적합) |
-| upstream-watch (cron) | **RemoteTrigger 또는 사용자 schedule** | 본 PR에서는 폐기만, 대체는 후속 |
+| scan (trivy fs HIGH+CRITICAL) | **L2 pre-push** | `make audit` (new target, invokes trivy fs) |
+| matrix-build (PG×Citus 3 combinations) | **L3 Makefile (manual)** | At release tag time or `make build-pg-images` manually |
+| e2e (kind, PG 16/17, p1) | **L3 Makefile (manual)** | `make test-e2e` (kind 7-9 minutes, unsuitable for pre-push) |
+| upstream-watch (cron) | **RemoteTrigger or user schedule** | This PR only abandons; replacement is follow-up |
 
-### 예외 3종
+### Three exceptions
 
-본 프로젝트는 글로벌 §2의 예외 3종 *어디에도 해당하지 않음*:
-- ① GitHub Pages 정적 배포 — 사용 안 함
-- ② Dependabot/Renovate 도구 자체 — `.github/dependabot.yml` 부재 (필요 시 별도 추가)
-- ③ release tag → GitHub Release 본문 자동 생성 — 현재 release tag 워크플로 부재
+This project *does not match any* of the three exceptions in global §2:
+- ① GitHub Pages static deployment — not used
+- ② Dependabot/Renovate tools themselves — `.github/dependabot.yml` absent (add separately if needed)
+- ③ Release tag → automatic GitHub Release body generation — currently no release tag workflow
 
-### 도구 설치 + 강제
+### Tool installation + enforcement
 
-- 개발자 환경: `pre-commit install --hook-type pre-commit --hook-type pre-push` 1회 실행 강제 (README 안내).
-- `.pre-commit-config.yaml`이 본 PR과 함께 도입.
-- 우회(`--no-verify`)는 *사고 보고 의무* (`incident-kb.md`).
+- Developer environment: require running `pre-commit install --hook-type pre-commit --hook-type pre-push` once (README instructions).
+- `.pre-commit-config.yaml` is introduced together with this PR.
+- Bypassing (`--no-verify`) requires *incident reporting* (`incident-kb.md`).
 
-### PR 머지 증거 (글로벌 `ci.md` §2)
+### PR merge evidence (global `ci.md` §2)
 
-PR 본문 또는 첫 commit 메시지에 다음 블록 포함 강제 (PR 리뷰어가 확인):
+Require the following block in the PR body or first commit message (PR reviewer to verify):
 
 ```
-로컬 게이트 PASS:
+Local gates PASS:
 - pre-commit run --all-files: PASS
-- pre-push hooks: PASS  (또는 N/A if no hook)
+- pre-push hooks: PASS  (or N/A if no hook)
 - make test: PASS  (or specific subset)
 - make audit: PASS  (high+ vulnerabilities = 0)
 ```
 
-부재 시 리뷰어가 머지 차단.
+If absent, the reviewer blocks merge.
 
-## 근거
+## Rationale
 
-### 왜 *지금* 마이그레이션인가
+### Why migrate *now*
 
-1. **글로벌 §2 명시 위반** — 2026-04-29 이후 *비정합 상태*. 본 프로젝트가 다른 Kei* repo(force-infra-modules, force-tenant-house 등)와 *일관된 표준*을 유지하려면 즉시 적용.
-2. **PR #1 e2e fail의 PR-blocking 효과 제거** — GH Actions 폐기 후에는 e2e fail이 *로컬 검증 차원*에 머무르며 *PR 머지 차단 SPOF 해소*. 단 e2e 자체 fix는 별도 PR.
-3. **사고 트리거 회피** — organization billing 단일 SPOF가 다시 발생하면 본 프로젝트도 동일 영향. 마이그레이션 지연은 위험 수동 수용.
+1. **Explicit violation of global §2** — *non-compliant state* since 2026-04-29. To keep this project in a *consistent standard* with other Kei* repos (force-infra-modules, force-tenant-house, etc.), apply immediately.
+2. **Remove the PR-blocking effect of the PR #1 e2e fail** — after abandoning GH Actions, an e2e fail only stays in the *local verification dimension* and *no longer blocks PR merge as SPOF*. The actual e2e fix is a separate PR.
+3. **Avoid the incident trigger** — if the organization billing single SPOF recurs, this project will be similarly affected. Delayed migration is a manual acceptance of risk.
 
-### 왜 e2e/matrix-build를 L2가 아닌 L3로 두는가
+### Why e2e/matrix-build is at L3 and not L2
 
-- e2e: kind cluster 부팅 + 7-9분 소요. 매 push 마다 실행은 *개발자 경험 저해*. PR 진입 직전 또는 release 시점에 명시 실행이 합리적.
-- matrix-build: docker buildx로 PG image 3 조합 build. release tag 시점에만 필요.
+- e2e: kind cluster boot + 7-9 minutes. Running on every push *hurts developer experience*. It is reasonable to run explicitly right before PR entry or at release time.
+- matrix-build: docker buildx builds 3 PG image combinations. Needed only at release tag time.
 
-이는 글로벌 `ci.md` §3 도구 카탈로그가 e2e/build를 별도 트랙으로 두는 패턴과 부합.
+This matches the pattern where the global `ci.md` §3 tool catalog places e2e/build in separate tracks.
 
-### 왜 lefthook 아닌 pre-commit인가
+### Why pre-commit and not lefthook
 
-글로벌 `enforcement.md` §1.1은 lefthook 권장이지만, 본 프로젝트는 *Go 단일 언어 + Python(pre-commit) 사용자 친숙*이라 pre-commit이 더 자연스러움. 글로벌 §3 우선순위 "Tier-3 프로젝트 > Tier-2 standards"에 따라 본 ADR로 정당화. 향후 lefthook 채택은 별도 ADR.
+Global `enforcement.md` §1.1 recommends lefthook, but this project is *a single Go language + Python (pre-commit) familiar to users*, so pre-commit is more natural. Per global §3 priority "Tier-3 project > Tier-2 standards", justified by this ADR. Future lefthook adoption is a separate ADR.
 
-## 트레이드오프
+## Tradeoffs
 
-- **upstream-watch 자동화 손실**: cron 기반 Citus 신 릴리스 감지가 일시 중단. 완화: 후속 작업에서 RemoteTrigger 또는 사용자 schedule 도구로 대체.
-- **개발자 환경 의존**: pre-commit + 보안 도구(gitleaks, trivy) 로컬 설치 강제. 완화: README에 `brew install` 또는 동등 명령 명시. macOS/Linux 환경 가정.
-- **PR 리뷰어 부담 증가**: 로컬 게이트 PASS 증거 블록을 *수동* 확인. 완화: 글로벌 표준이 동일하므로 *전 Kei* repo 공통 부담* — 학습 곡선이 한 번.
-- **e2e가 PR 자동 검증에서 빠짐**: 단 *e2e는 현재 이미 fail 상태* (cert-manager 미완)이므로 *기존 PR 차단을 막는 효과* 발생. 진짜 e2e fix(P7 cert-manager 통합 PR)에서 *L3 명시 실행*으로 검증.
+- **Loss of upstream-watch automation**: the cron-based detection of new Citus releases is temporarily suspended. Mitigation: in follow-up work, replace with RemoteTrigger or user schedule tools.
+- **Dependence on developer environment**: pre-commit + security tools (gitleaks, trivy) require local installation. Mitigation: indicate `brew install` or equivalent commands in the README. Assumes macOS/Linux environments.
+- **Increased burden on PR reviewers**: the "Local gates PASS" evidence block is verified *manually*. Mitigation: since the global standard is the same, it is a *common burden across all Kei* repos* — a one-time learning curve.
+- **e2e is excluded from automatic PR verification**: however, since *e2e is currently already failing* (cert-manager incomplete), there is an *effect of preventing existing PR blocking*. The real e2e fix (the P7 cert-manager integration PR) verifies via *explicit L3 execution*.
 
-## 결과
+## Consequences
 
-- `.github/workflows/{ci,upstream-watch}.yml` 두 파일 *삭제*.
-- `.pre-commit-config.yaml` 신규 — L1 + L2 hook 정의.
-- `Makefile`에 `audit` 타겟 신규 (`trivy fs` 호출).
-- `README.md`에 "로컬 게이트 PASS 증거 블록" + 개발자 환경 설정 안내 추가.
-- 본 PR 머지 후 *외부 단계*: GitHub branch protection의 "Required status checks" 제거 또는 로컬 hook 결과 마커로 교체 (admin이 별도 수행).
+- *Delete* both files `.github/workflows/{ci,upstream-watch}.yml`.
+- New `.pre-commit-config.yaml` — defines L1 + L2 hooks.
+- Add a new `audit` target to `Makefile` (invokes `trivy fs`).
+- Add "Local gates PASS evidence block" + developer environment setup instructions to `README.md`.
+- *External step* after this PR merges: remove "Required status checks" from GitHub branch protection or replace with local hook result markers (admin to perform separately).
 
-## 강제 메커니즘
+## Enforcement mechanism
 
-| 메커니즘 | 위치 | 도입 시점 |
+| Mechanism | Location | Introduction timing |
 |---|---|---|
-| `.pre-commit-config.yaml` | repo root | 본 ADR 동시 |
-| `Makefile` audit 타겟 | `Makefile` | 본 ADR 동시 |
-| 개발자 환경 안내 | `README.md` | 본 ADR 동시 |
-| PR 본문 증거 블록 강제 | `commits.md §3` PR 체크리스트 | 글로벌 표준 |
-| upstream-watch 대체 | RemoteTrigger / 사용자 schedule | 후속 작업 |
+| `.pre-commit-config.yaml` | repo root | Same time as this ADR |
+| `Makefile` audit target | `Makefile` | Same time as this ADR |
+| Developer environment instructions | `README.md` | Same time as this ADR |
+| Enforced PR body evidence block | `commits.md §3` PR checklist | Global standard |
+| upstream-watch replacement | RemoteTrigger / user schedule | Follow-up work |
 
-## 후속 작업
+## Follow-up work
 
-1. **upstream-watch 대체** — RemoteTrigger 또는 사용자 schedule 도구로 Citus 신 릴리스 감지 자동화 재구성.
-2. **branch protection rule 갱신** — admin이 GitHub UI에서 Required status checks 제거.
-3. **lefthook 마이그레이션 검토** (향후) — 글로벌 `enforcement.md` §1.1 권장과 정합 시 별도 ADR.
-4. **e2e cert-manager 통합 완성 PR** — config/certmanager/ + Certificate CR + e2e BeforeAll wait. 본 PR과 별도 진행.
+1. **upstream-watch replacement** — reconfigure automation for new Citus release detection via RemoteTrigger or user schedule tools.
+2. **Update branch protection rules** — admin removes Required status checks in the GitHub UI.
+3. **Consider lefthook migration** (future) — when consistent with the recommendation in global `enforcement.md` §1.1, a separate ADR.
+4. **Complete the e2e cert-manager integration PR** — config/certmanager/ + Certificate CR + e2e BeforeAll wait. Proceeds separately from this PR.

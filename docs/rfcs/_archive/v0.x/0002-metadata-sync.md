@@ -1,107 +1,107 @@
-# RFC 0002 — Metadata Sync 알고리즘 (`pg_dist_node` ↔ K8s)
+# RFC 0002 — Metadata Sync Algorithm (`pg_dist_node` ↔ K8s)
 
-- **상태**: Draft (P11-T1 spike와 동시 제안)
-- **제출일**: 2026-04-27
-- **작성자**: @keiailab/maintainers
-- **코멘트 윈도우**: 14일 (마감 2026-05-11)
-- **승인 기준**: 메인테이너 2/3 (GOVERNANCE.md "아키텍처 변경")
-- **관련**: ADR 0001 v2 §차별화 1(Citus 1급), ADR 0002(K8s as DCS), ADR 0003(QueryRouter Stateless), ADR 0005(Plugin SDK), RFC 0001 §부록 D §Pillar 매핑(P11)
-- **선행 산출물**: P10-T2(7 ExtensionPlugin 등록 + 정렬 회귀)
+- **Status**: Draft (proposed simultaneously with P11-T1 spike)
+- **Submitted**: 2026-04-27
+- **Authors**: @keiailab/maintainers
+- **Comment window**: 14 days (closes 2026-05-11)
+- **Approval criteria**: 2/3 of maintainers (GOVERNANCE.md "architecture change")
+- **Related**: ADR 0001 v2 §differentiator 1 (Citus first-class), ADR 0002 (K8s as DCS), ADR 0003 (QueryRouter Stateless), ADR 0005 (Plugin SDK), RFC 0001 §Appendix D §Pillar mapping (P11)
+- **Prior artifact**: P10-T2 (register 7 ExtensionPlugins + ordering regression)
 
-## 컨텍스트
+## Context
 
-본 오퍼레이터의 첫 번째 차별화(ADR 0001 v2)는 **Citus 분산 토폴로지의 1급 지원**이다. 이 차별화의 핵심 기능 한 가지를 본 RFC가 정의한다: **`pg_dist_node`(Citus 메타데이터 카탈로그)와 K8s 토폴로지(`PostgresCluster.spec.workers[]` + Service Endpoints) 사이의 자동 동기화**.
+The first differentiator of this operator (ADR 0001 v2) is **first-class support for the Citus distributed topology**. One of the core features of that differentiator is defined by this RFC: **automatic sync between `pg_dist_node` (Citus metadata catalog) and K8s topology (`PostgresCluster.spec.workers[]` + Service Endpoints)**.
 
-PGO/CNPG는 이 기능을 제공하지 않는다 — 사용자가 직접 `citus_add_node`/`citus_update_node`/`citus_remove_node`를 호출해야 한다. 본 오퍼레이터는 사용자가 `PostgresCluster.spec.workers`만 선언하면 reconciler가 권위적으로 sync 한다.
+PGO/CNPG do not provide this feature — users must call `citus_add_node`/`citus_update_node`/`citus_remove_node` themselves. In this operator, once the user declares `PostgresCluster.spec.workers`, the reconciler authoritatively syncs.
 
-## 결정
+## Decision
 
-### 1. Node 모델
+### 1. Node model
 
-본 오퍼레이터는 다음 7-tuple로 단일 Citus 노드를 표현한다.
+This operator represents a single Citus node with the following 7-tuple.
 
 ```go
 type Node struct {
     Group            int32  // Citus pg_dist_node.groupid
     Name             string // hostname (Pod DNS)
-    Port             int32  // PG 포트 (5432)
+    Port             int32  // PG port (5432)
     Role             string // "coordinator" | "worker"
-    Pool             string // worker pool name (coordinator는 빈 문자열)
-    Index            int32  // 같은 pool 내 ordinal (StatefulSet 순서)
+    Pool             string // worker pool name (empty string for coordinator)
+    Index            int32  // ordinal within the same pool (StatefulSet order)
     ShouldHaveShards bool   // pg_dist_node.shouldhaveshards
 }
 ```
 
-`Name`은 K8s headless Service가 보장하는 안정적 Pod DNS:
+`Name` is the stable Pod DNS guaranteed by the K8s headless Service:
 
 ```
 <sts-name>-<index>.<svc-name>.<namespace>.svc.cluster.local
 ```
 
-예: `orders-worker-pool-a-0.orders-worker-pool-a.default.svc.cluster.local`
+Example: `orders-worker-pool-a-0.orders-worker-pool-a.default.svc.cluster.local`
 
-### 2. groupid 할당 규칙
+### 2. groupid assignment rule
 
-| 역할 | groupid |
+| Role | groupid |
 |---|---|
-| Coordinator | **0** (Citus 표준) |
+| Coordinator | **0** (Citus standard) |
 | Worker pool i (`spec.workers[i]`) | **i + 1** (1, 2, 3, ...) |
 
-같은 worker pool 내 모든 멤버(StatefulSet replica)는 **동일 groupid를 공유**한다. Citus는 같은 groupid의 노드들을 streaming replication HA pair로 인식한다.
+All members (StatefulSet replicas) within the same worker pool **share the same groupid**. Citus recognizes nodes with the same groupid as a streaming replication HA pair.
 
-**불변식**: 사용자가 `spec.workers[]`의 순서를 바꾸면 groupid가 재배치되어 분산 테이블 shard 위치가 깨진다. 이를 막기 위해:
-- webhook이 update 시 `spec.workers[].name` 순서 변경을 거절(P9-T5 시점). 본 RFC는 시그니처 동결만 하고 강제는 후속 RFC 0010(Upgrade)에 위임.
-- alpha 단계(현 시점)에서는 사용자에게 "순서 고정"을 가이드 문서로만 안내.
+**Invariant**: if the user changes the order of `spec.workers[]`, groupids are reassigned and distributed table shard locations break. To prevent this:
+- The webhook rejects changes in the order of `spec.workers[].name` on update (at P9-T5 time). This RFC only freezes signatures; enforcement is delegated to the follow-up RFC 0010 (Upgrade).
+- During alpha (the current time), users are only guided to "fix the order" via documentation.
 
-### 3. ShouldHaveShards 기본값
+### 3. ShouldHaveShards default
 
-| 역할 | 기본값 | 사유 |
+| Role | Default | Reason |
 |---|---|---|
-| Coordinator | **false** | ADR 0003 §Coordinator: coordinator는 메타데이터+DDL 게이트웨이 역할에 집중. 분산 테이블 shard 미보유가 권장. 사용자가 `spec.coordinator.shouldHaveShards=true`로 override 가능. |
-| Worker | **true** | 분산 테이블 shard 보유가 worker의 본질 책임 |
+| Coordinator | **false** | ADR 0003 §Coordinator: the coordinator focuses on metadata + DDL gateway. Not holding distributed table shards is recommended. The user can override with `spec.coordinator.shouldHaveShards=true`. |
+| Worker | **true** | Holding distributed table shards is the essential responsibility of a worker |
 
-### 4. 변환 함수 — `DesiredNodes`
+### 4. Conversion function — `DesiredNodes`
 
 ```go
 func DesiredNodes(cluster *postgresv1alpha1.PostgresCluster) []Node
 ```
 
-**입력**: `PostgresCluster` CR
-**출력**: 기대 `pg_dist_node` 등재 항목들의 평탄화 리스트
+**Input**: a `PostgresCluster` CR
+**Output**: a flattened list of expected `pg_dist_node` entries
 
-**알고리즘** (M0 spike, 단순화):
+**Algorithm** (M0 spike, simplified):
 
-1. coordinator: members 수만큼 Node 생성, 모두 group=0, role="coordinator". Name은 `<cluster>-coordinator-<idx>.<svc>.<ns>.svc.cluster.local` 형식.
-2. 각 worker pool i: members 수만큼 Node 생성, 모두 group=i+1, role="worker", pool=name.
+1. coordinator: create `members` count of Nodes, all with group=0, role="coordinator". Name in the form `<cluster>-coordinator-<idx>.<svc>.<ns>.svc.cluster.local`.
+2. For each worker pool i: create `members` count of Nodes, all with group=i+1, role="worker", pool=name.
 
-**결정성**: 동일 입력에 대해 동일 출력. 정렬 키는 (Group, Index).
+**Determinism**: identical output for identical input. Sort keys are (Group, Index).
 
-**M1 보강 (후속 task)**:
-- failover 시점에 primary가 아닌 standby가 응답할 수 있는 문제 처리
-- Service Endpoints(Pod ready 상태)를 추가 입력으로 받아 unready Pod 제외
+**M1 reinforcement (follow-up task)**:
+- handle the case where a non-primary standby may respond at failover time
+- take Service Endpoints (Pod ready state) as an additional input to exclude unready Pods
 
-### 5. diff 알고리즘 — `ComputeActions`
+### 5. diff algorithm — `ComputeActions`
 
 ```go
 type Action struct {
     Op   string // "add" | "update" | "remove"
-    Node Node   // 대상
+    Node Node   // target
 }
 
 func ComputeActions(current, desired []Node) []Action
 ```
 
-**알고리즘**:
+**Algorithm**:
 
-1. 두 슬라이스를 (group, name, port) 키로 map화
-2. desired에 있고 current에 없으면 → `add`
-3. desired에 있고 current에 있으면 → 필드 비교 → 다르면 `update`
-4. current에 있고 desired에 없으면 → `remove`
-5. 결과를 안정 정렬: remove → update → add (분산 테이블 가용성 보전 위해 add를 마지막)
+1. Map both slices by (group, name, port) key
+2. Present in desired but absent in current → `add`
+3. Present in desired and current → compare fields → different → `update`
+4. Present in current but absent in desired → `remove`
+5. Stable-sort the result: remove → update → add (place `add` last to preserve distributed table availability)
 
-**결정성**: 입력 슬라이스의 순서와 무관하게 동일 결과.
+**Determinism**: identical result regardless of the order of the input slices.
 
-### 6. SQL 실행 — `SQLExecutor` 인터페이스
+### 6. SQL execution — `SQLExecutor` interface
 
 ```go
 type SQLExecutor interface {
@@ -109,82 +109,82 @@ type SQLExecutor interface {
 }
 ```
 
-**구현체**:
-- `LibPQExecutor` (production, P11-M1): `database/sql` + `github.com/lib/pq`로 coordinator primary에 연결, 각 Action을 다음 SQL로 변환:
+**Implementations**:
+- `LibPQExecutor` (production, P11-M1): connect to the coordinator primary via `database/sql` + `github.com/lib/pq`, and translate each Action to the following SQL:
   - `add` → `SELECT citus_add_node('<name>', <port>, groupid => <group>, ...)`
-  - `update` → `SELECT citus_update_node(<old_id>, '<new_name>', <new_port>)` (pg_dist_node에서 nodeid lookup 후)
+  - `update` → `SELECT citus_update_node(<old_id>, '<new_name>', <new_port>)` (after looking up nodeid in pg_dist_node)
   - `remove` → `SELECT citus_remove_node('<name>', <port>)`
-- `NullExecutor` (spike 기본값, M0): no-op. desired 상태만 Status에 반영, SQL은 호출 안 함. envtest와 cmd/main.go 양쪽이 본 구현을 사용.
-- `MockExecutor` (단위 테스트): 호출된 Actions를 기록만 함.
+- `NullExecutor` (spike default, M0): no-op. Only reflects the desired state in Status; does not call SQL. Both envtest and cmd/main.go use this implementation.
+- `MockExecutor` (unit tests): only records called Actions.
 
-**선택**: cmd/main.go가 컴파일 시점에 LibPQExecutor 또는 NullExecutor를 선택해 reconciler에 주입. 향후 RFC 0009(QueryRouter CRD 분리)에서 SQLExecutor 자체가 RouterPlugin 인터페이스에 통합될지 검토.
+**Selection**: cmd/main.go picks either LibPQExecutor or NullExecutor at compile time and injects it into the reconciler. We may later review whether the SQLExecutor itself is integrated into the RouterPlugin interface in RFC 0009 (QueryRouter CRD separation).
 
-### 7. 동기화 시점
+### 7. Sync timing
 
-본 RFC v1은 **reconcile 매 회 권위적 동기화**를 채택한다.
+v1 of this RFC adopts **authoritative sync on every reconcile**.
 
-- 트리거: PostgresCluster CR 변경 + Owns()로 등록된 모든 하위 자원 변경
-- 절차: refreshStatus → 모든 자원 ready 확인 → DesiredNodes → (현재 pg_dist_node 조회) → ComputeActions → SQLExecutor.Apply
-- 모든 자원이 ready가 아니면 sync skip + ConditionMetadataInSync=False(Reason=Progressing)
+- Triggers: changes to the PostgresCluster CR + changes to all subordinate resources registered via Owns()
+- Procedure: refreshStatus → confirm all resources ready → DesiredNodes → (query current pg_dist_node) → ComputeActions → SQLExecutor.Apply
+- If not all resources are ready, skip sync + ConditionMetadataInSync=False(Reason=Progressing)
 
-**대안 (기각)**: Citus metadata sync 자체(`pg_dist_node` → workers)에 위임 후 우리는 coordinator만 갱신. 선택 안 함 — 사용자가 `pg_dist_node`를 직접 수정한 drift 회복이 안 됨.
+**Alternative (rejected)**: delegate to Citus metadata sync itself (`pg_dist_node` → workers) and we only update the coordinator. Not chosen — drift recovery from users directly modifying `pg_dist_node` would not work.
 
-### 8. 동시성·순서
+### 8. Concurrency and ordering
 
-- coordinator primary 1대에서만 변경 SQL 실행
-- 동일 PostgresCluster에 대한 reconcile은 controller-runtime이 직렬화(work queue 단일 worker per CR)
-- 다른 PostgresCluster는 독립적으로 병렬 가능
+- All mutating SQL executes only on one coordinator primary
+- Reconciles of the same PostgresCluster are serialized by controller-runtime (single worker per CR in the work queue)
+- Different PostgresClusters can proceed independently in parallel
 
-### 9. 회복 메커니즘
+### 9. Recovery mechanism
 
-- Drift 감지 (사용자가 직접 `citus_remove_node` 호출 등): 다음 reconcile 매 회 ComputeActions가 desired vs current 차이를 감지해 자동 복원
-- coordinator failover: P2(election) 통합 시 새 primary로 SQLExecutor 재연결
-- 부분 실패 (Action N개 중 K개만 적용): 다음 reconcile에서 잔여 Action 자동 적용 (멱등성)
+- Drift detection (e.g., a user directly called `citus_remove_node`): ComputeActions on every following reconcile detects the difference between desired vs. current and auto-restores
+- Coordinator failover: at P2 (election) integration, reconnect SQLExecutor to the new primary
+- Partial failure (only K of N Actions applied): the remaining Actions are auto-applied on the next reconcile (idempotency)
 
-### 10. Status 반영
+### 10. Status reflection
 
-`PostgresClusterStatus.Topology`에 다음 필드를 채운다 (RFC 0001 시그니처와 일치):
+`PostgresClusterStatus.Topology` is filled with the following fields (matching the RFC 0001 signatures):
 
-- `Coordinator.Primary`/`Replicas`/`LeaseHolder`: coordinator Pod 상태 (P2 통합 후 의미 부여)
-- `Workers[].Name`: pool 이름
-- `Workers[].DistNode.GroupID`: groupid 할당 결과
-- `Workers[].DistNode.NodeName`/`NodePort`/`ShouldHaveShards`: 기대 값
+- `Coordinator.Primary`/`Replicas`/`LeaseHolder`: coordinator Pod state (meaning given after P2 integration)
+- `Workers[].Name`: pool name
+- `Workers[].DistNode.GroupID`: groupid assignment result
+- `Workers[].DistNode.NodeName`/`NodePort`/`ShouldHaveShards`: expected values
 
 `ConditionMetadataInSync`:
-- True: SQLExecutor.Apply 마지막 호출이 0 actions 또는 성공
-- False/Progressing: 자원 미준비 또는 마지막 Apply 실패
-- Unknown/NotApplicable: NullExecutor 사용 중 (M0 spike 기본값)
+- True: the last call to SQLExecutor.Apply was either 0 actions or successful
+- False/Progressing: resources not ready or the last Apply failed
+- Unknown/NotApplicable: NullExecutor in use (M0 spike default)
 
-## 강제 메커니즘
+## Enforcement mechanism
 
-1. **`internal/citus/topology.go`의 DesiredNodes는 순수 함수** — 단위 테스트 ≥3건 (coordinator only / 1 pool / N pool)
-2. **ComputeActions 결정성** — 입력 순서 셔플 회귀 테스트
-3. **SQLExecutor 인터페이스 동결** — `var _ SQLExecutor = ...` 컴파일 가드
-4. **본 RFC 변경(Node 모델, groupid 규칙)은 RFC 갱신 필수**
+1. **DesiredNodes in `internal/citus/topology.go` is a pure function** — ≥3 unit tests (coordinator only / 1 pool / N pools)
+2. **ComputeActions determinism** — input-order shuffle regression test
+3. **SQLExecutor interface freeze** — compile guards `var _ SQLExecutor = ...`
+4. **Changes to this RFC (Node model, groupid rule) require an RFC update**
 
-## 트레이드오프
+## Tradeoffs
 
-- **groupid 순서 고정의 부담**: 사용자가 worker pool 순서를 바꾸면 분산 테이블이 깨짐. P9(Upgrade) RFC 0010에서 webhook 거절로 강제 예정. alpha 동안은 가이드 문서로만 안내.
-- **NullExecutor 기본값의 의도**: spike 단계에서 실제 SQL 호출은 envtest로 검증 불가능. desired state 표면화만으로도 reconciler 통합과 Status 정합성을 검증 가능. P11-M1에서 LibPQExecutor + 실 PG 통합 e2e로 보강.
-- **single coordinator primary 가정**: P2(election) 통합 전까지 "primary가 누구인가"는 단순화 (coordinator-0 가정). P2 후 K8s lease holder를 follow.
+- **Burden of fixed groupid ordering**: if a user changes worker pool order, distributed tables break. Scheduled to enforce via webhook rejection in P9 (Upgrade) RFC 0010. During alpha, only guided via documentation.
+- **Intent of NullExecutor default**: at the spike stage, actual SQL calls cannot be verified by envtest. Surfacing the desired state alone allows verification of reconciler integration and Status consistency. Reinforced in P11-M1 with LibPQExecutor + real PG integration e2e.
+- **Single coordinator primary assumption**: before P2 (election) integration, "who is primary" is simplified (assume coordinator-0). After P2, follow the K8s lease holder.
 
-## 결과
+## Consequences
 
-- Pillar P11이 M0(spike) 도달 가능
-- ADR 0001 v2의 차별화 1(Citus 1급)이 코드 차원에서 시작됨
-- 본 RFC는 P11-T1 코드와 같은 PR로 commit (분리 시 정합성 깨짐)
+- Pillar P11 can reach M0 (spike)
+- Differentiator 1 (Citus first-class) of ADR 0001 v2 begins at the code level
+- This RFC is committed in the same PR as the P11-T1 code (consistency breaks if separated)
 
-## 검증 (How to verify)
+## Verification (How to verify)
 
 ```bash
 cd /Users/phil/WorkSpace/public/postgresql-operator
 
-# 1) topology + sync 단위 테스트
+# 1) topology + sync unit tests
 go test ./internal/citus/... -v
 
-# 2) reconciler 통합(envtest)에서 Status.Topology.Workers[].DistNode 채워짐 확인
+# 2) Verify Status.Topology.Workers[].DistNode is filled in reconciler integration (envtest)
 go test ./internal/controller/... -v -run "P11"
 
-# 3) RFC 동결 시그니처 회귀 (DesiredNodes·ComputeActions·SQLExecutor)
+# 3) RFC-frozen signature regression (DesiredNodes·ComputeActions·SQLExecutor)
 go vet ./...
 ```

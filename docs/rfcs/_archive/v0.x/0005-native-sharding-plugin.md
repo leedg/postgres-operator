@@ -1,167 +1,167 @@
-# RFC-0005: Native Sharding Plugin (Citus 메커니즘 분해 + Apache-2.0 호환 path)
+# RFC-0005: Native Sharding Plugin (Citus mechanism decomposition + Apache-2.0 compatible path)
 
 - Date: 2026-05-01
 - Status: Draft
 - Authors: @keiailab
 - Related: ADR-0010 (license + sharding strategy), ADR-0005 (plugin SDK interface model)
 
-## 0. 요약 (TL;DR)
+## 0. Summary (TL;DR)
 
-ADR-0010이 결정한 "Citus 격리 + vanilla PG default" 정책의 *장기 path*. Citus가 제공하는 분산 SQL capability subset을 Apache-2.0 호환 plugin으로 자체 구현하기 위해 Citus의 핵심 7개 메커니즘을 분해하고, 본 operator의 5-interface Plugin SDK를 확장한 `ShardingPlugin` 인터페이스를 제시한다. 단계별 마일스톤(Phase 2A~Phase 4)을 정의하고 각 phase의 trade-off, 위험, 이미 존재하는 솔루션과의 비교를 평가한다.
+The *long-term path* for the "Citus isolation + vanilla PG default" policy decided by ADR-0010. To self-implement an Apache-2.0 compatible plugin for a subset of distributed SQL capabilities provided by Citus, this RFC decomposes the 7 core Citus mechanisms and presents a `ShardingPlugin` interface extending this operator's 5-interface Plugin SDK. It defines milestones by stage (Phase 2A~Phase 4) and evaluates the trade-offs, risks, and comparison with existing solutions for each phase.
 
-**현실 인지**: Citus는 Microsoft 전담팀이 10년 이상 누적한 ~500K LOC C 코드. 1:1 대체는 multi-year 작업이며 본 RFC가 약속하는 것은 *capability subset* 구현이지 parity가 아니다.
+**Reality check**: Citus is ~500K LOC of C code accumulated by a dedicated Microsoft team over more than 10 years. A 1:1 replacement is a multi-year effort, and what this RFC promises is *capability subset* implementation, not parity.
 
 ## 1. Context
 
-### 1.1 결정 배경 (ADR-0010 요약)
+### 1.1 Decision background (ADR-0010 summary)
 
-- Citus = AGPL-3.0 → operator 사용자가 SaaS 운영 시 §13 의무 부담
-- 본 operator = Apache-2.0 → 청정 default 유지
-- 0.2.0-alpha 이후 default = vanilla PG18, Citus는 Beta opt-in
+- Citus = AGPL-3.0 → operator users bear §13 obligations when operating SaaS
+- This operator = Apache-2.0 → keeps default clean
+- After 0.2.0-alpha, default = vanilla PG18, Citus is Beta opt-in
 
-### 1.2 제거 시 공백
+### 1.2 Gap from removal
 
-분산 SQL이 default에서 빠졌으므로 다음 사용자 시나리오가 *기능 공백*에 들어간다:
-- 단일 PG가 감당하기 어려운 OLTP scale (>1TB working set, >10K QPS)
-- 멀티-노드 sharded write workload
-- 분산 join이 필요한 분석 쿼리
+Since distributed SQL is excluded from the default, the following user scenarios fall into a *functional gap*:
+- OLTP scale that a single PG cannot handle (>1TB working set, >10K QPS)
+- Multi-node sharded write workloads
+- Analytical queries needing distributed joins
 
-본 RFC는 본 공백을 단계적으로 메우는 path를 제시한다.
+This RFC presents a path to fill that gap in stages.
 
-### 1.3 비교: 기존 분산 PostgreSQL 솔루션
+### 1.3 Comparison: existing distributed PostgreSQL solutions
 
-| 솔루션 | 라이센스 | 접근법 | 본 RFC 관점 |
+| Solution | License | Approach | This RFC's view |
 |---|---|---|---|
-| Citus | AGPL-3.0 | PG extension, distributed planner C extension | 회피 대상 (license) |
-| Vitess | Apache-2.0 | MySQL/PG sharding proxy | PG 지원 alpha. 외부 proxy 패턴 참고 |
-| YugabyteDB | Apache-2.0 (구 PG fork) | PG-compatible distributed DB | 별도 stack, drop-in 아님 |
-| CockroachDB | BUSL (Business Source) | PG wire compatible distributed | 본 operator 외부, 비교군 |
-| pgcat / pgbouncer + sharding 룰 | MIT/PostgreSQL | connection-level sharding proxy | Phase 2A 후보 |
-| postgres_fdw + pg_partman | PostgreSQL License | FDW + partition routing | Phase 2A 시작점 |
+| Citus | AGPL-3.0 | PG extension, distributed planner C extension | Avoided (license) |
+| Vitess | Apache-2.0 | MySQL/PG sharding proxy | PG support is alpha. Reference for external proxy pattern |
+| YugabyteDB | Apache-2.0 (formerly PG fork) | PG-compatible distributed DB | Separate stack, not a drop-in |
+| CockroachDB | BUSL (Business Source) | PG wire compatible distributed | Outside this operator, comparison group |
+| pgcat / pgbouncer + sharding rules | MIT/PostgreSQL | Connection-level sharding proxy | Phase 2A candidate |
+| postgres_fdw + pg_partman | PostgreSQL License | FDW + partition routing | Phase 2A starting point |
 
-본 RFC는 *plugin 형태*의 자체 구현을 목표로 하며, 외부 솔루션은 사용자가 선택할 수 있는 alternatives로만 다룬다.
+This RFC aims for a self-implementation in *plugin form*, and treats external solutions only as alternatives users can choose.
 
-## 2. Citus 핵심 메커니즘 분해 (7 components)
+## 2. Decomposition of Citus core mechanisms (7 components)
 
-본 절은 Citus의 공개 documentation, 코드 구조, 학술 논문(VLDB 2021 "Citus: Distributed PostgreSQL for Data-Intensive Applications") 분석에 기반한다.
+This section is based on analysis of Citus's public documentation, code structure, and academic papers (VLDB 2021 "Citus: Distributed PostgreSQL for Data-Intensive Applications").
 
 ### C1. Distributed Query Planner
 
-**역할**: SQL을 받아 어느 shard로 routing/parallelize할지 결정. PG의 native planner 결과물(query tree)을 distributed query plan으로 변환.
+**Role**: takes SQL and decides which shard to route/parallelize to. Converts the result of PG's native planner (query tree) into a distributed query plan.
 
-**Citus 구현**: `multi_planner` (~150K LOC). Hook을 통해 PG planner_hook에 주입. Logical planner → physical planner → job tree 생성.
+**Citus implementation**: `multi_planner` (~150K LOC). Injected into PG planner_hook via Hook. Logical planner → physical planner → produces a job tree.
 
-**난이도**: ★★★★★ (가장 어려움). Citus의 핵심 가치이자 5년 이상 누적 작업.
+**Difficulty**: ★★★★★ (hardest). Citus's core value and 5+ years of accumulated work.
 
 ### C2. Distributed Executor
 
-**역할**: Plan tree를 받아 worker 노드에 fragment query를 보내고 결과 집계. Adaptive executor는 connection pool 재사용, transaction recovery 처리.
+**Role**: takes the plan tree, sends fragment queries to worker nodes, and aggregates results. Adaptive executor handles connection pool reuse and transaction recovery.
 
-**Citus 구현**: `multi_executor` + `adaptive_executor`. Real-time + Task-tracker 두 모드.
+**Citus implementation**: `multi_executor` + `adaptive_executor`. Two modes: Real-time + Task-tracker.
 
-**난이도**: ★★★★ — connection pool, transaction state, error recovery가 복잡.
+**Difficulty**: ★★★★ — connection pool, transaction state, and error recovery are complex.
 
 ### C3. Shard Placement & Metadata Catalog
 
-**역할**: 어느 shard가 어느 worker 노드에 위치하는지 추적 (`pg_dist_placement`, `pg_dist_shard`, `pg_dist_node`). Reference table 복제, distribution column hash range.
+**Role**: tracks which shard is located on which worker node (`pg_dist_placement`, `pg_dist_shard`, `pg_dist_node`). Reference table replication, distribution column hash ranges.
 
-**Citus 구현**: PG catalog tables. 메타데이터는 coordinator + 모든 worker에 동기화 (Citus 11+).
+**Citus implementation**: PG catalog tables. Metadata is synced to coordinator + all workers (Citus 11+).
 
-**난이도**: ★★★ — 데이터 모델은 직관적이나 동기화 일관성 보장이 까다로움.
+**Difficulty**: ★★★ — the data model is intuitive, but synchronization consistency guarantees are tricky.
 
 ### C4. Shard Rebalancer
 
-**역할**: 노드 추가/제거 시 shard를 자동 재배치. CPU/disk balance, locality 고려.
+**Role**: automatically relocates shards on node add/remove. Considers CPU/disk balance and locality.
 
-**Citus 구현**: `rebalance_table_shards()` SQL 함수. 백그라운드 worker가 shard move를 수행 (non-blocking).
+**Citus implementation**: `rebalance_table_shards()` SQL function. A background worker performs non-blocking shard moves.
 
-**난이도**: ★★★★ — non-blocking shard move + transaction safety + abort recovery.
+**Difficulty**: ★★★★ — non-blocking shard move + transaction safety + abort recovery.
 
 ### C5. Distributed Transactions (2PC + heartbeat)
 
-**역할**: 여러 shard에 걸친 ACID transaction 보장. Two-phase commit + cohort heartbeat + recovery.
+**Role**: guarantees ACID transactions spanning multiple shards. Two-phase commit + cohort heartbeat + recovery.
 
-**Citus 구현**: `pg_dist_transaction` + custom 2PC coordinator. Long-running prepared transaction 자동 정리 (timer-based).
+**Citus implementation**: `pg_dist_transaction` + custom 2PC coordinator. Automatic cleanup of long-running prepared transactions (timer-based).
 
-**난이도**: ★★★★★ — 분산 system 정합성 + node failure 시 recovery는 corner case가 무한.
+**Difficulty**: ★★★★★ — distributed system consistency + infinite corner cases for recovery under node failure.
 
 ### C6. Reference Tables
 
-**역할**: 모든 worker에 동기 복제되는 작은 테이블 (룩업/dim 테이블용). Distributed table과 collocate join 가능.
+**Role**: small tables synchronously replicated to all workers (for lookup/dim tables). Can collocate join with distributed tables.
 
-**Citus 구현**: 단일 placement → 모든 노드 복제. INSERT/UPDATE는 모든 노드에 동기 적용.
+**Citus implementation**: single placement → replicated to all nodes. INSERT/UPDATE applied synchronously across all nodes.
 
-**난이도**: ★★★ — 동기 복제 일관성 + write throughput 제한.
+**Difficulty**: ★★★ — synchronous replication consistency + write throughput limits.
 
 ### C7. Columnar Storage
 
-**역할**: append-only columnar table access method. 분석 워크로드용 대용량 압축.
+**Role**: append-only columnar table access method. Large-scale compression for analytical workloads.
 
-**Citus 구현**: `cstore_fdw` → `citus_columnar` (PG access method). zstd 압축, predicate push-down.
+**Citus implementation**: `cstore_fdw` → `citus_columnar` (PG access method). zstd compression, predicate push-down.
 
-**난이도**: ★★★★ — PG access method API + 압축 + chunk metadata.
+**Difficulty**: ★★★★ — PG access method API + compression + chunk metadata.
 
-### 정리
+### Summary
 
-C1 + C2 + C5는 *분산 시스템 핵심 어려움*에 위치하며 Citus의 가치 80%를 차지한다. C3 + C4는 운영 자동화. C6 + C7은 *부가* capability — drop in replacement 의무 없음.
+C1 + C2 + C5 sit at the *real difficulty of distributed systems* and account for 80% of Citus's value. C3 + C4 are operational automation. C6 + C7 are *additional* capabilities — no obligation for drop-in replacement.
 
-## 3. 본 operator의 plugin 모델 매핑
+## 3. Mapping to this operator's plugin model
 
-현재 5-interface plugin SDK (`internal/plugin/api.go`):
+Current 5-interface plugin SDK (`internal/plugin/api.go`):
 
-1. `BackupPlugin` — pgBackRest, WAL-G 등
+1. `BackupPlugin` — pgBackRest, WAL-G, etc.
 2. `ExporterPlugin` — postgres_exporter, custom exporters
-3. `ExtensionPlugin` — pgaudit, pgcron, pgvector, **citus** (현재 Beta)
+3. `ExtensionPlugin` — pgaudit, pgcron, pgvector, **citus** (currently Beta)
 4. `RouterPlugin` — pgbouncer, pgcat
 5. `AuthPlugin` — Vault-issued credentials, IAM
 
-본 5개는 **단일 PG 인스턴스 또는 클러스터 외부**에 작용한다. 분산 SQL은 *클러스터 내부 다중 노드 조정*이 필요하므로 새 인터페이스가 필요하다.
+These 5 act on **a single PG instance or outside the cluster**. Distributed SQL requires *coordination across multiple nodes inside the cluster*, so a new interface is needed.
 
-### 신규 인터페이스: `ShardingPlugin`
+### New interface: `ShardingPlugin`
 
 ```go
-// ShardingPlugin은 분산 sharding 백엔드를 추상화한다.
-// 구현: Citus(AGPL, opt-in), Native(Apache-2.0, RFC 0005 Phase 2+), Vitess gateway 등.
+// ShardingPlugin abstracts the distributed sharding backend.
+// Implementations: Citus (AGPL, opt-in), Native (Apache-2.0, RFC 0005 Phase 2+), Vitess gateway, etc.
 //
-// 본 인터페이스는 RFC 0005 Phase 2A 시점에 alpha freeze된다.
-// alpha 단계에서는 메서드 추가만 허용 (non-breaking).
+// This interface is alpha-frozen at RFC 0005 Phase 2A time.
+// During alpha, only adding methods is allowed (non-breaking).
 type ShardingPlugin interface {
-    // Name은 본 플러그인의 고유 식별자.
-    // PostgresClusterSpec.Sharding.Backend 와 일치해야 한다.
+    // Name is this plugin's unique identifier.
+    // Must match PostgresClusterSpec.Sharding.Backend.
     Name() string
 
-    // Capabilities는 본 백엔드가 지원하는 기능 집합을 보고한다.
-    // 사용자가 ShardingSpec에 unsupported 기능을 지정하면 webhook이 거절한다.
+    // Capabilities reports the set of features this backend supports.
+    // The webhook rejects ShardingSpec specifying unsupported features.
     Capabilities() ShardingCapabilities
 
-    // PreparePlacement는 PostgresCluster topology가 변경됐을 때
-    // shard placement 갱신을 수행한다 (노드 추가/제거).
-    // 멱등이며 controller reconcile loop에서 매번 호출된다.
+    // PreparePlacement updates shard placement when PostgresCluster topology changes
+    // (node add/remove).
+    // Idempotent, called every controller reconcile loop.
     PreparePlacement(ctx context.Context, target ClusterTarget, topo Topology) error
 
-    // CreateDistributedTable은 사용자 SQL DDL("DISTRIBUTED TABLE ... BY (col)")을
-    // 해석하여 shard 생성 + metadata 등록을 수행한다.
+    // CreateDistributedTable interprets user SQL DDL ("DISTRIBUTED TABLE ... BY (col)")
+    // to create shards + register metadata.
     CreateDistributedTable(ctx context.Context, conn *sql.DB, spec DistributedTableSpec) error
 
-    // CreateReferenceTable은 모든 노드에 동기 복제되는 작은 테이블 생성.
-    // 백엔드가 reference table을 지원하지 않으면 Capabilities()에서 false 반환.
+    // CreateReferenceTable creates a small table synchronously replicated to all nodes.
+    // If the backend does not support reference tables, return false from Capabilities().
     CreateReferenceTable(ctx context.Context, conn *sql.DB, table string) error
 
-    // RebalanceShards는 shard 재배치를 트리거한다 (백그라운드 비동기).
-    // 진행 상황은 백엔드별 status table 쿼리로 확인한다.
+    // RebalanceShards triggers shard rebalance (background asynchronous).
+    // Progress is checked via the backend's status table queries.
     RebalanceShards(ctx context.Context, conn *sql.DB) (RebalanceJob, error)
 
-    // RouteQuery는 SQL을 받아 어느 shard/worker에 보낼지 결정한다.
-    // 본 메서드는 RouterPlugin과 협력하여 connection-level routing을 수행할 수도 있고,
-    // 백엔드 자체 distributed planner에 위임할 수도 있다 (Capabilities로 신호).
+    // RouteQuery takes a SQL statement and decides which shard/worker to send it to.
+    // This method may cooperate with RouterPlugin to perform connection-level routing,
+    // or delegate to the backend's own distributed planner (signaled via Capabilities).
     RouteQuery(ctx context.Context, query string, params []any) ([]ShardTarget, error)
 
-    // Validate는 ShardingSpec 사용자 입력을 본 백엔드 관점에서 검사한다.
-    // webhook 단계에서 호출.
+    // Validate inspects ShardingSpec user input from this backend's perspective.
+    // Called at the webhook stage.
     Validate(spec *ShardingSpec) error
 }
 
-// ShardingCapabilities는 백엔드 기능 광고.
+// ShardingCapabilities advertises backend features.
 type ShardingCapabilities struct {
     DistributedTables    bool   // C3 hash/range distribution
     ReferenceTables      bool   // C6 broadcast tables
@@ -169,27 +169,27 @@ type ShardingCapabilities struct {
     Distributed2PC       bool   // C5 cross-shard ACID
     OnlineRebalance      bool   // C4 non-blocking shard move
     ColumnarStorage      bool   // C7 columnar tables
-    NativeQueryPlanner   bool   // 백엔드 자체 planner (Citus). false면 routing-only.
+    NativeQueryPlanner   bool   // backend's own planner (Citus). If false, routing-only.
 }
 
-// DistributedTableSpec은 distributed table 정의.
+// DistributedTableSpec is a distributed table definition.
 type DistributedTableSpec struct {
-    Name             string  // 스키마 포함 (e.g. "public.events")
+    Name             string  // including schema (e.g. "public.events")
     DistributionCol  string  // shard key column
-    ShardCount       int32   // 기본값 32. range 또는 hash 분배
-    ColocateWith     string  // 같은 distribution을 갖는 다른 테이블과 collocate
+    ShardCount       int32   // default 32. range or hash distribution
+    ColocateWith     string  // collocate with another table that has the same distribution
     Strategy         string  // "hash" | "range"
 }
 
-// ShardTarget은 query를 보낼 단일 shard 위치.
+// ShardTarget is a single shard location to send the query to.
 type ShardTarget struct {
     Worker      string  // hostname (Pod DNS)
     Port        int32
     ShardID     int64
 }
 
-// Topology는 PostgresCluster의 현재 노드 토폴로지 snapshot.
-// internal/citus/topology.go의 Node 구조와 별개로 일반화된 형태.
+// Topology is a snapshot of the PostgresCluster's current node topology.
+// A generalized form independent of the Node struct in internal/citus/topology.go.
 type Topology struct {
     Coordinator *NodeInfo
     Workers     []NodeInfo
@@ -202,143 +202,143 @@ type NodeInfo struct {
     GroupID  int32
 }
 
-// RebalanceJob은 진행 중 rebalance 추적용.
+// RebalanceJob is for tracking an in-progress rebalance.
 type RebalanceJob struct {
     ID       string
     Started  time.Time
     Status   string  // "running" | "complete" | "failed"
 }
 
-// ShardingSpec은 PostgresCluster CRD의 spec.sharding 서브필드 (RFC 0005 Phase 2A 도입).
+// ShardingSpec is the spec.sharding subfield of the PostgresCluster CRD (introduced in RFC 0005 Phase 2A).
 type ShardingSpec struct {
     Backend         string  // "citus" | "native-fdw" | ...
     DistributedTables []DistributedTableSpec
     ReferenceTables []string
     DefaultShardCount int32
-    // 백엔드별 추가 옵션은 별도 BackendOptions struct (omitempty)
+    // Backend-specific additional options are in a separate BackendOptions struct (omitempty)
 }
 ```
 
-### 매핑 표
+### Mapping table
 
-| Citus mechanism | ShardingPlugin 메서드 | 우선순위 |
+| Citus mechanism | ShardingPlugin method | Priority |
 |---|---|---|
 | C3 Placement | `PreparePlacement`, `CreateDistributedTable` | Phase 2A |
-| C2 Executor | `RouteQuery` (단순 case), 백엔드 자체 planner (복잡 case) | Phase 2C |
+| C2 Executor | `RouteQuery` (simple case), backend's own planner (complex case) | Phase 2C |
 | C6 Reference | `CreateReferenceTable` | Phase 2D |
 | C4 Rebalance | `RebalanceShards` | Phase 3 |
-| C5 2PC | (별도 인터페이스 `DistributedTxnPlugin`로 분리 검토) | Phase 3 |
-| C1 Planner | `RouteQuery` 또는 백엔드 위임 | Phase 4 |
-| C7 Columnar | (별도 ExtensionPlugin으로 격리) | Phase 4+ |
+| C5 2PC | (consider splitting into a separate `DistributedTxnPlugin` interface) | Phase 3 |
+| C1 Planner | `RouteQuery` or delegated to backend | Phase 4 |
+| C7 Columnar | (isolated as a separate ExtensionPlugin) | Phase 4+ |
 
 ## 4. Phased Roadmap
 
 ### Phase 2A — Sharding Plugin Interface Freeze + FDW Skeleton
 
-**목표**: 인터페이스를 동결하고 가장 단순한 백엔드 1개를 구현해 *동작*을 증명.
+**Goal**: freeze the interface and implement the simplest single backend to prove *operation*.
 
-**산출물**:
-- `internal/plugin/sharding/api.go` — 위 §3의 ShardingPlugin 인터페이스 + 보조 타입.
-- `PostgresClusterSpec.Sharding` CRD 필드 추가 (optional, omitempty).
-- `internal/plugin/sharding/fdw/` — postgres_fdw 기반 hash sharding plugin (PostgreSQL License — 라이센스 청정).
-  - DistributedTable: parent table + worker별 partition foreign table.
-  - ReferenceTable: postgres_fdw broadcast (UPDATE 시 모든 노드).
+**Deliverables**:
+- `internal/plugin/sharding/api.go` — the ShardingPlugin interface in §3 above + auxiliary types.
+- Add `PostgresClusterSpec.Sharding` CRD field (optional, omitempty).
+- `internal/plugin/sharding/fdw/` — hash sharding plugin based on postgres_fdw (PostgreSQL License — license-clean).
+  - DistributedTable: parent table + per-worker partition foreign table.
+  - ReferenceTable: postgres_fdw broadcast (UPDATE applied across all nodes).
   - RouteQuery: hash(key) % shardCount.
-- 하나의 distributed table에서 hash 기반 INSERT/SELECT가 동작.
-- e2e 테스트: 3-worker cluster + distributed events 테이블 + 분산 INSERT/SELECT.
+- Hash-based INSERT/SELECT works on a single distributed table.
+- e2e test: 3-worker cluster + distributed `events` table + distributed INSERT/SELECT.
 
-**비포함**: distributed JOIN, 2PC, online rebalance, columnar.
+**Not included**: distributed JOIN, 2PC, online rebalance, columnar.
 
-**예상 기간**: 2~3개월. 단, postgres_fdw의 push-down 한계로 분산 JOIN 미지원.
+**Estimated duration**: 2~3 months. However, distributed JOIN is not supported due to postgres_fdw push-down limitations.
 
 ### Phase 2B — Reference Tables + Collocate Join
 
-**산출물**: ReferenceTable 동기 복제 (trigger-based), collocated join (worker 내부에서 처리).
+**Deliverables**: synchronous replication of ReferenceTable (trigger-based), collocated join (handled inside a worker).
 
-**예상 기간**: 1~2개월.
+**Estimated duration**: 1~2 months.
 
 ### Phase 2C — Smart Routing (read-only)
 
-**산출물**: SELECT 쿼리의 distribution column 추출 + 적절 worker로 routing. SQL parser 도입 필요 (pg_query_go 사용).
+**Deliverables**: extraction of distribution column from SELECT queries + routing to the appropriate worker. SQL parser introduction required (use pg_query_go).
 
-**예상 기간**: 2~3개월.
+**Estimated duration**: 2~3 months.
 
 ### Phase 2D — Online Add/Remove Worker
 
-**산출물**: PostgresClusterSpec.Workers 변경 시 shard 자동 재배치. 단, blocking move (read-only window).
+**Deliverables**: automatic shard rebalance on PostgresClusterSpec.Workers changes. However, blocking move (read-only window).
 
-**예상 기간**: 2~3개월.
+**Estimated duration**: 2~3 months.
 
 ### Phase 3 — Distributed 2PC + Online Rebalance
 
-**산출물**: cross-shard ACID + non-blocking shard move. 분산 시스템 *진짜 어려움*에 진입.
+**Deliverables**: cross-shard ACID + non-blocking shard move. Entering the *real difficulty* of distributed systems.
 
-**예상 기간**: 6~12개월. 본 RFC의 단일 phase 중 가장 위험.
+**Estimated duration**: 6~12 months. The riskiest single phase of this RFC.
 
-### Phase 4 — Distributed Query Planner (선택)
+### Phase 4 — Distributed Query Planner (optional)
 
-**산출물**: 일반 JOIN/aggregation의 분산 실행. PG planner_hook 도입 또는 외부 proxy(pgcat fork) 검토.
+**Deliverables**: distributed execution of general JOIN/aggregation. Introduce PG planner_hook or consider an external proxy (pgcat fork).
 
-**예상 기간**: 12~24개월. 또는 *영구 보류* 결정 후 Citus opt-in 을 분산 JOIN 사용자에게 권장.
+**Estimated duration**: 12~24 months. Or decide to *postpone permanently* and recommend Citus opt-in for users who need distributed JOIN.
 
-## 5. 위험 분석
+## 5. Risk analysis
 
-| 위험 | 가능성 | 영향 | 완화 |
+| Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Phase 2A 후 사용자 기대 vs 구현 격차 | 높음 | 중 | RFC + chart NOTES + README에 *capability subset* 명시 |
-| Phase 3 (2PC) corner case 누적 | 매우 높음 | 매우 큼 | Jepsen-style 테스트 필수, alpha 표기 6+ months |
-| Native sharding 운영 어려움이 Citus opt-in 보다 큰 케이스 | 높음 | 중 | Citus opt-in path를 영구 보존 (license만 분명히) |
-| upstream PG 18+ 의 logical replication 변경이 reference table 깨뜨림 | 중 | 중 | upstream-watch (단, RFC 0002 GH Actions 폐기 — 수동 모니터) |
-| postgres_fdw push-down 한계 (Phase 2A) | 확정 | 중 | Phase 2A 자체를 "분산 INSERT만 1차 목표"로 좁힘 |
+| Gap between user expectations and implementation after Phase 2A | High | Medium | State *capability subset* in RFC + chart NOTES + README |
+| Accumulation of Phase 3 (2PC) corner cases | Very high | Very large | Jepsen-style testing required, alpha labeling for 6+ months |
+| Cases where native sharding operations are harder than Citus opt-in | High | Medium | Permanently preserve the Citus opt-in path (license only is clarified) |
+| Upstream PG 18+ logical replication changes break reference tables | Medium | Medium | upstream-watch (note: RFC 0002 GH Actions abandoned — manual monitoring) |
+| postgres_fdw push-down limits (Phase 2A) | Confirmed | Medium | Narrow Phase 2A itself to "distributed INSERT only as the primary goal" |
 
-## 6. 결정 기준 (Phase 진입 게이트)
+## 6. Decision criteria (Phase entry gates)
 
-각 phase 진입 전 다음을 확인:
-1. **시장 신호**: 직전 phase 산출물 사용자 수 (alpha → beta 전환 metric).
-2. **운영 fitness**: 직전 phase의 corner case 보고 빈도 (Jepsen + customer reports).
-3. **인력 가용성**: 본 RFC의 phase는 모두 multi-month. 단일 contributor로 부족.
-4. **대안 비교**: 진입 시점에 Vitess for PG, pgcat-shard, pg_dirtread 등 신규 솔루션 등장 시 본 path 재평가.
+Before entering each phase, confirm:
+1. **Market signal**: number of users of the immediately previous phase deliverables (alpha → beta transition metric).
+2. **Operational fitness**: frequency of corner case reports in the previous phase (Jepsen + customer reports).
+3. **Personnel availability**: phases of this RFC are all multi-month. A single contributor is insufficient.
+4. **Alternatives comparison**: when entering, re-evaluate this path if new solutions (Vitess for PG, pgcat-shard, pg_dirtread, etc.) emerge.
 
 ## 7. Alternatives Considered
 
-### A. Phase 4 (Native query planner) 영구 포기 + Citus opt-in 권장
+### A. Permanently abandon Phase 4 (Native query planner) + recommend Citus opt-in
 
-분산 JOIN/aggregation이 필수인 사용자는 Citus opt-in 으로 유도. 우리는 Phase 2A~3 (placement, routing, 2PC) 까지만 자체 구현.
+Funnel users for whom distributed JOIN/aggregation is mandatory toward Citus opt-in. We self-implement only through Phase 2A~3 (placement, routing, 2PC).
 
-- 장점: 본 RFC 범위 70% 축소, 현실적.
-- 단점: 분산 SQL "plug-and-play" 메시징 약화. SaaS 사용자는 여전히 AGPL 부담.
+- Pros: reduces this RFC's scope by 70%, realistic.
+- Cons: weakens the "plug-and-play" distributed SQL messaging. SaaS users still bear AGPL.
 
-### B. 외부 proxy 통합 (Vitess for PG)
+### B. External proxy integration (Vitess for PG)
 
-ShardingPlugin을 Vitess 게이트웨이로 구현. PG 18 호환은 Vitess upstream에 의존.
+Implement ShardingPlugin as a Vitess gateway. PG 18 compatibility depends on Vitess upstream.
 
-- 장점: 우리는 routing layer만 구현. Distributed planner는 Vitess 의존.
-- 단점: 외부 stack 의존. operator 자체 가치 약화.
+- Pros: we implement only the routing layer. Distributed planner depends on Vitess.
+- Cons: external stack dependency. Weakens the operator's own value.
 
-### C. 사용자에게 sharding을 *위임*
+### C. *Delegate* sharding to users
 
-operator는 단일 PG HA 만 보장. Sharding은 사용자가 application 레벨에서 구현 (예: pgbouncer + 라우팅 룰 + middleware).
+The operator only guarantees single PG HA. Sharding is implemented by users at the application level (e.g., pgbouncer + routing rules + middleware).
 
-- 장점: 가장 단순. operator 책임 명확.
-- 단점: 본 차별화(distributed SQL operator)가 사라짐.
+- Pros: simplest. Clear operator responsibility.
+- Cons: this differentiator (distributed SQL operator) disappears.
 
-## 8. 본 RFC 채택 시 후속 작업
+## 8. Follow-up work if this RFC is adopted
 
-1. **ADR-0010 AI-007 진입**: ShardingPlugin 인터페이스 PR (`internal/plugin/sharding/api.go` 신설).
-2. **CRD 확장**: `PostgresClusterSpec.Sharding` optional 필드 추가. webhook 검증.
-3. **README + roadmap.md 갱신**: Phase 2A~Phase 4 명시. Citus opt-in path 영구 보존.
-4. **examples/sharding/** 신규: postgres_fdw 사용 distributed table sample.
-5. **e2e 테스트 확장**: 3-worker cluster + distributed events 시나리오.
+1. **Enter ADR-0010 AI-007**: ShardingPlugin interface PR (new `internal/plugin/sharding/api.go`).
+2. **CRD extension**: add `PostgresClusterSpec.Sharding` optional field. webhook validation.
+3. **Update README + roadmap.md**: state Phase 2A~Phase 4. Permanently preserve Citus opt-in path.
+4. **examples/sharding/** new: postgres_fdw-using distributed table sample.
+5. **e2e test extension**: 3-worker cluster + distributed events scenario.
 
-## 9. 미해결 질문
+## 9. Open questions
 
-1. ShardingPlugin과 RouterPlugin (pgbouncer/pgcat) 의 책임 경계는? RouteQuery 메서드가 양쪽에 있을 수 있음 — RFC 0005 v2에서 결정.
-2. 2PC 의 *cohort heartbeat* 를 별도 sidecar 컨테이너로 둘지, manager 내부 goroutine으로 둘지? Phase 3 진입 시 결정.
-3. SQL parser 도입 시 의존성: pg_query_go (PostgreSQL License) vs 자체 lexer? Phase 2C 진입 시 결정.
-4. Reference table 의 *동기* 복제 vs *준동기*? trigger-based 동기는 write throughput 제한. Phase 2B 결정.
+1. What is the responsibility boundary between ShardingPlugin and RouterPlugin (pgbouncer/pgcat)? The RouteQuery method could be in both — to be decided in RFC 0005 v2.
+2. For 2PC, should the *cohort heartbeat* be a separate sidecar container or a goroutine inside the manager? To be decided at Phase 3 entry.
+3. Dependencies when introducing the SQL parser: pg_query_go (PostgreSQL License) vs. own lexer? To be decided at Phase 2C entry.
+4. *Synchronous* vs. *semi-synchronous* replication for reference tables? Trigger-based synchronous limits write throughput. Phase 2B decision.
 
-## 10. 시간선
+## 10. Timeline
 
-본 RFC는 **roadmap**이 아닌 **path**다. 시간 추정은 minimum이며, 단일 contributor 진행 시 2~3배 늘어날 수 있다. 0.2.0-alpha 시점에 시간 약속을 하지 않는다.
+This RFC is a **path**, not a **roadmap**. Time estimates are minimums and may grow 2~3× when proceeding with a single contributor. We do not make time commitments at 0.2.0-alpha.
 
-진행 상황은 `docs/roadmap.md` 의 Pillar P11 (분산 SQL) 섹션에서 추적한다.
+Progress is tracked in the Pillar P11 (distributed SQL) section of `docs/roadmap.md`.

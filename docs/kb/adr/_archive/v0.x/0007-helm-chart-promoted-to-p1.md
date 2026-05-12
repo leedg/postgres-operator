@@ -1,77 +1,77 @@
-# ADR 0007 — Helm chart을 P14에서 P1 트랙으로 분리
+# ADR 0007 — Split Helm chart out of P14 and into the P1 track
 
-- **상태**: Accepted
-- **날짜**: 2026-04-30
-- **결정자**: @keiailab/maintainers
-- **관련**: roadmap.md (14 Pillar), Bitnami PostgreSQL Helm Chart 비교 (`/Users/phil/.claude/plans/1-https-artifacthub-io-packages-helm-bit-sunny-wozniak.md` §5 P1-4)
+- **Status**: Accepted
+- **Date**: 2026-04-30
+- **Decision makers**: @keiailab/maintainers
+- **Related**: roadmap.md (14 Pillar), Bitnami PostgreSQL Helm Chart comparison (`/Users/phil/.claude/plans/1-https-artifacthub-io-packages-helm-bit-sunny-wozniak.md` §5 P1-4)
 
-## 컨텍스트
+## Context
 
-`docs/roadmap.md`는 Helm chart을 **P14 Distribution**에 배치 — install.yaml, OLM bundle, multi-arch image와 묶음. P14는 *v1.0 GA 마지막 단계*로 정의되어, 다른 모든 Pillar(P1~P13) M3 통과 후 진입.
+`docs/roadmap.md` places the Helm chart under **P14 Distribution** — bundled with install.yaml, OLM bundle, and multi-arch image. P14 is defined as the *final step before v1.0 GA*, entered after all other Pillars (P1~P13) pass M3.
 
-문제: alpha/beta 단계에서 사용자가 operator를 *어떻게 설치*하는가? 현재는 Kustomize manifests만 제공 (`config/default`). 실제 사용자 채널은 *Helm chart가 사실상 표준*이라:
+The problem: how do users *install* the operator during alpha/beta? Currently only Kustomize manifests are provided (`config/default`). The actual user channel is *Helm chart, which is the de facto standard*, so:
 
-- alpha 단계 사용자가 시도조차 못 함 → feedback loop 차단
-- "PGO-class" 패리티 약속에 *배포 채널 패리티*도 포함되나 P14까지 부재
-- Bitnami는 chart가 *유일한 채널*이며 매우 mature — 같은 시장 사용자에게 "Kustomize 외 없음"은 진입 마찰
+- alpha-stage users cannot even try it → feedback loop blocked
+- The "PGO-class" parity promise also includes *distribution channel parity*, but it is absent until P14
+- Bitnami's chart is *the only channel* and very mature — to the same market users, "Kustomize and nothing else" is friction to adoption
 
-## 결정
+## Decision
 
-Helm chart을 *P14에서 분리*하여 P1 Core Lifecycle 트랙의 후속 task(P1-T5)로 재배치한다. P14에는 *나머지* distribution 산출물만 남긴다:
+Separate the Helm chart *from P14* and reposition it as a follow-up task of the P1 Core Lifecycle track (P1-T5). P14 retains only the *remaining* distribution artifacts:
 
-| 변경 전 (P14) | 변경 후 |
+| Before (P14) | After |
 |---|---|
-| Helm chart | **P1 트랙으로 이동** (alpha 사용자 채널) |
-| install.yaml | P14 유지 |
-| OLM bundle | P14 유지 |
-| multi-arch image | P14 유지 |
+| Helm chart | **Moved to P1 track** (alpha user channel) |
+| install.yaml | Stays in P14 |
+| OLM bundle | Stays in P14 |
+| multi-arch image | Stays in P14 |
 
-### chart 분리 모델
+### Chart separation model
 
-`charts/` 아래 두 chart 별도 패키징:
+Two separately packaged charts under `charts/`:
 
-- `charts/postgresql-operator/` — operator 자체 (Deployment + RBAC + CRD + NetworkPolicy + ServiceAccount)
-- `charts/postgrescluster/` — PostgresCluster CR 인스턴스 (선택, P1-T5 sub-task)
+- `charts/postgresql-operator/` — the operator itself (Deployment + RBAC + CRD + NetworkPolicy + ServiceAccount)
+- `charts/postgrescluster/` — PostgresCluster CR instance (optional, P1-T5 sub-task)
 
-이는 Bitnami의 `postgresql` (CR 인스턴스) + 별도 operator chart 패턴의 *역배치* — operator chart가 *상위*, CR chart가 *옵션*. 사유: 사용자가 operator는 한 번 설치, CR은 namespace당 N개.
+This is *the reverse* of Bitnami's pattern of `postgresql` (CR instance) + a separate operator chart — the operator chart is *top*, and the CR chart is *optional*. Reason: users install the operator once, and there are N CRs per namespace.
 
-## 근거
+## Rationale
 
-### 왜 P14 전체 이동이 아닌 *분리*인가
-P14의 install.yaml, OLM, multi-arch는 *후행 산출물* — 모든 CRD가 동결된 후에 생성하는 것이 안전. 그러나 Helm chart은 *현재 CRD 상태*를 패키징하면 되므로 *지금* 가능하다. 무리해서 OLM/multi-arch까지 앞당기면 *모든* CRD가 unstable한 alpha 상태에서 매번 재패키징.
+### Why *separate* rather than move all of P14
+P14's install.yaml, OLM, and multi-arch are *trailing artifacts* — it is safe to produce them after all CRDs are frozen. However, the Helm chart can be packaged with the *current CRD state*, so it is feasible *now*. Pulling OLM/multi-arch forward forces repackaging on every change while *all* CRDs are unstable in alpha.
 
-### 왜 chart 두 개로 분리인가
-- *operator*는 cluster-scope 한 번 설치
-- *PostgresCluster CR*은 namespace당 N개 — chart가 다중 인스턴스를 지원하려면 helm release 별로 분리 필요
-- Bitnami가 `postgresql` (CR 인스턴스 chart)을 메인으로 두는 이유와 동일
+### Why two charts
+- The *operator* is cluster-scope and installed once
+- A *PostgresCluster CR* is N per namespace — for a chart to support multiple instances, it must be separated per helm release
+- Same reasoning Bitnami has for putting `postgresql` (CR instance chart) as the main one
 
-### 왜 *지금*인가 — 기존 P14 유지의 비용
+### Why *now* — the cost of keeping the current P14 placement
 
-| 비용 | 영향 |
+| Cost | Impact |
 |---|---|
-| alpha 사용자 부재 | 실 사용 feedback 0, 회귀 발견 늦음 |
-| Bitnami로 사용자 이탈 | "PGO-class" 약속의 인지도 손실 |
-| chart 작성을 v1.0 직전에 모아서 처리 시 burden | 각 CRD별 template + values default 동시 결정 → 회귀 위험 |
+| No alpha users | Zero real usage feedback, late discovery of regressions |
+| User attrition to Bitnami | Loss of brand recognition for the "PGO-class" promise |
+| Burden of postponing chart writing to right before v1.0 | Per-CRD template + values defaults all decided at once → regression risk |
 
-## 트레이드오프
+## Tradeoffs
 
-- **두 경로 동시 유지**: Kustomize(`config/default`) + Helm(`charts/postgresql-operator`) 동시 운영 → 변경 시 두 곳 갱신 부담. 완화: chart template이 `config/`의 manifests를 generate (Makefile 타겟에서 `kustomize build config/default | helmify`로 자동화 검토).
-- **chart 안정성 약속**: alpha chart는 `Chart.yaml: appVersion`이 v0.x이므로 breaking change 가능. 사용자가 이를 인지해야 함. 완화: chart README에 "alpha 단계, breaking 가능" 명시.
-- **OLM bundle 분리 유지**: OperatorHub 사용자는 여전히 P14까지 대기 — 사용자 세그먼트 차이를 인정하고 P14 우선순위는 유지.
+- **Maintaining two paths simultaneously**: Kustomize (`config/default`) + Helm (`charts/postgresql-operator`) operated in parallel → burden of updating two places on changes. Mitigation: have chart templates generate the manifests in `config/` (consider automation via `kustomize build config/default | helmify` in a Makefile target).
+- **Chart stability promise**: alpha charts have `Chart.yaml: appVersion` at v0.x, so breaking changes are possible. Users must be aware. Mitigation: state "alpha stage, breaking changes possible" in the chart README.
+- **Keep OLM bundle separate**: OperatorHub users still wait until P14 — acknowledge the user segment difference and keep P14 priority.
 
-## 결과
+## Consequences
 
-- `docs/roadmap.md`에서 P14 정의 갱신 — Helm chart을 *P1 트랙*으로 이동.
-- 신규 디렉토리 `charts/postgresql-operator/` (P1-4 권장 implementation 시).
-- Makefile에 `chart-package`, `chart-lint` 타겟 추가.
-- TASKS.md에 P1-4 권장 등록.
-- 본 ADR은 v1.0 GA 시점에 *재평가* — Helm chart 안정성과 OLM bundle 통합 시점 검토.
+- Update P14 definition in `docs/roadmap.md` — move the Helm chart to the *P1 track*.
+- New directory `charts/postgresql-operator/` (at P1-4 recommended implementation time).
+- Add `chart-package`, `chart-lint` targets to the Makefile.
+- Register P1-4 recommendation in TASKS.md.
+- This ADR is *re-evaluated* at v1.0 GA time — review chart stability and OLM bundle integration timing.
 
-## 강제 메커니즘
+## Enforcement mechanism
 
-| 메커니즘 | 위치 | 도입 시점 |
+| Mechanism | Location | Introduction timing |
 |---|---|---|
-| roadmap.md 갱신 | `docs/roadmap.md` §14 Pillar | 본 ADR 동시 |
-| chart 골격 | `charts/postgresql-operator/` | P1-4 |
-| chart lint CI 단계 | Makefile + 로컬 hook | P1-4 |
-| `helm install --dry-run` 회귀 | e2e | P1-4 |
+| roadmap.md update | `docs/roadmap.md` §14 Pillar | Same time as this ADR |
+| Chart skeleton | `charts/postgresql-operator/` | P1-4 |
+| chart lint CI step | Makefile + local hook | P1-4 |
+| `helm install --dry-run` regression | e2e | P1-4 |

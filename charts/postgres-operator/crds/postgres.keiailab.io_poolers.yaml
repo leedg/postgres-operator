@@ -36,6 +36,14 @@ spec:
     - jsonPath: .status.phase
       name: Phase
       type: string
+    - jsonPath: .status.autoTLSClientCertNotAfter
+      name: ClientCertNotAfter
+      priority: 1
+      type: date
+    - jsonPath: .status.autoTLSServerCertNotAfter
+      name: ServerCertNotAfter
+      priority: 1
+      type: date
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -9126,6 +9134,21 @@ spec:
             description: PoolerStatus is the observed state of the PgBouncer subordinate
               resources.
             properties:
+              autoTLSClientCertNotAfter:
+                description: |-
+                  AutoTLSClientCertNotAfter mirrors the client-side cert-manager
+                  Certificate.status.notAfter when spec.pgbouncer.autoTLS.clientEnabled
+                  is true.
+                format: date-time
+                type: string
+              autoTLSServerCertNotAfter:
+                description: |-
+                  AutoTLSServerCertNotAfter mirrors the server-side cert-manager
+                  Certificate.status.notAfter when spec.pgbouncer.autoTLS.serverEnabled
+                  is true. Operators can list expiring certs across the fleet with
+                  `kubectl get poolers -A -o jsonpath='{.items[*].status.autoTLSServerCertNotAfter}'`.
+                format: date-time
+                type: string
               backendTargets:
                 description: BackendTargets is the list of PostgreSQL backend DNS
                   names the current PgBouncer config routes to.

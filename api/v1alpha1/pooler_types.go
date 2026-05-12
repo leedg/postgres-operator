@@ -285,6 +285,19 @@ type PoolerStatus struct {
 	// +optional
 	BuiltinAuthLastRotation *metav1.Time `json:"builtinAuthLastRotation,omitempty"`
 
+	// AutoTLSServerCertNotAfter mirrors the server-side cert-manager
+	// Certificate.status.notAfter when spec.pgbouncer.autoTLS.serverEnabled
+	// is true. Operators can list expiring certs across the fleet with
+	// `kubectl get poolers -A -o jsonpath='{.items[*].status.autoTLSServerCertNotAfter}'`.
+	// +optional
+	AutoTLSServerCertNotAfter *metav1.Time `json:"autoTLSServerCertNotAfter,omitempty"`
+
+	// AutoTLSClientCertNotAfter mirrors the client-side cert-manager
+	// Certificate.status.notAfter when spec.pgbouncer.autoTLS.clientEnabled
+	// is true.
+	// +optional
+	AutoTLSClientCertNotAfter *metav1.Time `json:"autoTLSClientCertNotAfter,omitempty"`
+
 	// ObservedGeneration is the last generation processed by the reconciler.
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
@@ -305,6 +318,8 @@ type PoolerStatus struct {
 // +kubebuilder:printcolumn:name="Instances",type=integer,JSONPath=`.spec.instances`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="ClientCertNotAfter",type=date,JSONPath=`.status.autoTLSClientCertNotAfter`,priority=1
+// +kubebuilder:printcolumn:name="ServerCertNotAfter",type=date,JSONPath=`.status.autoTLSServerCertNotAfter`,priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Pooler is the PgBouncer-based PostgreSQL connection pool layer.

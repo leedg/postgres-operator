@@ -1619,7 +1619,67 @@ func TestPoolerAutoTLS_CreatesCertificate(t *testing.T) {
 	}
 }
 
-// TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence 는 사용자가 ClientTLSSecret 을
+// TestPoolerAutoTLS_MirrorsNotAfterToStatus (T29 stage 5) — when the
+// cert-manager Certificate has `status.notAfter`, the reconciler must
+// mirror it onto Pooler.Status.AutoTLSClientCertNotAfter so that
+// operators can `kubectl get poolers -o ...` for upcoming renewals.
+func TestPoolerAutoTLS_MirrorsNotAfterToStatus(t *testing.T) {
+	t.Parallel()
+	scheme := newScheme(t)
+	cluster := newPoolerCluster()
+	pooler := newPooler()
+	pooler.Name = "demo-rw-autotls-notafter"
+	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
+		IssuerRef: postgresv1alpha1.PoolerCertIssuerRef{
+			Name: "ca-issuer",
+			Kind: "ClusterIssuer",
+		},
+		ClientEnabled: true,
+		ServerEnabled: false,
+	}
+	authSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-pooler-auth",
+		Namespace: "default",
+	}, Data: map[string][]byte{"userlist.txt": []byte(`"app" "SCRAM-SHA-256$4096:salt$stored:server"`)}}
+
+	// Pre-seed a cert-manager Certificate CR that already has status.notAfter,
+	// simulating the post-issuance state.
+	notAfter := time.Now().Add(90 * 24 * time.Hour).UTC().Truncate(time.Second)
+	preexistingCert := &unstructured.Unstructured{}
+	preexistingCert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	preexistingCert.SetNamespace(pooler.Namespace)
+	preexistingCert.SetName(pooler.Name + "-client-tls")
+	if err := unstructured.SetNestedField(preexistingCert.Object, "ca-issuer", "spec", "issuerRef", "name"); err != nil {
+		t.Fatalf("seed spec.issuerRef.name: %v", err)
+	}
+	if err := unstructured.SetNestedField(preexistingCert.Object, notAfter.Format(time.RFC3339), "status", "notAfter"); err != nil {
+		t.Fatalf("seed status.notAfter: %v", err)
+	}
+
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cluster, pooler, authSecret, preexistingCert).
+		WithStatusSubresource(&postgresv1alpha1.Pooler{}).
+		Build()
+	defer DeletePoolerMetricsFor(pooler.Namespace, pooler.Name)
+
+	r := &PoolerReconciler{Client: c, Scheme: scheme}
+	got := reconcilePoolerOnce(t, r, c, pooler)
+
+	if got.Status.AutoTLSClientCertNotAfter == nil {
+		t.Fatalf("status.autoTLSClientCertNotAfter is nil — expected mirror of cert-manager Certificate.status.notAfter")
+	}
+	if !got.Status.AutoTLSClientCertNotAfter.Time.Equal(notAfter) {
+		t.Fatalf("status.autoTLSClientCertNotAfter = %v, want %v",
+			got.Status.AutoTLSClientCertNotAfter.Time, notAfter)
+	}
+	// ServerEnabled=false → server notAfter stays nil.
+	if got.Status.AutoTLSServerCertNotAfter != nil {
+		t.Fatalf("status.autoTLSServerCertNotAfter = %v, want nil (ServerEnabled=false)",
+			got.Status.AutoTLSServerCertNotAfter)
+	}
+}
+
+// TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence — when the user
 // 명시한 경우 AutoTLS 의 client 발급 path 가 비활성되는지 검증한다.
 func TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence(t *testing.T) {
 	t.Parallel()

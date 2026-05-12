@@ -718,28 +718,74 @@ func (r *PoolerReconciler) ensurePoolerAutoTLS(ctx context.Context, pooler *post
 		return nil
 	}
 	if poolerAutoTLSServerActive(pooler) {
+		secretName := poolerAutoTLSServerSecretName(pooler)
 		if err := r.applyPoolerAutoCertificate(
 			ctx,
 			pooler,
-			poolerAutoTLSServerSecretName(pooler),
+			secretName,
 			"server",
 			[]string{"server auth", "client auth"},
 		); err != nil {
 			return err
 		}
+		pooler.Status.AutoTLSServerCertNotAfter = r.readPoolerCertificateNotAfter(ctx, pooler, secretName)
+	} else {
+		pooler.Status.AutoTLSServerCertNotAfter = nil
 	}
 	if poolerAutoTLSClientActive(pooler) {
+		secretName := poolerAutoTLSClientSecretName(pooler)
 		if err := r.applyPoolerAutoCertificate(
 			ctx,
 			pooler,
-			poolerAutoTLSClientSecretName(pooler),
+			secretName,
 			"client",
 			[]string{"server auth"},
 		); err != nil {
 			return err
 		}
+		pooler.Status.AutoTLSClientCertNotAfter = r.readPoolerCertificateNotAfter(ctx, pooler, secretName)
+	} else {
+		pooler.Status.AutoTLSClientCertNotAfter = nil
 	}
 	return nil
+}
+
+// readPoolerCertificateNotAfter looks up the cert-manager Certificate CR
+// (named identically to the issued Secret) and returns its
+// `status.notAfter`. Returns nil when the CR is missing, cert-manager
+// hasn't observed it yet, or the notAfter field is absent — the next
+// reconcile re-reads. The lookup is best-effort: any client error is
+// logged at V(1) and treated as "unknown" so that a slow cert-manager
+// install does not block the rest of the reconcile.
+func (r *PoolerReconciler) readPoolerCertificateNotAfter(
+	ctx context.Context,
+	pooler *postgresv1alpha1.Pooler,
+	certName string,
+) *metav1.Time {
+	logger := log.FromContext(ctx)
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   poolerAutoTLSCertificateGroup,
+		Version: poolerAutoTLSCertificateVersion,
+		Kind:    poolerAutoTLSCertificateKind,
+	})
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pooler.Namespace, Name: certName}, cert); err != nil {
+		logger.V(1).Info("readPoolerCertificateNotAfter: Certificate not yet observable",
+			"pooler", pooler.Name, "cert", certName, "error", err.Error())
+		return nil
+	}
+	raw, found, err := unstructured.NestedString(cert.Object, "status", "notAfter")
+	if err != nil || !found || raw == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		logger.V(1).Info("readPoolerCertificateNotAfter: notAfter unparseable",
+			"pooler", pooler.Name, "cert", certName, "raw", raw, "error", err.Error())
+		return nil
+	}
+	mt := metav1.NewTime(parsed)
+	return &mt
 }
 
 func (r *PoolerReconciler) applyPoolerAutoCertificate(

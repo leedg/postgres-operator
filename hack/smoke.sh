@@ -13,8 +13,8 @@
 #   SMOKE_HIBERNATION=1 ./hack/smoke.sh
 #   SMOKE_POOLER=1 ./hack/smoke.sh
 #
-# 향후 시나리오 (TASKS T27, 미구현):
-#   SMOKE_IMAGECATALOG=1    # ImageCatalog 갱신 → StatefulSet image 변경 + rollout annotation 검증
+# 향후 시나리오 (TASKS T27 ⑤+, 미구현):
+#   (없음 — T27 ①~④ 모두 완료)
 #
 # 흐름:
 #   1. kind cluster 생성 (이미 있으면 재사용)
@@ -28,9 +28,10 @@
 #   9. SMOKE_DATABASE=1 이면 PostgresDatabase CR → status.applied + pg_database 검증
 #   10. SMOKE_USER=1 이면 PostgresUser CR → status.applied + pg_roles 검증
 #   11. SMOKE_SCHEDULEDBACKUP=1 이면 ScheduledBackup CR → immediate BackupJob 생성 검증
-#   12. replicas>=1 이면 streaming standby 를 pg_stat_replication 으로 확인
-#   13. SMOKE_FAILOVER=1 이면 primary Pod 삭제 후 standby promote RTO 측정
-#   14. cleanup (--keep 미지정 시 cluster 삭제)
+#   12. SMOKE_IMAGECATALOG=1 이면 ImageCatalog/ClusterImageCatalog CR schema + lookup 검증
+#   13. replicas>=1 이면 streaming standby 를 pg_stat_replication 으로 확인
+#   14. SMOKE_FAILOVER=1 이면 primary Pod 삭제 후 standby promote RTO 측정
+#   15. cleanup (--keep 미지정 시 cluster 삭제)
 
 set -euo pipefail
 
@@ -329,7 +330,7 @@ kubectl -n "$NS" get postgrescluster "$CR_NAME" -o yaml | tail -40
 
 # 7. Declarative hibernation smoke (선택 실행)
 if [[ "${SMOKE_HIBERNATION:-0}" == "1" ]]; then
-    log "[7/14] Declarative hibernation smoke (cnpg.io/hibernation=on/off)"
+    log "[7/15] Declarative hibernation smoke (cnpg.io/hibernation=on/off)"
     HIBERNATION_MARKER="smoke-$(date +%s)"
     kubectl -n "$NS" exec "$POD" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres \
         -v ON_ERROR_STOP=1 \
@@ -385,7 +386,7 @@ if [[ "${SMOKE_HIBERNATION:-0}" == "1" ]]; then
     fi
     log "  PASS: rehydrated and preserved PVC data marker"
 else
-    log "[7/14] skip hibernation smoke — SMOKE_HIBERNATION=${SMOKE_HIBERNATION:-unset} (set SMOKE_HIBERNATION=1 to enable)"
+    log "[7/15] skip hibernation smoke — SMOKE_HIBERNATION=${SMOKE_HIBERNATION:-unset} (set SMOKE_HIBERNATION=1 to enable)"
 fi
 
 # 8. Pooler Service psql smoke (선택 실행)
@@ -396,7 +397,7 @@ if [[ "${SMOKE_POOLER:-0}" == "1" ]]; then
     escaped_pooler_password="${POOLER_PASSWORD//\'/\'\'}"
     escaped_userlist_password="${POOLER_PASSWORD//\"/\"\"}"
 
-    log "[8/14] Pooler Service psql smoke (Pooler=$POOLER_NAME)"
+    log "[8/15] Pooler Service psql smoke (Pooler=$POOLER_NAME)"
     kubectl -n "$NS" exec "$POD" -c postgres -- psql -h /var/run/postgresql -U postgres -d postgres \
         -v ON_ERROR_STOP=1 -c "ALTER USER postgres PASSWORD '${escaped_pooler_password}'"
     kubectl -n "$NS" create secret generic "$POOLER_AUTH_SECRET" \
@@ -535,14 +536,14 @@ EOF
     fi
     log "  PASS: Pooler config hash changed, in-place reload completed, Pods unchanged, SELECT 1 = 1"
 else
-    log "[8/14] skip Pooler Service psql smoke — SMOKE_POOLER=${SMOKE_POOLER:-unset} (set SMOKE_POOLER=1 to enable)"
+    log "[8/15] skip Pooler Service psql smoke — SMOKE_POOLER=${SMOKE_POOLER:-unset} (set SMOKE_POOLER=1 to enable)"
 fi
 
 # 9. PostgresDatabase declarative smoke (T22 / T27 — psql reconcile 검증)
 #    PostgresDatabase CR 적용 → status.applied=true → pg_database 존재 확인.
 #    databaseReclaimPolicy=delete 로 CR 삭제 시 DROP DATABASE 자동 처리도 검증.
 if [[ "${SMOKE_DATABASE:-0}" == "1" ]]; then
-    log "[9/14] PostgresDatabase declarative smoke (psql reconcile)"
+    log "[9/15] PostgresDatabase declarative smoke (psql reconcile)"
     DB_NAME="smoke_db_$(date +%s)"
     cat <<DBSPEC | kubectl -n "$NS" apply -f -
 apiVersion: postgres.keiailab.io/v1alpha1
@@ -600,13 +601,13 @@ DBSPEC
     fi
     log "  PASS: PostgresDatabase reclaim=delete finalizer DROP DATABASE 검증"
 else
-    log "[9/14] skip PostgresDatabase smoke — SMOKE_DATABASE=${SMOKE_DATABASE:-unset} (set SMOKE_DATABASE=1 to enable)"
+    log "[9/15] skip PostgresDatabase smoke — SMOKE_DATABASE=${SMOKE_DATABASE:-unset} (set SMOKE_DATABASE=1 to enable)"
 fi
 
 # 10. PostgresUser declarative smoke (T22 / T27 — role/membership psql reconcile 검증)
 #    PostgresUser CR 적용 → status.applied=true → pg_roles 조회 → CR 삭제 → role 제거 검증.
 if [[ "${SMOKE_USER:-0}" == "1" ]]; then
-    log "[10/14] PostgresUser declarative smoke (psql reconcile)"
+    log "[10/15] PostgresUser declarative smoke (psql reconcile)"
     USER_NAME="smoke_user_$(date +%s)"
     cat <<USERSPEC | kubectl -n "$NS" apply -f -
 apiVersion: postgres.keiailab.io/v1alpha1
@@ -671,7 +672,7 @@ USERSPEC
     fi
     log "  PASS: PostgresUser CR 삭제 → DROP ROLE 검증"
 else
-    log "[10/14] skip PostgresUser smoke — SMOKE_USER=${SMOKE_USER:-unset} (set SMOKE_USER=1 to enable)"
+    log "[10/15] skip PostgresUser smoke — SMOKE_USER=${SMOKE_USER:-unset} (set SMOKE_USER=1 to enable)"
 fi
 
 # 11. ScheduledBackup declarative smoke (T27 ③ — cron → BackupJob 생성 검증)
@@ -679,7 +680,7 @@ fi
 #     실제 pgBackRest 실행은 외부 repo 환경이 없으면 Failed 로 끝나도 OK —
 #     본 시나리오는 ScheduledBackup → BackupJob CR 생성 경로만 검증한다.
 if [[ "${SMOKE_SCHEDULEDBACKUP:-0}" == "1" ]]; then
-    log "[11/14] ScheduledBackup declarative smoke (cron → BackupJob 생성 검증)"
+    log "[11/15] ScheduledBackup declarative smoke (cron → BackupJob 생성 검증)"
     SB_NAME="smoke-sb-$(date +%s)"
     cat <<SBSPEC | kubectl -n "$NS" apply -f -
 apiVersion: postgres.keiailab.io/v1alpha1
@@ -724,13 +725,70 @@ SBSPEC
     kubectl -n "$NS" delete scheduledbackup "$SB_NAME" --wait=true --timeout=30s >/dev/null
     log "  PASS: ScheduledBackup CR 삭제 — backupOwnerReference=self 가 BackupJob 의 ownerReference 정리를 위임"
 else
-    log "[11/14] skip ScheduledBackup smoke — SMOKE_SCHEDULEDBACKUP=${SMOKE_SCHEDULEDBACKUP:-unset} (set SMOKE_SCHEDULEDBACKUP=1 to enable)"
+    log "[11/15] skip ScheduledBackup smoke — SMOKE_SCHEDULEDBACKUP=${SMOKE_SCHEDULEDBACKUP:-unset} (set SMOKE_SCHEDULEDBACKUP=1 to enable)"
 fi
 
-# 12. WAL lag 측정 (F02 100% 게이트, ADR-0056 Phase A1)
+# 12. ImageCatalog / ClusterImageCatalog declarative smoke (T27 ④ — schema + lookup 검증)
+#     ImageCatalog (namespace-scoped) 와 ClusterImageCatalog (cluster-scoped) 양 CR
+#     이 schema valid 하게 apply 되는지 + kubectl get 으로 회수 가능한지 확인한다.
+#     실제 PostgresCluster.spec.imageCatalogRef 회로 검증은 별도 e2e 시나리오.
+if [[ "${SMOKE_IMAGECATALOG:-0}" == "1" ]]; then
+    log "[12/15] ImageCatalog/ClusterImageCatalog schema + lookup smoke"
+    IC_NAME="smoke-ic-$(date +%s)"
+    CIC_NAME="smoke-cic-$(date +%s)"
+
+    cat <<ICSPEC | kubectl -n "$NS" apply -f -
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: ImageCatalog
+metadata:
+  name: ${IC_NAME}
+  namespace: ${NS}
+spec:
+  images:
+    - major: 18
+      image: ghcr.io/keiailab/pg:18
+ICSPEC
+
+    cat <<CICSPEC | kubectl apply -f -
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: ClusterImageCatalog
+metadata:
+  name: ${CIC_NAME}
+spec:
+  images:
+    - major: 17
+      image: ghcr.io/keiailab/pg:17
+    - major: 18
+      image: ghcr.io/keiailab/pg:18
+CICSPEC
+
+    ic_count=$(kubectl -n "$NS" get imagecatalog "$IC_NAME" -o jsonpath='{.spec.images[*].major}' 2>&1 | wc -w | tr -d ' ')
+    if [[ "$ic_count" -lt 1 ]]; then
+        log "ERROR: ImageCatalog/${IC_NAME} apply did not surface images[*].major"
+        kubectl -n "$NS" get imagecatalog "$IC_NAME" -o yaml | tail -20 || true
+        exit 1
+    fi
+
+    cic_count=$(kubectl get clusterimagecatalog "$CIC_NAME" -o jsonpath='{.spec.images[*].major}' 2>&1 | wc -w | tr -d ' ')
+    if [[ "$cic_count" -lt 2 ]]; then
+        log "ERROR: ClusterImageCatalog/${CIC_NAME} apply did not surface 2 major versions (got ${cic_count})"
+        kubectl get clusterimagecatalog "$CIC_NAME" -o yaml | tail -20 || true
+        exit 1
+    fi
+
+    log "  PASS: ImageCatalog (1 major) + ClusterImageCatalog (2 majors) schema valid + lookup 검증"
+
+    kubectl -n "$NS" delete imagecatalog "$IC_NAME" --wait=true --timeout=30s >/dev/null
+    kubectl delete clusterimagecatalog "$CIC_NAME" --wait=true --timeout=30s >/dev/null
+    log "  PASS: ImageCatalog / ClusterImageCatalog cleanup 완료"
+else
+    log "[12/15] skip ImageCatalog smoke — SMOKE_IMAGECATALOG=${SMOKE_IMAGECATALOG:-unset} (set SMOKE_IMAGECATALOG=1 to enable)"
+fi
+
+# 13. WAL lag 측정 (F02 100% 게이트, ADR-0056 Phase A1)
 #    standby 가 *진짜로 replay* 하는지 + 부하 대비 lag 측정.
 #    REPLICAS=1 일 때 standby 부재 → 측정 skip.
-log "[12/14] WAL replication lag measurement"
+log "[13/15] WAL replication lag measurement"
 REPLICAS=$(kubectl -n "$NS" get sts "$STS_NAME" -o jsonpath='{.spec.replicas}')
 if [[ "${REPLICAS:-1}" -ge 2 ]]; then
     # primary 에서 pgbench init + 부하 (10 client × 100 txn)
@@ -773,7 +831,7 @@ fi
 #    primary kill → standby 가 새 primary 로 promote 되는 시간. RTO 목표 < 30s.
 #    SMOKE_FAILOVER=1 환경변수 설정 시에만 실행 (default skip — 데이터 plane 변경 영향).
 if [[ "${REPLICAS:-1}" -ge 2 ]] && [[ "${SMOKE_FAILOVER:-0}" == "1" ]]; then
-    log "[13/14] Failover RTO measurement (SMOKE_FAILOVER=1)"
+    log "[14/15] Failover RTO measurement (SMOKE_FAILOVER=1)"
     KILL_TS=$(date +%s)
     kubectl -n "$NS" delete pod "$POD" --wait=false || true
     log "  primary killed at $(format_utc_ts "$KILL_TS") — waiting for new primary"
@@ -827,5 +885,5 @@ if [[ "${REPLICAS:-1}" -ge 2 ]] && [[ "${SMOKE_FAILOVER:-0}" == "1" ]]; then
     fi
     log "  PASS: CR status reflects ${STS_NAME}-1 and restarted old primary is standby"
 else
-    log "[13/14] skip failover RTO — SMOKE_FAILOVER=${SMOKE_FAILOVER:-unset} (set SMOKE_FAILOVER=1 to enable)"
+    log "[14/15] skip failover RTO — SMOKE_FAILOVER=${SMOKE_FAILOVER:-unset} (set SMOKE_FAILOVER=1 to enable)"
 fi

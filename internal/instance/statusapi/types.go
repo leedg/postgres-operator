@@ -71,6 +71,13 @@ type Status struct {
 	// 미관측 (예: pg_stat_replication 권한 부재) 시 -1 — controller 가 N/A 로 표기.
 	LagBytes int64 `json:"lagBytes"`
 
+	// Reason 은 Ready=false 또는 degraded 상태의 machine-readable 원인이다.
+	// 예: RejoinPreparationFailed.
+	Reason string `json:"reason,omitempty"`
+
+	// Message 는 운영자가 바로 볼 수 있는 human-readable 상세 메시지다.
+	Message string `json:"message,omitempty"`
+
 	// LastUpdate 는 본 status struct 가 patch 된 시각 (UTC). controller 가
 	// staleness 검사 (예: >30s 부재면 Pod heartbeat 끊김) 에 사용.
 	LastUpdate time.Time `json:"lastUpdate"`

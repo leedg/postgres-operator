@@ -16,7 +16,25 @@ limitations under the License.
 
 package main
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/keiailab/postgres-operator/internal/instance/fencing"
+	"github.com/keiailab/postgres-operator/internal/instance/statusapi"
+	"github.com/keiailab/postgres-operator/internal/instance/supervise"
+)
 
 func TestBuildElectionIdentity_UsesPodUID(t *testing.T) {
 	got := buildElectionIdentity("demo-shard-0-0", "uid-123")
@@ -32,10 +50,112 @@ func TestParsePodOrdinalOrDie_StatefulSetName(t *testing.T) {
 	}
 }
 
-func TestStandbyCandidateEndpoint_OrdinalOne(t *testing.T) {
-	got := standbyCandidateEndpoint("demo", 0, "ns1")
-	want := "demo-shard-0-1.demo-shard-0-headless.ns1.svc.cluster.local:5432"
-	if got != want {
-		t.Fatalf("endpoint = %q, want %q", got, want)
+func TestPrepareRestartedPrimaryAsStandby_UsesCurrentPrimaryEndpointForAnyOrdinal(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, supervise.RestartPrimaryAsStandbyMarker)
+	if err := os.WriteFile(marker, []byte("1"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
 	}
+
+	prepared, err := prepareRestartedPrimaryAsStandby(
+		dir,
+		"demo-shard-0-2.demo-shard-0-headless.ns1.svc.cluster.local:5432",
+		"",
+		"demo-shard-0-0",
+		2,
+		discardLogger(),
+	)
+	if err != nil {
+		t.Fatalf("prepareRestartedPrimaryAsStandby: %v", err)
+	}
+	if !prepared {
+		t.Fatal("prepared = false, want true for marked HA member regardless of pod ordinal")
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "postgresql.auto.conf"))
+	if err != nil {
+		t.Fatalf("read postgresql.auto.conf: %v", err)
+	}
+	if !strings.Contains(string(raw), "host=demo-shard-0-2.demo-shard-0-headless.ns1.svc.cluster.local port=5432") {
+		t.Fatalf("primary_conninfo must use current primary endpoint, got:\n%s", raw)
+	}
+}
+
+func TestPatchRejoinFailureStatus_PublishesAnnotation(t *testing.T) {
+	client := fake.NewClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-shard-0-0", Namespace: "default"},
+	})
+
+	err := patchRejoinFailureStatus(
+		context.Background(),
+		client,
+		"default",
+		"demo-shard-0-0",
+		"demo-shard-0-0.demo-shard-0-headless.default.svc.cluster.local:5432",
+		"primary.svc:5432",
+		"pg_rewind failed",
+	)
+	if err != nil {
+		t.Fatalf("patchRejoinFailureStatus: %v", err)
+	}
+	pod, err := client.CoreV1().Pods("default").Get(context.Background(), "demo-shard-0-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	raw := pod.Annotations[statusapi.AnnotationKey]
+	if raw == "" {
+		t.Fatal("instance-status annotation missing")
+	}
+	var st statusapi.Status
+	if err := json.Unmarshal([]byte(raw), &st); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if st.Role != statusapi.RoleReplica || st.Ready {
+		t.Fatalf("status role/ready = %s/%v, want replica/false", st.Role, st.Ready)
+	}
+	if st.Reason != "RejoinPreparationFailed" {
+		t.Fatalf("reason = %q", st.Reason)
+	}
+	if !strings.Contains(st.Message, "primary.svc:5432") || !strings.Contains(st.Message, "pg_rewind failed") {
+		t.Fatalf("message = %q, want endpoint and error", st.Message)
+	}
+	if st.Endpoint == "" || st.LastUpdate.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("status endpoint/time not populated: %+v", st)
+	}
+}
+
+func TestHandleStoppedLeading_SkipsFenceAndDemoteForSingleMember(t *testing.T) {
+	fencer := fencing.NewMock()
+	sup := supervise.NewMock()
+
+	handleStoppedLeading(fencer, sup, t.TempDir(), "demo-shard-0-0", "demo-shard-0-primary", 1, discardLogger())
+
+	mark, _, _ := fencer.Calls()
+	if mark != 0 {
+		t.Fatalf("MarkFenced calls = %d, want 0 for single-member cluster", mark)
+	}
+	if sup.StopCalls != 0 {
+		t.Fatalf("Stop calls = %d, want 0 for single-member cluster", sup.StopCalls)
+	}
+}
+
+func TestHandleStoppedLeading_FencesAndDemotesMultiMember(t *testing.T) {
+	fencer := fencing.NewMock()
+	sup := supervise.NewMock()
+	if err := sup.Start(t.Context()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	handleStoppedLeading(fencer, sup, t.TempDir(), "demo-shard-0-0", "demo-shard-0-primary", 2, discardLogger())
+
+	mark, _, _ := fencer.Calls()
+	if mark != 1 {
+		t.Fatalf("MarkFenced calls = %d, want 1", mark)
+	}
+	if sup.StopCalls != 1 {
+		t.Fatalf("Stop calls = %d, want 1", sup.StopCalls)
+	}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }

@@ -33,9 +33,11 @@ You may obtain a copy of the License at
 package supervise
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -45,6 +47,36 @@ const standbySignalFile = "standby.signal"
 // RestartPrimaryAsStandbyMarker 는 HA 클러스터에서 ordinal-0 이 기존 primary
 // PGDATA 로 재시작했음을 bootstrap 이 instance manager 에 전달하는 marker 다.
 const RestartPrimaryAsStandbyMarker = ".keiailab-restart-primary-as-standby"
+
+// CommandRunner 는 pg_rewind 같은 외부 PostgreSQL 유틸리티 실행을 테스트에서
+// 대체 가능하게 하는 최소 인터페이스다.
+type CommandRunner interface {
+	Run(ctx context.Context, name string, args ...string) error
+}
+
+// ExecCommandRunner 는 실제 OS process 로 PostgreSQL 유틸리티를 실행한다.
+type ExecCommandRunner struct{}
+
+// Run 은 command output 을 error 에 포함해 Pod log 에 실패 원인을 남긴다.
+func (ExecCommandRunner) Run(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("run %s %v: %w: %s", name, args, err, string(output))
+	}
+	return nil
+}
+
+// RejoinOptions 는 failover 후 옛 primary PGDATA 를 current primary 기준 standby 로
+// 되감기 위한 입력값이다.
+type RejoinOptions struct {
+	DataDir                   string
+	PrimaryEndpoint           string
+	ApplicationName           string
+	BinDir                    string
+	Runner                    CommandRunner
+	BasebackupOnRewindFailure bool
+}
 
 // IsStandby 는 dataDir 안에 standby.signal 파일이 존재하는지 검사한다.
 // stat 오류가 ErrNotExist 이외인 경우에도 false 로 보수적 판정 (호출 측이
@@ -92,20 +124,44 @@ func CreateStandbySignal(dataDir string) error {
 // PrepareRestartedPrimaryAsStandby 는 marker 가 있을 때 기존 ordinal-0 PGDATA 를
 // standby 로 부팅하도록 standby.signal + primary_conninfo 를 구성한다.
 func PrepareRestartedPrimaryAsStandby(dataDir, primaryEndpoint string) (bool, error) {
-	marker := filepath.Join(dataDir, RestartPrimaryAsStandbyMarker)
+	return PrepareRestartedPrimaryAsStandbyWithRewind(context.Background(), RejoinOptions{
+		DataDir:         dataDir,
+		PrimaryEndpoint: primaryEndpoint,
+	})
+}
+
+// PrepareRestartedPrimaryAsStandbyWithRewind 는 marker 가 있을 때 pg_rewind 로
+// current primary 의 timeline 에 맞춘 뒤 standby.signal + primary_conninfo 를
+// 구성한다. pg_rewind 실패 시 marker 를 남겨 다음 restart 에서 다시 시도한다.
+func PrepareRestartedPrimaryAsStandbyWithRewind(ctx context.Context, opts RejoinOptions) (bool, error) {
+	marker := filepath.Join(opts.DataDir, RestartPrimaryAsStandbyMarker)
 	if _, err := os.Stat(marker); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("stat %s: %w", marker, err)
 	}
-	if primaryEndpoint == "" {
+	if opts.PrimaryEndpoint == "" {
 		return false, errors.New("primaryEndpoint must not be empty")
 	}
-	if err := CreateStandbySignal(dataDir); err != nil {
+	if opts.BinDir != "" {
+		runner := opts.Runner
+		if runner == nil {
+			runner = ExecCommandRunner{}
+		}
+		if err := runPgRewind(ctx, runner, opts.BinDir, opts.DataDir, opts.PrimaryEndpoint); err != nil {
+			if !opts.BasebackupOnRewindFailure {
+				return false, err
+			}
+			if fallbackErr := replaceDataDirWithBasebackup(ctx, runner, opts.BinDir, opts.DataDir, opts.PrimaryEndpoint); fallbackErr != nil {
+				return false, fmt.Errorf("%w; basebackup fallback failed: %w", err, fallbackErr)
+			}
+		}
+	}
+	if err := CreateStandbySignal(opts.DataDir); err != nil {
 		return false, err
 	}
-	if err := appendPrimaryConninfo(dataDir, primaryEndpoint); err != nil {
+	if err := appendPrimaryConninfo(opts.DataDir, opts.PrimaryEndpoint, opts.ApplicationName); err != nil {
 		return false, err
 	}
 	if err := os.Remove(marker); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -114,14 +170,83 @@ func PrepareRestartedPrimaryAsStandby(dataDir, primaryEndpoint string) (bool, er
 	return true, nil
 }
 
-func appendPrimaryConninfo(dataDir, endpoint string) error {
+func replaceDataDirWithBasebackup(ctx context.Context, runner CommandRunner, binDir, dataDir, endpoint string) error {
+	if dataDir == "" || dataDir == string(filepath.Separator) {
+		return fmt.Errorf("refuse to replace unsafe dataDir %q", dataDir)
+	}
+	quarantine := dataDir + ".rewind-failed"
+	if err := os.RemoveAll(quarantine); err != nil {
+		return fmt.Errorf("remove old quarantine %s: %w", quarantine, err)
+	}
+	if err := os.Rename(dataDir, quarantine); err != nil {
+		return fmt.Errorf("quarantine %s to %s: %w", dataDir, quarantine, err)
+	}
+	restored := false
+	defer func() {
+		if restored {
+			return
+		}
+		_ = os.RemoveAll(dataDir)
+		_ = os.Rename(quarantine, dataDir)
+	}()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return fmt.Errorf("create fresh dataDir %s: %w", dataDir, err)
+	}
+	if err := runPgBasebackup(ctx, runner, binDir, dataDir, endpoint); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, RestartPrimaryAsStandbyMarker), []byte("basebackup-fallback"), 0o600); err != nil {
+		return fmt.Errorf("write fallback marker: %w", err)
+	}
+	restored = true
+	_ = os.RemoveAll(quarantine)
+	return nil
+}
+
+func runPgRewind(ctx context.Context, runner CommandRunner, binDir, dataDir, endpoint string) error {
+	host, port := splitEndpoint(endpoint)
+	sourceServer := fmt.Sprintf("host=%s port=%s user=postgres dbname=postgres", host, port)
+	if err := runner.Run(
+		ctx,
+		filepath.Join(binDir, "pg_rewind"),
+		"--target-pgdata", dataDir,
+		"--source-server="+sourceServer,
+	); err != nil {
+		return fmt.Errorf("pg_rewind target=%s source=%s: %w", dataDir, endpoint, err)
+	}
+	return nil
+}
+
+func runPgBasebackup(ctx context.Context, runner CommandRunner, binDir, dataDir, endpoint string) error {
+	host, port := splitEndpoint(endpoint)
+	if err := runner.Run(
+		ctx,
+		filepath.Join(binDir, "pg_basebackup"),
+		"-D", dataDir,
+		"-h", host,
+		"-p", port,
+		"-U", "postgres",
+		"--no-password",
+		"--wal-method=stream",
+		"--checkpoint=fast",
+	); err != nil {
+		return fmt.Errorf("pg_basebackup target=%s source=%s: %w", dataDir, endpoint, err)
+	}
+	return nil
+}
+
+func appendPrimaryConninfo(dataDir, endpoint, applicationName string) error {
 	host, port := splitEndpoint(endpoint)
 	path := filepath.Join(dataDir, "postgresql.auto.conf")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	if _, err := fmt.Fprintf(f, "primary_conninfo = 'host=%s port=%s user=postgres'\n", host, port); err != nil {
+	applicationNameFragment := ""
+	if applicationName != "" {
+		applicationNameFragment = " application_name=" + applicationName
+	}
+	if _, err := fmt.Fprintf(f, "primary_conninfo = 'host=%s port=%s user=postgres%s'\n", host, port, applicationNameFragment); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}

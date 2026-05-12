@@ -1,0 +1,46 @@
+# Standalone replica cluster 샘플 — 외부 PostgreSQL source 에서 pg_basebackup 후
+# continuous recovery(read-only) 로 동작한다.
+#
+# 적용 전:
+#   - primary-eu-rw.data.svc:5432 가 replica cluster namespace 에서 접근 가능해야 한다.
+#   - source 는 streaming replication 접속을 허용해야 한다.
+#   - TLS 인증 사용 시 replication cert/CA Secret 을 replica namespace 로 복사해야 한다.
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: PostgresCluster
+metadata:
+  name: quickreplica
+  namespace: default
+spec:
+  postgresVersion: "18"
+  externalClusters:
+    - name: primary-eu
+      connectionParameters:
+        host: primary-eu-rw.data.svc
+        port: "5432"
+        user: streaming_replica
+        dbname: postgres
+        sslmode: verify-full
+      password:
+        name: primary-eu-replication-password
+        key: password
+      sslKey:
+        name: primary-eu-replication
+        key: tls.key
+      sslCert:
+        name: primary-eu-replication
+        key: tls.crt
+      sslRootCert:
+        name: primary-eu-ca
+        key: ca.crt
+  bootstrap:
+    pg_basebackup:
+      source: primary-eu
+  replica:
+    enabled: true
+    source: primary-eu
+  shardingMode: none
+  shards:
+    initialCount: 1
+    replicas: 0
+    storage:
+      size: 10Gi

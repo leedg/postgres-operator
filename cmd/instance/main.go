@@ -105,6 +105,7 @@ func main() {
 	memberCount := parsePositiveIntEnv("POSTGRES_MEMBER_COUNT")
 	podOrdinal := parsePodOrdinalOrDie(podName)
 	electionIdentity := buildElectionIdentity(podName, podUID)
+	replicaClusterMode := os.Getenv("POSTGRES_REPLICA_CLUSTER")
 
 	logger.Info("Instance manager starting",
 		"version", "v0.0.0-pillar-p2-t1",
@@ -119,21 +120,11 @@ func main() {
 		"podOrdinal", podOrdinal,
 		"memberCount", memberCount,
 		"electionDisabled", electionDisabled,
+		"replicaClusterMode", replicaClusterMode,
 	)
 
 	leaseName := election.PrimaryLeaseName(cluster, role, int32(shardOrdinal))
 	logger.Info("Resolved lease name", "lease", leaseName)
-
-	// dataDir — election callback 의 standby.signal lifecycle (RFC 0006 R3) 와
-	// supervise.NewReal 양쪽에서 사용. 한 번만 읽고 클로저로 캡쳐한다.
-	dataDir := envOrDie("POSTGRES_DATA_DIR")
-	restartedPrimaryAsStandby := prepareRestartedPrimaryAsStandby(
-		dataDir, cluster, namespace, int32(shardOrdinal), podOrdinal, memberCount, logger,
-	)
-
-	// Supervisor — postgres 자식 fork + Promote/Stop SQL 추상.
-	// supervise-disabled 모드에서는 nil 로 두고 callback 안에서 분기.
-	sup := buildSupervisor(superviseDisabled, dataDir, logger)
 
 	// Fencing — Null(disabled) 또는 Real. fencer는 election callback에서
 	// 호출되며 fence 위반 시 fencingErrCh로 신호를 보내 main이 exit non-zero
@@ -151,6 +142,36 @@ func main() {
 		}
 	}
 
+	// dataDir — election callback 의 standby.signal lifecycle (RFC 0006 R3) 와
+	// supervise.NewReal 양쪽에서 사용. 한 번만 읽고 클로저로 캡쳐한다.
+	dataDir := envOrDie("POSTGRES_DATA_DIR")
+	binDir := envOrDie("POSTGRES_BIN_DIR")
+	primaryEndpoint := os.Getenv("PRIMARY_ENDPOINT")
+	endpoint := instanceEndpoint(podName, cluster, int32(shardOrdinal), namespace)
+	restartedPrimaryAsStandby, err := prepareRestartedPrimaryAsStandby(
+		dataDir, primaryEndpoint, binDir, podName, memberCount, logger,
+	)
+	if err != nil {
+		logger.Error("Failed to prepare restarted former primary as standby",
+			"endpoint", primaryEndpoint,
+			"error", err)
+		if clientset != nil {
+			patchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			patchErr := patchRejoinFailureStatus(
+				patchCtx, clientset, namespace, podName, endpoint, primaryEndpoint, err.Error(),
+			)
+			cancel()
+			if patchErr != nil {
+				logger.Warn("failed to publish rejoin failure status", "error", patchErr)
+			}
+		}
+		os.Exit(1)
+	}
+
+	// Supervisor — postgres 자식 fork + Promote/Stop SQL 추상.
+	// supervise-disabled 모드에서는 nil 로 두고 callback 안에서 분기.
+	sup := buildSupervisor(superviseDisabled, dataDir, logger)
+
 	fencer = buildFencer(fencingDisabled, clientset, namespace, podName, logger)
 
 	// Election 인스턴스 결정 (Real | Null).
@@ -160,41 +181,17 @@ func main() {
 			runOnStartedLeading(ctx, fencer, sup, dataDir, podName, leaseName, fencingErrCh, logger)
 		},
 		OnStoppedLeading: func() {
-			// 자기 PVC를 fence 처리하여 좀비 부활 시 split-brain 방지.
-			// background ctx 사용 — election ctx는 이미 종료 중일 수 있음.
-			markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer markCancel()
-			if err := fencer.MarkFenced(markCtx); err != nil {
-				logger.Error("Failed to fence own PVC after losing leadership",
-					"identity", podName, "error", err)
-			} else {
-				logger.Warn("Leadership lost — fenced own PVC, demoting postgres",
-					"identity", podName, "lease", leaseName)
-			}
-			// Demote — PostgreSQL 은 native pg_demote() 가 없으므로 fast Stop
-			// (SIGINT) 으로 primary 를 종료. 본 instance 는 ExitCh 가 fire 하면
-			// 통째 exit → K8s 가 Pod 재시작 → 다음 부팅 시 standby 로 진입
-			// (standby.signal 재구성 로직은 F03 후속).
-			// RFC 0006 R3: 다음 부팅 시 standby 로 진입하도록 signal 파일을
-			// 미리 생성. best-effort — 실패해도 demote 자체는 진행 (Pod 재시작 +
-			// bootstrap init container 가 보조 mechanism).
-			if err := supervise.CreateStandbySignal(dataDir); err != nil {
-				logger.Error("CreateStandbySignal failed (best-effort)", "identity", podName, "error", err)
-			}
-			if sup != nil {
-				demoteCtx, demoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer demoteCancel()
-				if err := sup.Stop(demoteCtx, true); err != nil {
-					logger.Error("Demote (fast stop) failed", "identity", podName, "error", err)
-				}
-			}
+			handleStoppedLeading(fencer, sup, dataDir, podName, leaseName, memberCount, logger)
 		},
 		OnNewLeader: func(id string) {
 			logger.Info("Observed new leader", "identity", id, "self", podName)
 		},
 	}
 
-	if electionDisabled {
+	if replicaClusterMode == "standalone" {
+		elect = election.NewFollower(electionIdentity, cb)
+		logger.Warn("Standalone replica cluster mode — election forced to Follower; local promotion disabled.")
+	} else if electionDisabled {
 		elect = election.NewNull(electionIdentity, cb)
 		logger.Warn("Election disabled — Null election (always Leader). Use only in development.")
 	} else {
@@ -358,6 +355,49 @@ func runOnStartedLeading(
 		"todo", "분산 SQL metadata 갱신 (RFC 0002 ShardRange 후속)")
 }
 
+func handleStoppedLeading(
+	fencer fencing.Fencer,
+	sup supervise.Supervisor,
+	dataDir, podName, leaseName string,
+	memberCount int,
+	logger *slog.Logger,
+) {
+	if memberCount <= 1 {
+		logger.Warn("Leadership stop observed in single-member cluster — skipping PVC fence and demote",
+			"identity", podName, "lease", leaseName, "memberCount", memberCount)
+		return
+	}
+
+	// 자기 PVC를 fence 처리하여 좀비 부활 시 split-brain 방지.
+	// background ctx 사용 — election ctx는 이미 종료 중일 수 있음.
+	markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer markCancel()
+	if err := fencer.MarkFenced(markCtx); err != nil {
+		logger.Error("Failed to fence own PVC after losing leadership",
+			"identity", podName, "error", err)
+	} else {
+		logger.Warn("Leadership lost — fenced own PVC, demoting postgres",
+			"identity", podName, "lease", leaseName)
+	}
+	// Demote — PostgreSQL 은 native pg_demote() 가 없으므로 fast Stop
+	// (SIGINT) 으로 primary 를 종료. 본 instance 는 ExitCh 가 fire 하면
+	// 통째 exit → K8s 가 Pod 재시작 → 다음 부팅 시 standby 로 진입
+	// (standby.signal 재구성 로직은 F03 후속).
+	// RFC 0006 R3: 다음 부팅 시 standby 로 진입하도록 signal 파일을
+	// 미리 생성. best-effort — 실패해도 demote 자체는 진행 (Pod 재시작 +
+	// bootstrap init container 가 보조 mechanism).
+	if err := supervise.CreateStandbySignal(dataDir); err != nil {
+		logger.Error("CreateStandbySignal failed (best-effort)", "identity", podName, "error", err)
+	}
+	if sup != nil {
+		demoteCtx, demoteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer demoteCancel()
+		if err := sup.Stop(demoteCtx, true); err != nil {
+			logger.Error("Demote (fast stop) failed", "identity", podName, "error", err)
+		}
+	}
+}
+
 func buildElectionIdentity(podName, podUID string) string {
 	return podName + "/" + podUID
 }
@@ -390,38 +430,58 @@ func parsePodOrdinalOrDie(podName string) int {
 }
 
 func prepareRestartedPrimaryAsStandby(
-	dataDir, cluster, namespace string,
-	shardOrdinal int32,
-	podOrdinal, memberCount int,
+	dataDir, primaryEndpoint, binDir, applicationName string,
+	memberCount int,
 	logger *slog.Logger,
-) bool {
-	if podOrdinal != 0 || memberCount <= 1 {
-		return false
+) (bool, error) {
+	if memberCount <= 1 {
+		return false, nil
 	}
-	endpoint := standbyCandidateEndpoint(cluster, shardOrdinal, namespace)
-	prepared, err := supervise.PrepareRestartedPrimaryAsStandby(dataDir, endpoint)
+	prepared, err := supervise.PrepareRestartedPrimaryAsStandbyWithRewind(context.Background(), supervise.RejoinOptions{
+		DataDir:                   dataDir,
+		PrimaryEndpoint:           primaryEndpoint,
+		ApplicationName:           applicationName,
+		BinDir:                    binDir,
+		BasebackupOnRewindFailure: true,
+	})
 	if err != nil {
-		logger.Error("Failed to prepare restarted ordinal-0 primary as standby", "error", err)
-		os.Exit(1)
+		return false, err
 	}
 	if prepared {
-		logger.Warn("Restarted ordinal-0 primary prepared as standby",
-			"endpoint", endpoint,
-			"reason", "HA failover prefers existing standby promotion before same ordinal reuse")
+		logger.Warn("Restarted former primary prepared as standby",
+			"endpoint", primaryEndpoint,
+			"reason", "HA failover uses current primary endpoint before former primary rejoins")
 	}
-	return prepared
+	return prepared, nil
 }
 
-func standbyCandidateEndpoint(cluster string, shardOrdinal int32, namespace string) string {
-	return fmt.Sprintf("%s-shard-%d-1.%s-shard-%d-headless.%s.svc.cluster.local:5432",
-		cluster, shardOrdinal, cluster, shardOrdinal, namespace)
+func patchRejoinFailureStatus(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	namespace, podName, endpoint, primaryEndpoint, message string,
+) error {
+	st := statusapi.Status{
+		Role:       statusapi.RoleReplica,
+		Ready:      false,
+		Endpoint:   endpoint,
+		LagBytes:   -1,
+		Reason:     "RejoinPreparationFailed",
+		Message:    fmt.Sprintf("failed to rejoin current primary %s: %s", primaryEndpoint, message),
+		LastUpdate: time.Now().UTC(),
+	}
+	return patchPodAnnotation(ctx, clientset, namespace, podName, st)
+}
+
+func instanceEndpoint(podName, cluster string, shardOrdinal int32, namespace string) string {
+	return fmt.Sprintf("%s.%s-shard-%d-headless.%s.svc.cluster.local:5432",
+		podName, cluster, shardOrdinal, namespace)
 }
 
 func delayElectionForRestartedPrimary(ctx context.Context, delay time.Duration, podName string, logger *slog.Logger) {
 	if delay <= 0 {
 		return
 	}
-	logger.Warn("Delaying election for restarted ordinal-0 primary",
+	logger.Warn("Delaying election for restarted former primary",
 		"podName", podName,
 		"delay", delay.String())
 	select {
@@ -444,8 +504,7 @@ func startStatusReporterIfPossible(
 	if clientset == nil {
 		return
 	}
-	endpoint := fmt.Sprintf("%s.%s-shard-%d-headless.%s.svc.cluster.local:5432",
-		podName, cluster, shardOrdinal, namespace)
+	endpoint := instanceEndpoint(podName, cluster, shardOrdinal, namespace)
 	go runStatusReporter(ctx, clientset, namespace, podName, endpoint, elect, sup, logger)
 }
 

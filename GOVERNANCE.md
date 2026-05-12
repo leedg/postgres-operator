@@ -1,68 +1,92 @@
 # Governance
 
-본 문서는 keiailab/postgres-operator 프로젝트의 의사결정 절차를 정의합니다.
+This document defines how decisions are made in the keiailab/postgres-operator
+project.
 
-## 원칙
+## Principles
 
-1. **개방성**: 모든 의사결정은 공개 채널(GitHub issue/PR/RFC)에서 이뤄집니다.
-2. **최소 합의(Lazy Consensus)**: 일상적 변경은 반대 없으면 진행됩니다.
-3. **명시적 합의(Explicit Consensus)**: 아키텍처 변경, CRD 변경, 보안 모델 변경, 라이선스 변경은 RFC 후 메인테이너 **2/3 supermajority** 승인. 일반 RFC (단일 컴포넌트 / 도구 채택 / 정책 보강) 는 **simple majority (>50%)**. GOVERNANCE 자체 변경 (§ "본 문서 변경") 은 항상 2/3 supermajority.
-4. **공동 책임**: 메인테이너는 코드 품질, 사용자 안전, 커뮤니티 건강에 대해 공동 책임을 집니다.
+1. **Open**: every decision happens on a public channel (GitHub issues / PRs /
+   RFCs).
+2. **Lazy consensus**: routine changes proceed when no one objects.
+3. **Explicit consensus**: architectural changes, CRD changes, security-model
+   changes, and license changes require an RFC and a **2/3 supermajority** of
+   maintainers. Smaller RFCs (single component / tool adoption / policy
+   reinforcement) require a **simple majority (>50%)**. Changes to GOVERNANCE
+   itself (see "Amendments" below) always require a 2/3 supermajority.
+4. **Shared accountability**: maintainers are jointly responsible for code
+   quality, user safety, and community health.
 
-## 의사결정 분류
+## Decision classes
 
-### 일상 변경 (Lazy Consensus)
-- 버그 픽스, 문서 개선, 테스트 추가, 의존성 minor/patch 업그레이드, 리팩터링(공개 API 무변경)
-- 절차: PR → 1명 이상 메인테이너 LGTM → 머지
-- 시한: 별도 코멘트 윈도우 없음 (로컬 게이트 통과 시 즉시 머지 가능 — RFC-0002 에 따라 GitHub Actions 미사용, pre-commit/pre-push hook + Makefile 로 검증)
+### Routine changes (lazy consensus)
 
-### 중간 변경 (Explicit Consensus)
-- 새 CRD 필드 추가, 새 reconciler, 의존성 major 업그레이드, 공개 API 변경
-- 절차: 이슈로 제안 → 7일 코멘트 윈도우 → 메인테이너 다수 LGTM → 머지
-- 거부 1건이 있을 시 메인테이너 회의에서 토론
+- Bug fixes, documentation improvements, additional tests, dependency
+  minor/patch upgrades, and refactors that do not change a public API.
+- Process: PR → at least 1 maintainer LGTM → merge.
+- Window: none required (a PR may merge as soon as the local gate passes;
+  per RFC-0002 we do not use GitHub Actions — pre-commit / pre-push hooks
+  plus the Makefile provide the gate).
 
-### 아키텍처 변경 (RFC 필수)
-- 새 컴포넌트 도입, 보안 모델 변경, 라이선스 변경, 호환성 깨는 변경
-- 절차:
-  1. `docs/rfcs/NNNN-title.md`에 RFC 제출
-  2. 14일 코멘트 윈도우
-  3. 메인테이너 2/3 이상 찬성
-  4. RFC Status: `Draft → Accepted` 후 구현 PR 진입
-- 거부 시 RFC Status: `Rejected`로 보존 (역사적 기록)
+### Medium changes (explicit consensus)
 
-## 역할
+- New CRD fields, new reconcilers, dependency major upgrades, public API
+  changes.
+- Process: propose via issue → 7-day comment window → maintainer majority
+  LGTM → merge.
+- Single objection escalates to a maintainer meeting.
+
+### Architectural changes (RFC required)
+
+- Introducing a new component, changing the security model, changing the
+  license, or any backward-incompatible change.
+- Process:
+  1. Submit an RFC at `docs/rfcs/NNNN-title.md`.
+  2. 14-day comment window.
+  3. ≥ 2/3 of maintainers in favor.
+  4. Flip the RFC status `Draft → Accepted`, then open the implementation PR.
+- A rejected RFC keeps the status `Rejected` (preserved for historical
+  context).
+
+## Roles
 
 ### Contributor
-누구나. PR/Issue 제출 가능.
+
+Anyone. May submit PRs and issues.
 
 ### Reviewer
-정기적으로 리뷰하는 contributor. CODEOWNERS에 등재 가능. 머지 권한 없음.
+
+A contributor who reviews regularly. May be added to CODEOWNERS. No merge
+rights.
 
 ### Maintainer
-[MAINTAINERS.md](MAINTAINERS.md) 참조. 머지/승인 권한 보유.
 
-### Lead Maintainer
-keiailab 조직 대표. 라이선스/거버넌스/보안 정책 최종 결정 권한.
+See [MAINTAINERS.md](MAINTAINERS.md). Holds merge / approval rights.
 
-## 메인테이너 회의
+### Lead maintainer
 
-- 월 1회 (필요 시 임시 소집)
-- 의사록은 `docs/meetings/`에 공개
-- 안건: 분쟁 해결, RFC 토론, 로드맵 검토
+The keiailab organization representative. Final decision authority on
+license, governance, and security policy.
 
-## 분쟁 해결
+## Maintainer meetings
 
-1. PR/이슈 코멘트로 1차 토론
-2. 미해결 시 메인테이너 회의 안건 등재
-3. 메인테이너 다수결로 결정
-4. Lead Maintainer가 tie-breaker
+- Monthly cadence (with ad-hoc sessions as needed).
+- Minutes published under `docs/meetings/`.
+- Agenda: dispute resolution, RFC discussion, roadmap review.
 
-## 라이선스/지적 재산
+## Dispute resolution
 
-- 모든 기여는 Apache 2.0 라이선스
-- DCO sign-off 강제
-- 라이선스 변경은 모든 contributor 동의 필요 (실질적으로 불변)
+1. Discuss in the PR/issue comments first.
+2. If unresolved, add to the maintainer-meeting agenda.
+3. Decided by a maintainer-majority vote.
+4. The lead maintainer breaks ties.
 
-## 변경
+## Licensing / intellectual property
 
-본 문서는 메인테이너 2/3 이상 찬성으로 변경 가능.
+- All contributions are licensed under Apache 2.0.
+- DCO sign-off is mandatory.
+- License changes require unanimous contributor consent (so they are
+  effectively immutable).
+
+## Amendments
+
+This document can only be amended with a ≥ 2/3 maintainer supermajority.

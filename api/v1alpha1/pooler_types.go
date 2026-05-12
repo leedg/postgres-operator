@@ -103,19 +103,38 @@ type PgBouncerSpec struct {
 	Exporter *PgBouncerExporterSpec `json:"exporter,omitempty"`
 }
 
-// PoolerAutoTLSSpec is the configuration for auto-issuing TLS Secrets via a cert-manager
-// Issuer or ClusterIssuer. PoolerReconciler uses this spec to create cert-manager
-// `Certificate` CRs and mounts the Secrets cert-manager issues into the PgBouncer Deployment.
+// PoolerAutoTLSSpec configures automatic TLS Secret issuance for PgBouncer.
+//
+// Two backends are supported:
+//   - cert-manager — set `issuerRef.{name,kind}`. The operator emits a
+//     `Certificate` CR; cert-manager issues the keypair into a Secret.
+//   - Self-signed (T29 stage 4) — set `selfSigned: true`. The operator
+//     generates an RSA-2048 self-signed CA + leaf certificate in-process
+//     and stores it in a Secret. Suitable for dev / test or environments
+//     where cert-manager is not installed.
+//
+// Exactly one of {issuerRef, selfSigned} must be set; this is enforced
+// at admission via a CEL XValidation rule.
 //
 // Issued Secret naming convention:
 //   - Server: `<pooler-name>-server-tls`
 //   - Client: `<pooler-name>-client-tls`
 //
-// If the user explicitly sets ServerTLSSecret/ClientTLSSecret, those take precedence over auto-issuance.
+// A user-supplied `serverTLSSecret` / `clientTLSSecret` always wins over
+// the auto-issuance path.
+// +kubebuilder:validation:XValidation:rule="(has(self.issuerRef) ? 1 : 0) + (has(self.selfSigned) && self.selfSigned ? 1 : 0) == 1",message="exactly one of spec.pgbouncer.autoTLS.issuerRef or spec.pgbouncer.autoTLS.selfSigned must be set"
 type PoolerAutoTLSSpec struct {
-	// IssuerRef is a reference to a cert-manager Issuer or ClusterIssuer.
-	// +kubebuilder:validation:Required
-	IssuerRef PoolerCertIssuerRef `json:"issuerRef"`
+	// IssuerRef references a cert-manager Issuer or ClusterIssuer.
+	// Mutually exclusive with SelfSigned.
+	// +optional
+	IssuerRef *PoolerCertIssuerRef `json:"issuerRef,omitempty"`
+
+	// SelfSigned, when true, makes the operator generate an in-process
+	// RSA-2048 self-signed CA + leaf certificate (1-year validity, auto
+	// rotation triggered when the existing cert's NotAfter is within 30
+	// days). Mutually exclusive with IssuerRef.
+	// +optional
+	SelfSigned bool `json:"selfSigned,omitempty"`
 
 	// ServerEnabled=true auto-issues a server TLS Secret (for connecting to the PostgreSQL backend).
 	// +kubebuilder:default=false

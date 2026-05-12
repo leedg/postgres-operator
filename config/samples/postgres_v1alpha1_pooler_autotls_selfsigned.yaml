@@ -1,0 +1,31 @@
+# Pooler sample — self-signed AutoTLS (T29 stage 4).
+#
+# Use this when cert-manager is not installed. The operator generates an
+# in-process RSA-2048 self-signed CA + leaf certificate (1-year validity,
+# auto rotation when the existing cert's NotAfter is within 30 days) and
+# stores it in a Secret named `<pooler>-client-tls` (and / or
+# `<pooler>-server-tls`).
+#
+# Pooler.Status.AutoTLSClientCertNotAfter / AutoTLSServerCertNotAfter
+# mirror the issued cert's NotAfter (kubectl get pooler -o wide).
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: Pooler
+metadata:
+  name: quickstart-rw-selfsigned
+  namespace: default
+spec:
+  cluster:
+    name: quickstart
+  instances: 1
+  type: rw
+  pgbouncer:
+    image: ghcr.io/cloudnative-pg/pgbouncer:1.24.1
+    poolMode: session
+    authSecretRef:
+      name: quickstart-rw-auth
+    autoTLS:
+      selfSigned: true
+      clientEnabled: true
+      serverEnabled: false
+      # commonName / dnsNames are optional; defaults expand the Pooler
+      # Service DNS forms.

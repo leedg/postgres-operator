@@ -16,11 +16,16 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"maps"
+	"math/big"
 	"sort"
 	"strings"
 	"time"
@@ -750,19 +755,35 @@ func (r *PoolerReconciler) ensurePoolerAutoTLS(ctx context.Context, pooler *post
 	return nil
 }
 
-// readPoolerCertificateNotAfter looks up the cert-manager Certificate CR
-// (named identically to the issued Secret) and returns its
-// `status.notAfter`. Returns nil when the CR is missing, cert-manager
-// hasn't observed it yet, or the notAfter field is absent — the next
-// reconcile re-reads. The lookup is best-effort: any client error is
-// logged at V(1) and treated as "unknown" so that a slow cert-manager
-// install does not block the rest of the reconcile.
+// readPoolerCertificateNotAfter returns the NotAfter time for the
+// currently issued Pooler TLS Secret. For the cert-manager-backed path it
+// reads `Certificate.status.notAfter`; for the self-signed path
+// (T29 stage 4 — `AutoTLS.SelfSigned=true`) it parses the cert directly
+// out of the issued Secret. Returns nil when no source is observable
+// yet — the next reconcile will retry. Lookup errors are logged at V(1)
+// and treated as "unknown" so a slow cert-manager install or transient
+// Secret-read error does not block the rest of the reconcile.
 func (r *PoolerReconciler) readPoolerCertificateNotAfter(
 	ctx context.Context,
 	pooler *postgresv1alpha1.Pooler,
 	certName string,
 ) *metav1.Time {
 	logger := log.FromContext(ctx)
+	// Self-signed path — the Certificate CR does not exist; we read the
+	// Secret instead.
+	if spec := pooler.Spec.PgBouncer.AutoTLS; spec != nil && spec.SelfSigned {
+		var secret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: pooler.Namespace, Name: certName}, &secret); err != nil {
+			logger.V(1).Info("readPoolerCertificateNotAfter: self-signed Secret not yet observable",
+				"pooler", pooler.Name, "secret", certName, "error", err.Error())
+			return nil
+		}
+		if cert := parseLeafCertFromPEM(secret.Data[corev1.TLSCertKey]); cert != nil {
+			mt := metav1.NewTime(cert.NotAfter)
+			return &mt
+		}
+		return nil
+	}
 	cert := &unstructured.Unstructured{}
 	cert.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   poolerAutoTLSCertificateGroup,
@@ -796,6 +817,17 @@ func (r *PoolerReconciler) applyPoolerAutoCertificate(
 	usages []string,
 ) error {
 	spec := pooler.Spec.PgBouncer.AutoTLS
+	// Stage 4 self-signed path: when SelfSigned=true, do not emit a
+	// cert-manager Certificate CR at all — generate and rotate the
+	// Secret in-process. The caller's notAfter-mirror logic still works
+	// because we set the Secret-embedded cert's NotAfter and
+	// read it back via x509 parse.
+	if spec.SelfSigned {
+		return r.applyPoolerSelfSignedCertificate(ctx, pooler, secretName, role)
+	}
+	if spec.IssuerRef == nil {
+		return fmt.Errorf("AutoTLS spec must have issuerRef or selfSigned set (CRD CEL should have caught this)")
+	}
 	issuerKind := spec.IssuerRef.Kind
 	if issuerKind == "" {
 		issuerKind = "Issuer"
@@ -893,6 +925,183 @@ func (r *PoolerReconciler) applyPoolerAutoCertificate(
 		return fmt.Errorf("update Pooler AutoTLS Certificate: %w", err)
 	}
 	return nil
+}
+
+// poolerSelfSignedRenewalSkew is the minimum remaining lifetime before
+// applyPoolerSelfSignedCertificate regenerates the self-signed cert.
+// 30 days ≈ standard 90-day rotation budget minus a buffer for slow
+// reconcile triggers.
+const poolerSelfSignedRenewalSkew = 30 * 24 * time.Hour
+
+// poolerSelfSignedValidity is the lifetime of a freshly generated
+// self-signed cert. 1 year is the practical sweet spot between rotation
+// overhead and long-term embed risk.
+const poolerSelfSignedValidity = 365 * 24 * time.Hour
+
+// applyPoolerSelfSignedCertificate implements T29 stage 4 — in-process
+// generation of a self-signed CA + leaf certificate so the AutoTLS path
+// works in environments that don't run cert-manager. Idempotent: when
+// the existing Secret's tls.crt parses cleanly and `NotAfter` is more
+// than `poolerSelfSignedRenewalSkew` in the future, no regeneration is
+// performed and the function returns nil.
+func (r *PoolerReconciler) applyPoolerSelfSignedCertificate(
+	ctx context.Context,
+	pooler *postgresv1alpha1.Pooler,
+	secretName, role string,
+) error {
+	logger := log.FromContext(ctx)
+	var existing corev1.Secret
+	key := client.ObjectKey{Namespace: pooler.Namespace, Name: secretName}
+	getErr := r.Get(ctx, key, &existing)
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		return fmt.Errorf("get existing self-signed Secret: %w", getErr)
+	}
+
+	// Existing-cert reuse window.
+	if getErr == nil {
+		if cert := parseLeafCertFromPEM(existing.Data["tls.crt"]); cert != nil {
+			if time.Until(cert.NotAfter) > poolerSelfSignedRenewalSkew {
+				return nil
+			}
+			logger.Info("self-signed Pooler TLS approaching expiry — regenerating",
+				"pooler", pooler.Name, "secret", secretName,
+				"notAfter", cert.NotAfter)
+		} else {
+			logger.Info("self-signed Pooler TLS Secret missing or unparseable tls.crt — regenerating",
+				"pooler", pooler.Name, "secret", secretName)
+		}
+	}
+
+	desired, err := generatePoolerSelfSignedSecret(pooler, secretName, role)
+	if err != nil {
+		return fmt.Errorf("generate self-signed cert: %w", err)
+	}
+	if err := controllerutil.SetControllerReference(pooler, desired, r.Scheme); err != nil {
+		return fmt.Errorf("set OwnerReference on self-signed Secret: %w", err)
+	}
+	if apierrors.IsNotFound(getErr) {
+		if err := r.Create(ctx, desired); err != nil {
+			return fmt.Errorf("create self-signed Secret: %w", err)
+		}
+		return nil
+	}
+	// Update in place — preserve resourceVersion + immutable fields.
+	existing.Data = desired.Data
+	existing.Type = desired.Type
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+	maps.Copy(existing.Labels, desired.GetLabels())
+	if err := r.Update(ctx, &existing); err != nil {
+		return fmt.Errorf("update self-signed Secret: %w", err)
+	}
+	return nil
+}
+
+// parseLeafCertFromPEM returns the first PEM-encoded x509 certificate in
+// the given byte slice, or nil when the input is empty / malformed.
+func parseLeafCertFromPEM(raw []byte) *x509.Certificate {
+	if len(raw) == 0 {
+		return nil
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil
+	}
+	return cert
+}
+
+// generatePoolerSelfSignedSecret produces a fresh self-signed leaf cert
+// + matching RSA key + the same cert duplicated as the CA bundle (so the
+// rendered Secret layout matches cert-manager's `Certificate`-issued
+// Secrets — tls.crt, tls.key, ca.crt). The leaf cert IS its own CA, which
+// is acceptable for the dev / pre-prod scope of stage 4.
+func generatePoolerSelfSignedSecret(
+	pooler *postgresv1alpha1.Pooler,
+	secretName, role string,
+) (*corev1.Secret, error) {
+	dnsNames := poolerAutoTLSDefaultDNSNames(pooler)
+	spec := pooler.Spec.PgBouncer.AutoTLS
+	if spec != nil && len(spec.DNSNames) > 0 {
+		seen := map[string]struct{}{}
+		merged := make([]string, 0, len(dnsNames)+len(spec.DNSNames))
+		for _, d := range append(dnsNames, spec.DNSNames...) {
+			if _, ok := seen[d]; ok {
+				continue
+			}
+			seen[d] = struct{}{}
+			merged = append(merged, d)
+		}
+		dnsNames = merged
+	}
+	commonName := ""
+	if spec != nil {
+		commonName = spec.CommonName
+	}
+	if commonName == "" && len(dnsNames) > 0 {
+		commonName = dnsNames[0]
+	}
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("rsa.GenerateKey: %w", err)
+	}
+
+	serialMax := new(big.Int).Lsh(big.NewInt(1), 127)
+	serial, err := rand.Int(rand.Reader, serialMax)
+	if err != nil {
+		return nil, fmt.Errorf("rand serial: %w", err)
+	}
+	notBefore := time.Now().UTC().Add(-1 * time.Minute) // clock-skew tolerance
+	notAfter := notBefore.Add(poolerSelfSignedValidity)
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   commonName,
+			Organization: []string{"keiailab.postgres-operator"},
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              dnsNames,
+	}
+	derBytes, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	if err != nil {
+		return nil, fmt.Errorf("x509.CreateCertificate: %w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, fmt.Errorf("MarshalPKCS8PrivateKey: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: pooler.Namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by":  "postgres-operator",
+				"postgres.keiailab.io/pooler":   pooler.Name,
+				"postgres.keiailab.io/cluster":  pooler.Spec.Cluster.Name,
+				"postgres.keiailab.io/auto-tls": role + "-selfsigned",
+			},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       certPEM,
+			corev1.TLSPrivateKeyKey: keyPEM,
+			"ca.crt":                certPEM,
+		},
+	}
+	return secret, nil
 }
 
 func (r *PoolerReconciler) validatePoolerTLSSecrets(ctx context.Context, pooler *postgresv1alpha1.Pooler) (string, error) {

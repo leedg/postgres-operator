@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -1566,7 +1567,7 @@ func TestPoolerAutoTLS_CreatesCertificate(t *testing.T) {
 	pooler := newPooler()
 	pooler.Name = "demo-rw-autotls"
 	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
-		IssuerRef: postgresv1alpha1.PoolerCertIssuerRef{
+		IssuerRef: &postgresv1alpha1.PoolerCertIssuerRef{
 			Name: "ca-issuer",
 			Kind: "ClusterIssuer",
 		},
@@ -1619,6 +1620,109 @@ func TestPoolerAutoTLS_CreatesCertificate(t *testing.T) {
 	}
 }
 
+// TestPoolerAutoTLS_SelfSignedCreatesSecretAndMirrorsNotAfter (T29 stage 4)
+// — when `spec.pgbouncer.autoTLS.selfSigned=true` and cert-manager is
+// not present, the reconciler must generate an in-process RSA + x509
+// self-signed cert, store it in a Secret with tls.crt/tls.key/ca.crt
+// keys, and mirror the certificate's NotAfter onto Pooler.Status so the
+// observability path stays uniform with the cert-manager-backed flow.
+func TestPoolerAutoTLS_SelfSignedCreatesSecretAndMirrorsNotAfter(t *testing.T) {
+	t.Parallel()
+	scheme := newScheme(t)
+	cluster := newPoolerCluster()
+	pooler := newPooler()
+	pooler.Name = "demo-rw-autotls-selfsigned"
+	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
+		SelfSigned:    true,
+		ClientEnabled: true,
+		ServerEnabled: false,
+	}
+	authSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-pooler-auth",
+		Namespace: "default",
+	}, Data: map[string][]byte{"userlist.txt": []byte(`"app" "SCRAM-SHA-256$4096:salt$stored:server"`)}}
+	c := fake.NewClientBuilder().WithScheme(scheme).
+		WithObjects(cluster, pooler, authSecret).
+		WithStatusSubresource(&postgresv1alpha1.Pooler{}).
+		Build()
+	defer DeletePoolerMetricsFor(pooler.Namespace, pooler.Name)
+
+	r := &PoolerReconciler{Client: c, Scheme: scheme}
+	got := reconcilePoolerOnce(t, r, c, pooler)
+
+	// No cert-manager Certificate CR — only the Secret should exist.
+	clientCert := &unstructured.Unstructured{}
+	clientCert.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-client-tls",
+	}, clientCert); !apierrors.IsNotFound(err) {
+		t.Fatalf("cert-manager Certificate get error = %v, want NotFound (self-signed path)", err)
+	}
+
+	// The Secret must exist with tls.crt / tls.key / ca.crt.
+	var secret corev1.Secret
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-client-tls",
+	}, &secret); err != nil {
+		t.Fatalf("self-signed Secret get: %v", err)
+	}
+	for _, key := range []string{corev1.TLSCertKey, corev1.TLSPrivateKeyKey, "ca.crt"} {
+		if len(secret.Data[key]) == 0 {
+			t.Fatalf("self-signed Secret missing data[%q]", key)
+		}
+	}
+	if secret.Type != corev1.SecretTypeTLS {
+		t.Fatalf("self-signed Secret type = %q, want %q", secret.Type, corev1.SecretTypeTLS)
+	}
+
+	// The parsed cert's CommonName should include the pooler service DNS.
+	cert := parseLeafCertFromPEM(secret.Data[corev1.TLSCertKey])
+	if cert == nil {
+		t.Fatalf("self-signed Secret tls.crt is unparseable")
+	}
+	expectedHostPrefix := PoolerServiceName(pooler.Name)
+	hasMatchingSAN := false
+	for _, d := range cert.DNSNames {
+		if strings.HasPrefix(d, expectedHostPrefix) {
+			hasMatchingSAN = true
+			break
+		}
+	}
+	if !hasMatchingSAN {
+		t.Fatalf("self-signed cert SANs %v, want at least one starting with %q",
+			cert.DNSNames, expectedHostPrefix)
+	}
+	if time.Until(cert.NotAfter) < 300*24*time.Hour {
+		t.Fatalf("self-signed cert NotAfter = %v, want ~365 days from now", cert.NotAfter)
+	}
+
+	// Status notAfter must be mirrored from the issued cert.
+	if got.Status.AutoTLSClientCertNotAfter == nil {
+		t.Fatalf("status.autoTLSClientCertNotAfter is nil — self-signed mirror failed")
+	}
+	if !got.Status.AutoTLSClientCertNotAfter.Time.Equal(cert.NotAfter) {
+		t.Fatalf("status.autoTLSClientCertNotAfter = %v, want %v (parsed cert)",
+			got.Status.AutoTLSClientCertNotAfter.Time, cert.NotAfter)
+	}
+
+	// Idempotent: a second reconcile must NOT regenerate the Secret
+	// (NotAfter is still ~1 year out).
+	previousCert := secret.Data[corev1.TLSCertKey]
+	_ = reconcilePoolerOnce(t, r, c, pooler)
+	var second corev1.Secret
+	if err := c.Get(context.Background(), client.ObjectKey{
+		Namespace: pooler.Namespace,
+		Name:      pooler.Name + "-client-tls",
+	}, &second); err != nil {
+		t.Fatalf("second-pass Secret get: %v", err)
+	}
+	if !bytes.Equal(second.Data[corev1.TLSCertKey], previousCert) {
+		t.Fatalf("self-signed cert was regenerated on the second reconcile (not idempotent)")
+	}
+}
+
 // TestPoolerAutoTLS_MirrorsNotAfterToStatus (T29 stage 5) — when the
 // cert-manager Certificate has `status.notAfter`, the reconciler must
 // mirror it onto Pooler.Status.AutoTLSClientCertNotAfter so that
@@ -1630,7 +1734,7 @@ func TestPoolerAutoTLS_MirrorsNotAfterToStatus(t *testing.T) {
 	pooler := newPooler()
 	pooler.Name = "demo-rw-autotls-notafter"
 	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
-		IssuerRef: postgresv1alpha1.PoolerCertIssuerRef{
+		IssuerRef: &postgresv1alpha1.PoolerCertIssuerRef{
 			Name: "ca-issuer",
 			Kind: "ClusterIssuer",
 		},
@@ -1689,7 +1793,7 @@ func TestPoolerAutoTLS_UserSuppliedSecretTakesPrecedence(t *testing.T) {
 	pooler.Name = "demo-rw-autotls-userref"
 	pooler.Spec.PgBouncer.ClientTLSSecret = &corev1.LocalObjectReference{Name: "user-client-tls"}
 	pooler.Spec.PgBouncer.AutoTLS = &postgresv1alpha1.PoolerAutoTLSSpec{
-		IssuerRef:     postgresv1alpha1.PoolerCertIssuerRef{Name: "ca-issuer"},
+		IssuerRef:     &postgresv1alpha1.PoolerCertIssuerRef{Name: "ca-issuer"},
 		ClientEnabled: true,
 	}
 	defer DeletePoolerMetricsFor(pooler.Namespace, pooler.Name)

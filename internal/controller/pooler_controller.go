@@ -1785,13 +1785,31 @@ func setPoolerCondition(
 	})
 }
 
+// statusUpdate mirrors the conflict-retry pattern used by
+// PostgresDatabase / PostgresUser / BackupJob reconcilers.
+// See backupjob_controller.go::statusUpdate for the rationale.
 func (r *PoolerReconciler) statusUpdate(ctx context.Context, pooler *postgresv1alpha1.Pooler) error {
-	if err := r.Status().Update(ctx, pooler); err != nil {
-		if apierrors.IsConflict(err) {
-			return nil
-		}
+	desired := pooler.Status.DeepCopy()
+	err := r.Status().Update(ctx, pooler)
+	if err == nil {
+		ObservePoolerMetrics(pooler)
+		return nil
+	}
+	if !apierrors.IsConflict(err) {
 		return err
 	}
+	var fresh postgresv1alpha1.Pooler
+	if getErr := r.Get(ctx, client.ObjectKeyFromObject(pooler), &fresh); getErr != nil {
+		return getErr
+	}
+	fresh.Status = *desired
+	if retryErr := r.Status().Update(ctx, &fresh); retryErr != nil {
+		if apierrors.IsConflict(retryErr) {
+			return nil
+		}
+		return retryErr
+	}
+	pooler.ResourceVersion = fresh.ResourceVersion
 	ObservePoolerMetrics(pooler)
 	return nil
 }

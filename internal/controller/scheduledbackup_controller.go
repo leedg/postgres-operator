@@ -266,13 +266,30 @@ func (r *ScheduledBackupReconciler) markNotReady(
 	setScheduledBackupCondition(sb, metav1.ConditionFalse, reason, message)
 }
 
+// statusUpdate mirrors the conflict-retry pattern used by
+// PostgresDatabase / PostgresUser / BackupJob reconcilers.
+// See backupjob_controller.go::statusUpdate for the rationale.
 func (r *ScheduledBackupReconciler) statusUpdate(ctx context.Context, sb *postgresv1alpha1.ScheduledBackup) error {
-	if err := r.Status().Update(ctx, sb); err != nil {
-		if apierrors.IsConflict(err) {
-			return nil
-		}
+	desired := sb.Status.DeepCopy()
+	err := r.Status().Update(ctx, sb)
+	if err == nil {
+		return nil
+	}
+	if !apierrors.IsConflict(err) {
 		return err
 	}
+	var fresh postgresv1alpha1.ScheduledBackup
+	if getErr := r.Get(ctx, client.ObjectKeyFromObject(sb), &fresh); getErr != nil {
+		return getErr
+	}
+	fresh.Status = *desired
+	if retryErr := r.Status().Update(ctx, &fresh); retryErr != nil {
+		if apierrors.IsConflict(retryErr) {
+			return nil
+		}
+		return retryErr
+	}
+	sb.ResourceVersion = fresh.ResourceVersion
 	return nil
 }
 

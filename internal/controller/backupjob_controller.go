@@ -605,15 +605,35 @@ func (r *BackupJobReconciler) markFailed(bj *postgresv1alpha1.BackupJob, reason,
 	}
 }
 
-// statusUpdate는 conflict를 requeue로 처리하는 표준 패턴.
+// statusUpdate persists the in-memory BackupJob status. On a transient
+// conflict (HTTP 409) we re-fetch the resource, replay the desired
+// status snapshot, and retry once. The original "silently swallow
+// conflict and rely on the next reconcile" pattern dropped status
+// updates whose follow-up reconcile never fired (PG18 kind smoke
+// iter#3 root cause for PostgresDatabase / PostgresUser); mirroring
+// the retry pattern here makes BackupJob equally robust.
 func (r *BackupJobReconciler) statusUpdate(ctx context.Context, bj *postgresv1alpha1.BackupJob) error {
-	if err := r.Status().Update(ctx, bj); err != nil {
-		if apierrors.IsConflict(err) {
-			// reconcile은 곧 재호출되므로 conflict는 정상.
-			return nil
-		}
+	desired := bj.Status.DeepCopy()
+	err := r.Status().Update(ctx, bj)
+	if err == nil {
+		ObserveBackupJobMetrics(bj)
+		return nil
+	}
+	if !apierrors.IsConflict(err) {
 		return err
 	}
+	var fresh postgresv1alpha1.BackupJob
+	if getErr := r.Get(ctx, client.ObjectKeyFromObject(bj), &fresh); getErr != nil {
+		return getErr
+	}
+	fresh.Status = *desired
+	if retryErr := r.Status().Update(ctx, &fresh); retryErr != nil {
+		if apierrors.IsConflict(retryErr) {
+			return nil // give up after one retry; the next reconcile will refresh.
+		}
+		return retryErr
+	}
+	bj.ResourceVersion = fresh.ResourceVersion
 	ObserveBackupJobMetrics(bj)
 	return nil
 }

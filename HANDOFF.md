@@ -30,7 +30,7 @@
 | Task | Stage / % | Notes |
 |---|---|---|
 | T26 OSS/OLM standards alignment | Complete 100% | spdystream CVE fix, OLM bundle, CHANGELOG/SUPPORT, README, 4 new `make validate` gates, lefthook DCO enforced. |
-| T27 Live kind smoke + Pooler built-in auth + password rotation | Implementation 95% | `SMOKE_DATABASE` / `SMOKE_USER` / `SMOKE_SCHEDULEDBACKUP` / `SMOKE_IMAGECATALOG` scenarios + built-in auth (`keiailab_pooler_pgbouncer`) + rotation annotation. Live PG18 kind run still iterating. |
+| T27 Live kind smoke + Pooler built-in auth + password rotation | Implementation 98% | `SMOKE_DATABASE` / `SMOKE_USER` / `SMOKE_SCHEDULEDBACKUP` / `SMOKE_IMAGECATALOG` scenarios + built-in auth (`keiailab_pooler_pgbouncer`) + rotation annotation. PostgresDatabase / PostgresUser `status.applied` non-convergence root-caused (finalizer Requeue race + statusUpdate conflict swallow) and fixed in single-pass apply + retry. Live PG18 re-run in progress to confirm. |
 | T28 community-operators PR | Implementation 60% | Draft PR opened (#8109). Awaiting bundle image push + CI. |
 | T29 Pooler TLS auto-issuance | Implementation 70% | cert-manager `Certificate` CR auto-issuance via `spec.pgbouncer.autoTLS` (stage 1 spec + stage 2 controller). Live cert-manager kind drill still pending. |
 

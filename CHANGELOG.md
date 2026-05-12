@@ -74,6 +74,20 @@ This project follows SemVer.
 
 ### Fixed
 
+- *(controller)* PostgresDatabase / PostgresUser `status.applied` could
+  remain unset (no condition, empty `status: {}`) even though the
+  finalizer was already attached. Two root causes — *(a)* the
+  finalizer-add path returned `Requeue:true` and deferred the SQL apply
+  to a second pass, which under informer-cache propagation delay was
+  prone to looping on the stale snapshot; *(b)* `statusUpdate` silently
+  swallowed `apierrors.IsConflict`, so when the finalizer Update raced
+  with the status Update on the same generation the status payload was
+  dropped entirely. The reconciler now (i) adds the finalizer and
+  continues the *same* reconcile pass (single-pass apply + status), and
+  (ii) re-fetches and retries once on conflict before giving up.
+  Observed during the PG18 kind smoke iter#3; covered by the updated
+  `TestPostgresDatabaseReconcileDeletePolicyAddsFinalizerBeforeApply`
+  test which now asserts single-pass `status.applied=true`.
 - *(security)* `github.com/moby/spdystream` v0.5.0 → v0.5.1
   (CVE-2026-35469 HIGH; Kubelet / CRI-O / kube-apiserver DoS via SPDY
   streaming). `trivy fs --severity HIGH,CRITICAL --exit-code 1` is green

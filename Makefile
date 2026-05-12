@@ -230,6 +230,12 @@ validate: manifests generate kustomize build-installer test-scripts ## CRD, Kust
 	else \
 		echo "kubectl API server 미연결: dist/install.yaml client dry-run 생략"; \
 	fi
+	@APP_VERSION="$$(grep -E '^appVersion:' charts/postgres-operator/Chart.yaml | sed -E 's/^appVersion:[[:space:]]*\"?([^\"]*)\"?$$/\1/')"; \
+		KUST_TAG="$$(grep -E '^[[:space:]]*newTag:' config/manager/kustomization.yaml | awk '{print $$2}')"; \
+		DIST_TAG="$$(grep -m 1 -E 'image:[[:space:]]+ghcr.io/keiailab/postgres-operator:' dist/install.yaml | sed -E 's/.*:([^[:space:]]+)$$/\1/')"; \
+		if [ "$$APP_VERSION" != "$$KUST_TAG" ] || [ "$$APP_VERSION" != "$$DIST_TAG" ]; then \
+			echo "[error] version drift — Chart appVersion=$$APP_VERSION / kustomize newTag=$$KUST_TAG / dist image=$$DIST_TAG (모두 일치해야 함)"; exit 1; \
+		fi
 	@test "$$(ls bundle/manifests/postgres.keiailab.io_*.yaml 2>/dev/null | wc -l)" -ge 8 || \
 		{ echo "[error] bundle/manifests/ 안 owned CRD 가 8 개 미만 — make bundle VERSION=... 재실행"; exit 1; }
 	@if command -v operator-sdk >/dev/null 2>&1; then \

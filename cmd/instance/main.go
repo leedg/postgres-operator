@@ -200,9 +200,26 @@ func main() {
 		},
 	}
 
+	// T30 HA-bootstrap guard: a pod that boots with standby.signal still on
+	// disk is a *standby*. It must not race the cluster's primary
+	// (typically shard-0-0) for the election lease — that race was the root
+	// cause of the PG18/PG17 HA SHARD_REPLICAS=1 bootstrap crashloop.
+	// Standby pods take the Follower election: they observe the cluster but
+	// never attempt to acquire the lease. Failover-time promotion is
+	// driven by the operator's executeClusterPromotion exec path
+	// (removes standby.signal + pg_ctl promote, then kills the pod so the
+	// next boot enters this branch with no standby.signal → Real elector).
+	bootedAsStandby := supervise.IsStandby(dataDir)
 	if replicaClusterMode == "standalone" {
 		elect = election.NewFollower(electionIdentity, cb)
 		logger.Warn("Standalone replica cluster mode — election forced to Follower; local promotion disabled.")
+	} else if bootedAsStandby {
+		elect = election.NewFollower(electionIdentity, cb)
+		logger.Warn(
+			"Boot-time standby.signal detected — election forced to Follower; "+
+				"primary promotion is operator-driven (T30 HA bootstrap guard)",
+			"dataDir", dataDir, "identity", electionIdentity,
+		)
 	} else if electionDisabled {
 		elect = election.NewNull(electionIdentity, cb)
 		logger.Warn("Election disabled — Null election (always Leader). Use only in development.")

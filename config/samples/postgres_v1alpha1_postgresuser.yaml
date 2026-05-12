@@ -1,0 +1,20 @@
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: PostgresUser
+metadata:
+  name: quickstart-app
+spec:
+  cluster:
+    name: quickstart
+  name: app
+  ensure: present
+  login: true
+  createdb: true
+  createrole: false
+  replication: false
+  bypassrls: false
+  inherit: true
+  connectionLimit: 25
+  validUntil: infinity
+  inRoles:
+    - readonly
+    - writers

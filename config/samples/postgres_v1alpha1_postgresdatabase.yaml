@@ -1,0 +1,47 @@
+apiVersion: postgres.keiailab.io/v1alpha1
+kind: PostgresDatabase
+metadata:
+  name: quickstart-appdb
+spec:
+  cluster:
+    name: quickstart
+  name: appdb
+  owner: app
+  ensure: present
+  databaseReclaimPolicy: retain
+  tablespace: fastspace
+  privileges:
+    - role: app
+      privileges: [CONNECT, TEMPORARY]
+      type: grant
+  schemas:
+    - name: app
+      owner: app
+      ensure: present
+      privileges:
+        - role: app
+          privileges: [USAGE, CREATE]
+          type: grant
+  extensions:
+    - name: pgcrypto
+      ensure: present
+    - name: postgres_fdw
+      ensure: present
+  fdws:
+    - name: postgres_fdw
+      usage:
+        - name: app
+          type: grant
+  servers:
+    - name: quickstart-rw
+      fdw: postgres_fdw
+      options:
+        - name: host
+          value: quickstart-rw
+        - name: dbname
+          value: appdb
+        - name: port
+          value: "5432"
+      usage:
+        - name: app
+          type: grant

@@ -8,6 +8,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - role
+    - all
     kind: PostgresUser
     listKind: PostgresUserList
     plural: postgresusers

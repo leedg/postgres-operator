@@ -135,7 +135,7 @@ type ScheduledBackupStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced,shortName=sb
+// +kubebuilder:resource:scope=Namespaced,shortName=sb,categories=postgres;backup;all
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.cluster.name`
 // +kubebuilder:printcolumn:name="Schedule",type=string,JSONPath=`.spec.schedule`

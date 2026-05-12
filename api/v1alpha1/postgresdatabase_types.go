@@ -275,7 +275,7 @@ type PostgresDatabaseStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced,shortName=pgdb
+// +kubebuilder:resource:scope=Namespaced,shortName=pgdb,categories=postgres;database;all
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.cluster.name`
 // +kubebuilder:printcolumn:name="Database",type=string,JSONPath=`.spec.name`

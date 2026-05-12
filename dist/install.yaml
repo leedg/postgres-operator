@@ -16,6 +16,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - backup
+    - all
     kind: BackupJob
     listKind: BackupJobList
     plural: backupjobs
@@ -9270,6 +9274,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - image
+    - all
     kind: ClusterImageCatalog
     listKind: ClusterImageCatalogList
     plural: clusterimagecatalogs
@@ -9384,6 +9392,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - image
+    - all
     kind: ImageCatalog
     listKind: ImageCatalogList
     plural: imagecatalogs
@@ -9497,6 +9509,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - pooler
+    - all
     kind: Pooler
     listKind: PoolerList
     plural: poolers
@@ -18655,6 +18671,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - database
+    - all
     kind: PostgresCluster
     listKind: PostgresClusterList
     plural: postgresclusters
@@ -20725,6 +20745,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - database
+    - all
     kind: PostgresDatabase
     listKind: PostgresDatabaseList
     plural: postgresdatabases
@@ -21177,6 +21201,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - role
+    - all
     kind: PostgresUser
     listKind: PostgresUserList
     plural: postgresusers
@@ -21407,6 +21435,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - backup
+    - all
     kind: ScheduledBackup
     listKind: ScheduledBackupList
     plural: scheduledbackups

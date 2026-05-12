@@ -8,6 +8,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - database
+    - all
     kind: PostgresCluster
     listKind: PostgresClusterList
     plural: postgresclusters

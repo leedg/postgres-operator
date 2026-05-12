@@ -149,7 +149,7 @@ type BackupJobStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced,shortName=bj
+// +kubebuilder:resource:scope=Namespaced,shortName=bj,categories=postgres;backup;all
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.spec.cluster.name`
 // +kubebuilder:printcolumn:name="Tool",type=string,JSONPath=`.spec.tool`

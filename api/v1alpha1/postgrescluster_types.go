@@ -683,7 +683,7 @@ type PostgresClusterStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:shortName=pgc
+// +kubebuilder:resource:shortName=pgc,categories=postgres;database;all
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Shards",type=integer,JSONPath=".spec.shards.initialCount"
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=".status.conditions[?(@.type=='Ready')].status"

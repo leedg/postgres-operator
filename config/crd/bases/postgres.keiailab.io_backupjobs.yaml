@@ -8,6 +8,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - backup
+    - all
     kind: BackupJob
     listKind: BackupJobList
     plural: backupjobs

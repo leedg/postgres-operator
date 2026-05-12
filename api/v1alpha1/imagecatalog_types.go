@@ -87,7 +87,7 @@ type ImageCatalogSpec struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:shortName=pgic
+// +kubebuilder:resource:shortName=pgic,categories=postgres;image;all
 // +kubebuilder:printcolumn:name="Images",type=integer,JSONPath=".spec.images[*].major"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 
@@ -109,7 +109,7 @@ type ImageCatalogList struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=pgcic
+// +kubebuilder:resource:scope=Cluster,shortName=pgcic,categories=postgres;image;all
 // +kubebuilder:printcolumn:name="Images",type=integer,JSONPath=".spec.images[*].major"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 

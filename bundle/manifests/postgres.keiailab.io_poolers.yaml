@@ -8,6 +8,10 @@ metadata:
 spec:
   group: postgres.keiailab.io
   names:
+    categories:
+    - postgres
+    - pooler
+    - all
     kind: Pooler
     listKind: PoolerList
     plural: poolers

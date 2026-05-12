@@ -72,8 +72,34 @@ This project follows SemVer.
   OLM bundle / Helm chart / Local supply-chain gates / Security
   vulnerability scan / DCO sign-off enforcement.
 
+### Added
+
+- *(api,controller)* `PostgresUser.spec.userReclaimPolicy` (`retain`
+  default, `delete`) mirrors `PostgresDatabase.spec.databaseReclaimPolicy`.
+  When set to `delete` the reconciler attaches
+  `postgres.keiailab.io/postgresuser-finalizer` and runs `DROP ROLE`
+  via the existing `ensure=absent` reconcile script before allowing
+  garbage-collection. Closes the PG18 kind smoke iter#7 observation
+  that `kubectl delete postgresuser` left the PostgreSQL role behind.
+
 ### Fixed
 
+- *(controller)* PostgresDatabase / PostgresUser psql invocation
+  defaulted to the OS user `pg-keiailab` (the Dockerfile.pg USER
+  directive). With the iter#5 `eval` bug removed, this surfaced as
+  `FATAL: role "pg-keiailab" does not exist` (PG18 kind smoke
+  iter#6). Added explicit `-U postgres` to every psql invocation in
+  the rendered reconcile script (`psql_base` constant + every
+  per-database call). Regression test
+  `TestPostgresDatabaseReconcileScriptDoesNotUseEval` updated to
+  require `-U postgres` in the rendered command.
+- *(smoke)* `hack/smoke.sh` did not restart the operator Pod after
+  `kubectl apply -f dist/install.yaml` so kind kept reusing the
+  cached image on a re-run (`imagePullPolicy=IfNotPresent` + same
+  tag). The Pod ran an older operator binary than the source
+  on disk, masking new fixes. smoke.sh now `kubectl rollout
+  restart`s the controller-manager deployment after apply and
+  `rollout status`-waits for the new ReplicaSet.
 - *(controller)* PostgresDatabase / PostgresUser reconcile script was
   using `eval "$psql_base" -c '<SQL>'` to invoke psql; the outer shell
   stripped the surrounding single quotes around `<SQL>` before passing

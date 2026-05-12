@@ -1,56 +1,83 @@
-# deploy/ — GitOps 배포 디렉터리
+# deploy/ — GitOps deployment directory
 
-본 디렉터리는 ArgoCD (또는 동등 GitOps tool) 가 git → cluster 단방향 동기를 수행하기 위한 매니페스트 진입점이다. **`config/` 와 별개 경로** — `make deploy` 등 단발성 푸시는 `config/default` 를 사용한다.
+This directory is the manifest entry point used by ArgoCD (or any
+equivalent GitOps tool) to drive one-way git → cluster sync. It is
+**a separate path from `config/`** — single-shot pushes such as
+`make deploy` use `config/default`.
 
-ADR-0006 의 결정에 따라 mongodb-operator / valkey-operator 와 동일 구조로 정합화되었다.
+Per ADR-0006 the structure here is aligned with mongodb-operator /
+valkey-operator.
 
-## 구조
+## Layout
 
 ```
 deploy/
-├── overlays/prod/                 # ArgoCD application path: operator 자체 (envName=prod, ns=data)
+├── overlays/prod/                 # ArgoCD application path: the operator itself (envName=prod, ns=data)
 │   ├── kustomization.yaml         # config/{crd,rbac,manager} → namespace=data
-│   └── delete-namespace.yaml      # 자동 생성 Namespace 제거
-└── postgres-cluster.yaml          # ArgoCD application path: workload (CR 인스턴스, ns=data)
+│   └── delete-namespace.yaml      # remove the auto-generated Namespace
+└── postgres-cluster.yaml          # ArgoCD application path: workload (CR instance, ns=data)
 ```
 
-운영 모델: argos 클러스터 ns 통합 정책 (2026-05-06 cycle: 5 차트 모두 `data` ns 단일) 에 따라 operator 와 CR 이 *동일 data ns* 를 공유한다. envName 분리 (`overlays/prod`) 는 환경 식별자로만 유지.
+Operational model: per the argos cluster ns-consolidation policy
+(2026-05-06 cycle: all five charts share the `data` namespace), the
+operator and the CRs live in the *same `data` namespace*. envName
+separation (`overlays/prod`) is preserved only as an environment
+identifier.
 
-## 현 운영 상태 (2026-05-08)
+## Current operational status (2026-05-08)
 
-`keiailab/postgres-operator` 의 기존 미배포 원인은 argos-platform-data 의 ApplicationSet (`platform/data/application.yaml`) directories 목록에 operator path 가 없었던 것이다. 현재 production GitOps 진입점은 argos-platform-data 의 `postgres-operator/` Helm wrapper chart 이다.
+The reason `keiailab/postgres-operator` was not deployed earlier was
+that the argos-platform-data ApplicationSet
+(`platform/data/application.yaml`) did not list the operator path in
+its `directories` block. The current production GitOps entry point
+is the `postgres-operator/` Helm wrapper chart inside
+argos-platform-data.
 
-2026-05-08 live 검증 기준으로 ArgoCD Application `platform-data-postgres-operator` 는 `Synced/Healthy` (revision `cc662773f1a286d6b11a768af151db0ccd47b63f`) 이고, `data` namespace 의 `platform-data-postgres-operator-controller-manager` Deployment 는 `1/1` 로 실행 중이다. live image 는 `ghcr.io/keiailab/postgres-operator:0.3.0-alpha.4` (`sha256:394ec5eb4aa09d316d957a3c751bb7283f21bfa71f19a9d2871ccbc7ec974f2f`) 이며 `PostgresCluster/argos-postgres` 는 `Ready=True` 이다.
+As verified live on 2026-05-08, ArgoCD Application
+`platform-data-postgres-operator` is `Synced/Healthy`
+(revision `cc662773f1a286d6b11a768af151db0ccd47b63f`), and the
+`platform-data-postgres-operator-controller-manager` Deployment in
+the `data` namespace is running `1/1`. The live image is
+`ghcr.io/keiailab/postgres-operator:0.3.0-alpha.4`
+(`sha256:394ec5eb4aa09d316d957a3c751bb7283f21bfa71f19a9d2871ccbc7ec974f2f`)
+and `PostgresCluster/argos-postgres` is `Ready=True`.
 
-본 디렉터리는 **대체 Kustomize 배포 진입점** (RFC-0004 §3) 으로 유지한다. argos production 은 `platform/data/postgres-operator` 경로를 우선 source of truth 로 사용한다.
+This directory remains as the **alternate Kustomize deployment entry
+point** (RFC-0004 §3). The argos production environment uses the
+`platform/data/postgres-operator` path as its primary source of truth.
 
-⚠️ **범위 경계** — 위 상태는 Day-0 alpha-deployable single-shard 배포 완료를 뜻한다. HA replica, backup/restore drill, PITR, 장기 soak 가 남아 있으므로 0.4.0 single-shard production-ready 또는 GA 로 표기하지 않는다.
+⚠️ **Scope boundary** — the status above means Day-0 alpha-deployable
+single-shard deployment is complete. HA replicas, backup/restore
+drills, PITR, and long-running soak are still pending, so this is
+*not* marked as 0.4.0 single-shard production-ready or GA.
 
-## 사전 조건 (cluster)
+## Cluster prerequisites
 
-- [x] `data` namespace 사전 생성 (argos 2026-05-06 cycle 으로 Active).
-- [x] StorageClass `ceph-rbd` (default) 이용 가능 — argos 클러스터 검증.
-- [ ] (선택) `pg-admin-creds` Secret (data ns) — postgres-operator 가 자동 생성하지 않는 경우 ExternalSecret 으로 주입. RFC 0001 v2 schema 는 internal bootstrap 동작 가능.
-- [ ] Prometheus Operator (monitoring.serviceMonitor.enabled=true 사용 시).
-- [ ] PrometheusRule CRD 가용 (monitoring.prometheusRule.enabled=true 사용 시).
+- [x] `data` namespace pre-created (Active as of the argos 2026-05-06 cycle).
+- [x] StorageClass `ceph-rbd` (default) available — verified on the argos cluster.
+- [ ] (optional) `pg-admin-creds` Secret in the `data` namespace — required when postgres-operator does not auto-create it; inject via ExternalSecret. The RFC 0001 v2 schema is capable of internal bootstrap.
+- [ ] Prometheus Operator (required when `monitoring.serviceMonitor.enabled=true`).
+- [ ] PrometheusRule CRD available (required when `monitoring.prometheusRule.enabled=true`).
 
-## 적용 (수동 검증)
+## Applying (manual verification)
 
 ```fish
-# 1) 렌더 검증
+# 1) render check
 kustomize build deploy/overlays/prod | head
 kustomize build deploy/overlays/prod | grep -c "kind: Namespace"   # 0
 
-# 2) operator 적용
+# 2) apply the operator
 kustomize build deploy/overlays/prod | kubectl apply -f -
 kubectl -n data rollout status deploy/controller-manager
 
-# 3) workload 적용
+# 3) apply the workload
 kubectl apply -f deploy/postgres-cluster.yaml
 kubectl -n data get postgrescluster postgres-cluster \
     -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 ```
 
-## 변경 절차
+## Change procedure
 
-본 디렉터리 변경은 ADR 작성 후 진행 (`docs/kb/adr/`). 매번 `kustomize build deploy/overlays/prod` 렌더 검증.
+Any change to this directory must be preceded by an ADR
+(`docs/kb/adr/`). Always render-verify with
+`kustomize build deploy/overlays/prod`.

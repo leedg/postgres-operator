@@ -1,35 +1,35 @@
 <!--
-PR을 보내주셔서 감사합니다. 다음 체크리스트를 확인해주세요.
+Thanks for sending a PR. Please go through the checklist below.
 -->
 
-## 요약
+## Summary
 
-<!-- 무엇을 변경했고 왜 변경했는지 1~3줄 -->
+<!-- 1-3 lines describing what changed and why. -->
 
 Closes #
 
-## 변경 유형
+## Type of change
 
-- [ ] 버그 픽스
-- [ ] 새 기능
-- [ ] 문서
-- [ ] 리팩터링 (공개 API 무변경)
-- [ ] 의존성 업그레이드
-- [ ] 인프라/CI
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Docs
+- [ ] Refactor (no public API change)
+- [ ] Dependency upgrade
+- [ ] Infrastructure / CI
 
-## 체크리스트
+## Checklist
 
-- [ ] DCO sign-off (`git commit -s`) 완료
-- [ ] 단위 테스트 또는 e2e 테스트 추가
-- [ ] `make lint` 그린
-- [ ] `make test` 그린
-- [ ] 공개 API 변경이면 RFC 또는 CHANGELOG 항목 추가
-- [ ] 한국어 또는 영어 문서 갱신 (해당 시)
+- [ ] DCO sign-off (`git commit -s`) included
+- [ ] Unit or e2e tests added
+- [ ] `make lint` green
+- [ ] `make test` green
+- [ ] RFC or CHANGELOG entry added when the public API changes
+- [ ] Docs updated (when applicable)
 
-## 테스트 방법
+## How to test
 
-<!-- 리뷰어가 검증할 수 있는 단계 -->
+<!-- Steps a reviewer can run to verify this PR. -->
 
-## 영향도
+## Impact
 
-<!-- 호환성, 성능, 보안 영향 (해당 시) -->
+<!-- Compatibility, performance, or security impact (when applicable). -->

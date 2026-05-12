@@ -90,9 +90,65 @@ type PgBouncerSpec struct {
 	// +optional
 	ClientCASecret *corev1.LocalObjectReference `json:"clientCASecret,omitempty"`
 
+	// AutoTLS 는 cert-manager 통합을 통해 server/client TLS Secret 을 자동 발급한다.
+	// 본 표면이 설정되어 있고 ServerTLSSecret/ClientTLSSecret 이 비어 있으면
+	// operator 가 cert-manager Certificate CR 을 생성해 Secret 발급을 위임한다.
+	// CNPG 의 cert-manager 통합 패턴과 호환되는 표면 (T29).
+	// +optional
+	AutoTLS *PoolerAutoTLSSpec `json:"autoTLS,omitempty"`
+
 	// Exporter 는 PgBouncer Prometheus exporter sidecar 설정이다.
 	// +optional
 	Exporter *PgBouncerExporterSpec `json:"exporter,omitempty"`
+}
+
+// PoolerAutoTLSSpec 은 cert-manager Issuer/ClusterIssuer 를 통한 자동 TLS Secret 발급 설정이다.
+// PoolerReconciler 는 본 spec 으로 cert-manager `Certificate` CR 을 생성하고,
+// cert-manager 가 자동으로 발급한 Secret 을 PgBouncer Deployment 에 mount 한다.
+//
+// 발급되는 Secret 이름 규칙:
+//   - Server: `<pooler-name>-server-tls`
+//   - Client: `<pooler-name>-client-tls`
+//
+// 사용자가 ServerTLSSecret/ClientTLSSecret 을 명시한 경우 자동 발급보다 우선한다.
+type PoolerAutoTLSSpec struct {
+	// IssuerRef 는 cert-manager Issuer 또는 ClusterIssuer 참조다.
+	// +kubebuilder:validation:Required
+	IssuerRef PoolerCertIssuerRef `json:"issuerRef"`
+
+	// ServerEnabled=true 이면 server (PostgreSQL backend 연결용) TLS Secret 을 자동 발급한다.
+	// +kubebuilder:default=false
+	// +optional
+	ServerEnabled bool `json:"serverEnabled,omitempty"`
+
+	// ClientEnabled=true 이면 client (외부 application 연결 수용) TLS Secret 을 자동 발급한다.
+	// +kubebuilder:default=true
+	// +optional
+	ClientEnabled bool `json:"clientEnabled,omitempty"`
+
+	// CommonName 은 발급될 Certificate 의 commonName 이다. 빈 값이면 Pooler Service DNS 를 사용한다.
+	// +optional
+	CommonName string `json:"commonName,omitempty"`
+
+	// DNSNames 는 발급될 Certificate 의 추가 SANs 이다. 기본값은 Pooler Service 의
+	// `<pooler>.<ns>.svc` 와 `<pooler>.<ns>.svc.cluster.local` 이며, 사용자 지정 항목이 있으면
+	// 기본값에 union 된다.
+	// +optional
+	DNSNames []string `json:"dnsNames,omitempty"`
+}
+
+// PoolerCertIssuerRef 는 cert-manager Issuer 또는 ClusterIssuer 참조다.
+type PoolerCertIssuerRef struct {
+	// Name 은 cert-manager Issuer/ClusterIssuer 이름이다.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+
+	// Kind 는 `Issuer` (namespace-scoped) 또는 `ClusterIssuer` (cluster-scoped) 중 하나다.
+	// +kubebuilder:validation:Enum=Issuer;ClusterIssuer
+	// +kubebuilder:default=Issuer
+	// +optional
+	Kind string `json:"kind,omitempty"`
 }
 
 // PgBouncerExporterSpec 은 PgBouncer metrics sidecar 계약이다.

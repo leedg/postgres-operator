@@ -158,6 +158,58 @@ spec:
                         type: string
                     type: object
                     x-kubernetes-map-type: atomic
+                  autoTLS:
+                    description: |-
+                      AutoTLS 는 cert-manager 통합을 통해 server/client TLS Secret 을 자동 발급한다.
+                      본 표면이 설정되어 있고 ServerTLSSecret/ClientTLSSecret 이 비어 있으면
+                      operator 가 cert-manager Certificate CR 을 생성해 Secret 발급을 위임한다.
+                      CNPG 의 cert-manager 통합 패턴과 호환되는 표면 (T29).
+                    properties:
+                      clientEnabled:
+                        default: true
+                        description: ClientEnabled=true 이면 client (외부 application
+                          연결 수용) TLS Secret 을 자동 발급한다.
+                        type: boolean
+                      commonName:
+                        description: CommonName 은 발급될 Certificate 의 commonName 이다.
+                          빈 값이면 Pooler Service DNS 를 사용한다.
+                        type: string
+                      dnsNames:
+                        description: |-
+                          DNSNames 는 발급될 Certificate 의 추가 SANs 이다. 기본값은 Pooler Service 의
+                          `<pooler>.<ns>.svc` 와 `<pooler>.<ns>.svc.cluster.local` 이며, 사용자 지정 항목이 있으면
+                          기본값에 union 된다.
+                        items:
+                          type: string
+                        type: array
+                      issuerRef:
+                        description: IssuerRef 는 cert-manager Issuer 또는 ClusterIssuer
+                          참조다.
+                        properties:
+                          kind:
+                            default: Issuer
+                            description: Kind 는 `Issuer` (namespace-scoped) 또는 `ClusterIssuer`
+                              (cluster-scoped) 중 하나다.
+                            enum:
+                            - Issuer
+                            - ClusterIssuer
+                            type: string
+                          name:
+                            description: Name 은 cert-manager Issuer/ClusterIssuer
+                              이름이다.
+                            minLength: 1
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      serverEnabled:
+                        default: false
+                        description: ServerEnabled=true 이면 server (PostgreSQL backend
+                          연결용) TLS Secret 을 자동 발급한다.
+                        type: boolean
+                    required:
+                    - issuerRef
+                    type: object
                   clientCASecret:
                     description: ClientCASecret 은 클라이언트 인증서를 검증할 ca.crt Secret 이다.
                     properties:

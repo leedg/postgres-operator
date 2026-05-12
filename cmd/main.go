@@ -38,6 +38,7 @@ import (
 	postgresv1alpha1 "github.com/keiailab/postgres-operator/api/v1alpha1"
 	"github.com/keiailab/postgres-operator/internal/controller"
 	"github.com/keiailab/postgres-operator/internal/plugin"
+	pluginbackuppgbackrest "github.com/keiailab/postgres-operator/internal/plugin/backup/pgbackrest"
 	pluginextpgaudit "github.com/keiailab/postgres-operator/internal/plugin/extension/pgaudit"
 	pluginextpgcron "github.com/keiailab/postgres-operator/internal/plugin/extension/pgcron"
 	pluginextpgnodemx "github.com/keiailab/postgres-operator/internal/plugin/extension/pgnodemx"
@@ -207,8 +208,8 @@ func main() {
 	pluginextpgnodemx.Register(plugins) // order=300 (pgMonitor 의존)
 	pluginextpostgis.Register(plugins)  // order=300
 	pluginextsetuser.Register(plugins)  // order=300 (PgUser 권한 모델)
-	// 향후 P4(BackupPlugin), P6(ExporterPlugin), P7(AuthPlugin), P12(RouterPlugin)
-	// 등록 위치.
+	pluginbackuppgbackrest.Register(plugins)
+	// 향후 P6(ExporterPlugin), P7(AuthPlugin), P12(RouterPlugin) 등록 위치.
 
 	// Feature gates는 현재 placeholder. P10-T4(extension version pinning)에서
 	// CLI 플래그로 노출된다. PG18 활성화 시 "PostgresEighteen": true 추가.
@@ -217,6 +218,11 @@ func main() {
 	// 0.3.0-alpha (ADR 0001): 자체 분산 SQL metadata sync는 RFC 0002 ShardRange CRD
 	// + RFC 0004 stateless QueryRouter 로 단계 도입된다. 외부 backend SQL executor
 	// 부트스트랩은 ADR 0003 정책상 영구 제거.
+	podExecutor, err := controller.NewKubernetesBackupSidecarExecutor(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create pod exec executor")
+		os.Exit(1)
+	}
 
 	if err := (&controller.PostgresClusterReconciler{
 		Client:       mgr.GetClient(),
@@ -228,14 +234,49 @@ func main() {
 		os.Exit(1)
 	}
 
-	// P1-1 phase 1 — BackupJob reconciler 골격 등록 (RFC 0004 §3).
-	// BackupPlugin 실 호출은 phase 2 (별도 PR)에서.
+	// BackupJob reconciler 등록 (RFC 0004 §3). in-process BackupPlugin 호출과
+	// executionMode=job runner Job lifecycle 을 모두 처리한다.
 	if err := (&controller.BackupJobReconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Plugins: plugins,
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Plugins:         plugins,
+		SidecarExecutor: podExecutor,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BackupJob")
+		os.Exit(1)
+	}
+
+	if err := (&controller.PostgresDatabaseReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		SQLExecutor: podExecutor,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "PostgresDatabase")
+		os.Exit(1)
+	}
+
+	if err := (&controller.PostgresUserReconciler{
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		SQLExecutor: podExecutor,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "PostgresUser")
+		os.Exit(1)
+	}
+
+	if err := (&controller.ScheduledBackupReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "ScheduledBackup")
+		os.Exit(1)
+	}
+
+	if err := (&controller.PoolerReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "Pooler")
 		os.Exit(1)
 	}
 

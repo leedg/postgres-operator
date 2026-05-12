@@ -57,6 +57,26 @@ func RouterConfigMapName(cluster string) string {
 	return fmt.Sprintf("%s-router-config", cluster)
 }
 
+// PoolerDeploymentName 은 Pooler CR 이 소유하는 PgBouncer Deployment 이름이다.
+func PoolerDeploymentName(pooler string) string {
+	return fmt.Sprintf("%s-pooler", pooler)
+}
+
+// PoolerServiceName 은 application 이 접속하는 PgBouncer Service 이름이다.
+func PoolerServiceName(pooler string) string {
+	return fmt.Sprintf("%s-pooler", pooler)
+}
+
+// PoolerConfigMapName 은 pgbouncer.ini 를 담는 ConfigMap 이름이다.
+func PoolerConfigMapName(pooler string) string {
+	return fmt.Sprintf("%s-pooler-config", pooler)
+}
+
+// PoolerPDBName 은 Pooler CR 이 소유하는 PodDisruptionBudget 이름이다.
+func PoolerPDBName(pooler string) string {
+	return fmt.Sprintf("%s-pooler-pdb", pooler)
+}
+
 // InstanceServiceAccountName 은 cluster 단위 instance manager ServiceAccount 이름.
 // 모든 shard Pod 가 동일 SA 를 공유 — namespace 안 leases + 자기 PVC patch 권한.
 func InstanceServiceAccountName(cluster string) string {

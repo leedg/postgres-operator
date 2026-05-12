@@ -48,3 +48,21 @@ func BuildShardPDB(cluster *postgresv1alpha1.PostgresCluster, shardOrdinal, memb
 		},
 	}
 }
+
+// BuildPoolerPDB — Pooler 별 PodDisruptionBudget. instances=3 이면
+// minAvailable=2 로 voluntary disruption 중에도 접속 계층 과반을 유지한다.
+func BuildPoolerPDB(pooler *postgresv1alpha1.Pooler, instances int32) *policyv1.PodDisruptionBudget {
+	minAvailable := intstr.FromInt(int(instances) - 1)
+	labels := poolerLabels(pooler)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      PoolerPDBName(pooler.Name),
+			Namespace: pooler.Namespace,
+			Labels:    labels,
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			Selector:     &metav1.LabelSelector{MatchLabels: labels},
+			MinAvailable: &minAvailable,
+		},
+	}
+}

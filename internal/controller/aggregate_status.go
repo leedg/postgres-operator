@@ -94,6 +94,8 @@ func aggregateShardStatus(
 			Endpoint: st.Endpoint,
 			Ready:    ready,
 			LagBytes: maxInt64(0, st.LagBytes), // -1 (unknown) → 0 표기 (status schema 가 음수 부재).
+			Reason:   st.Reason,
+			Message:  st.Message,
 		}
 		switch st.Role {
 		case statusapi.RolePrimary:

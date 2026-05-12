@@ -70,11 +70,119 @@ metadata:
               }
             }
           }
+        },
+        {
+          "apiVersion": "postgres.keiailab.io/v1alpha1",
+          "kind": "BackupJob",
+          "metadata": {
+            "name": "quickstart-full-backup",
+            "namespace": "default"
+          },
+          "spec": {
+            "cluster": {
+              "name": "quickstart"
+            },
+            "tool": "pgbackrest",
+            "repo": "repo1",
+            "type": "full",
+            "executionMode": "job",
+            "jobTemplate": {
+              "spec": {
+                "backoffLimit": 1,
+                "template": {
+                  "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                      {
+                        "name": "pgbackrest",
+                        "image": "ghcr.io/keiailab/pg:18",
+                        "command": [
+                          "/bin/sh",
+                          "-c"
+                        ],
+                        "args": [
+                          "pgbackrest --stanza=\"${POSTGRES_CLUSTER_NAME}\" --repo=\"${BACKUP_REPO}\" backup --type=\"${BACKUP_TYPE}\""
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "apiVersion": "postgres.keiailab.io/v1alpha1",
+          "kind": "ScheduledBackup",
+          "metadata": {
+            "name": "quickstart-nightly-backup",
+            "namespace": "default"
+          },
+          "spec": {
+            "schedule": "0 0 2 * * *",
+            "cluster": {
+              "name": "quickstart"
+            },
+            "tool": "pgbackrest",
+            "repo": "repo1",
+            "type": "full",
+            "executionMode": "job",
+            "backupOwnerReference": "self",
+            "jobTemplate": {
+              "spec": {
+                "backoffLimit": 1,
+                "template": {
+                  "spec": {
+                    "restartPolicy": "Never",
+                    "containers": [
+                      {
+                        "name": "pgbackrest",
+                        "image": "ghcr.io/keiailab/pg:18",
+                        "command": [
+                          "/bin/sh",
+                          "-c"
+                        ],
+                        "args": [
+                          "pgbackrest --stanza=\"${POSTGRES_CLUSTER_NAME}\" --repo=\"${BACKUP_REPO}\" backup --type=\"${BACKUP_TYPE}\""
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "apiVersion": "postgres.keiailab.io/v1alpha1",
+          "kind": "Pooler",
+          "metadata": {
+            "name": "quickstart-rw",
+            "namespace": "default"
+          },
+          "spec": {
+            "cluster": {
+              "name": "quickstart"
+            },
+            "instances": 3,
+            "type": "rw",
+            "pgbouncer": {
+              "image": "ghcr.io/cloudnative-pg/pgbouncer:1.24.1",
+              "poolMode": "transaction",
+              "authSecretRef": {
+                "name": "quickstart-pooler-auth"
+              },
+              "parameters": {
+                "default_pool_size": "20",
+                "max_client_conn": "1000"
+              }
+            }
+          }
         }
       ]
     capabilities: Seamless Upgrades
     categories: Database, Storage
-    containerImage: ghcr.io/keiailab/postgres-operator:0.3.0-alpha.15
+    containerImage: ghcr.io/keiailab/postgres-operator:0.3.0-alpha.17
     createdAt: "2026-05-10T00:00:00Z"
     description: |
       Apache-2.0 PostgreSQL Kubernetes Operator — vanilla PG18+, license-clean,
@@ -94,11 +202,22 @@ spec:
       kind: BackupJob
       name: backupjobs.postgres.keiailab.io
       version: v1alpha1
+    - description: Pooler 는 PostgresCluster 대상 PgBouncer connection pool 계층을 선언한다.
+      displayName: Pooler
+      kind: Pooler
+      name: poolers.postgres.keiailab.io
+      version: v1alpha1
     - description: PostgresCluster 는 K8s-native 자체 분산 PostgreSQL 클러스터의 선언적 표현이다 (ADR
         0001).
       displayName: Postgres Cluster
       kind: PostgresCluster
       name: postgresclusters.postgres.keiailab.io
+      version: v1alpha1
+    - description: ScheduledBackup 은 cron schedule 에 따라 PostgresCluster 대상 BackupJob
+        을 생성한다.
+      displayName: Scheduled Backup
+      kind: ScheduledBackup
+      name: scheduledbackups.postgres.keiailab.io
       version: v1alpha1
   description: |
     # Postgres Operator
@@ -116,8 +235,10 @@ spec:
     - **PG17 + PG18 multi-major support** — runtime image build/load via
       `hack/smoke.sh`, kind cluster smoke includes psql round-trip +
       streaming replication assertion.
-    - **pgBackRest integration** — BackupJob CRD reconciles pgBackRest backup
-      Jobs (full / differential / incremental).
+    - **pgBackRest integration** — BackupJob CRD reconciles backup/restore
+      Jobs and ScheduledBackup creates cron-driven BackupJobs.
+    - **PgBouncer Pooler** — Pooler CRD reconciles ConfigMap, Deployment,
+      Service, and fail-closed userlist Secret validation.
     - **Supply chain** — Cosign signed container images + SBOM (SPDX-2.3).
     - **Security baseline** — Pod Security Standards Restricted, RBAC
       least-privilege, NetworkPolicy isolation, non-root runAsUser.
@@ -125,7 +246,7 @@ spec:
     ## Documentation
 
     - GitHub: https://github.com/keiailab/postgres-operator
-    - Helm Chart: https://artifacthub.io/packages/helm/postgresql-operator/postgresql-operator
+    - Helm Repository: https://keiailab.github.io/postgres-operator
     - Discussions: https://github.com/keiailab/postgres-operator/discussions
 
     ## Prerequisites
@@ -165,8 +286,8 @@ spec:
     url: https://github.com/keiailab/postgres-operator
   - name: Documentation
     url: https://github.com/keiailab/postgres-operator/blob/main/README.md
-  - name: Helm Chart (ArtifactHub)
-    url: https://artifacthub.io/packages/helm/postgresql-operator/postgresql-operator
+  - name: Helm Repository
+    url: https://keiailab.github.io/postgres-operator
   - name: Discussions
     url: https://github.com/keiailab/postgres-operator/discussions
   maintainers:

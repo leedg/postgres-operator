@@ -20,6 +20,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -175,7 +177,355 @@ var _ = Describe("PostgresClusterReconciler — RFC 0001 spec", func() {
 			}, envtestTimeout, envtestInterval).Should(Succeed())
 		})
 	})
+
+	Context("when cnpg-compatible hibernation annotation is enabled", func() {
+		It("scales database Pods to zero while keeping StatefulSet/PVC ownership and reports hibernation", func() {
+			cluster := &postgresv1alpha1.PostgresCluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sleepy",
+					Namespace: namespace,
+					Annotations: map[string]string{
+						AnnotationHibernation: "on",
+					},
+				},
+				Spec: postgresv1alpha1.PostgresClusterSpec{
+					PostgresVersion: "18",
+					ShardingMode:    postgresv1alpha1.ShardingModeNone,
+					Shards: postgresv1alpha1.ShardsSpec{
+						InitialCount: 1,
+						Replicas:     1,
+						Storage: postgresv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			stsName := ShardStatefulSetName("sleepy", 0)
+			Eventually(func(g Gomega) {
+				var sts appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: stsName}, &sts)).To(Succeed())
+				g.Expect(sts.Spec.Replicas).NotTo(BeNil())
+				g.Expect(*sts.Spec.Replicas).To(Equal(int32(0)))
+				g.Expect(sts.Spec.VolumeClaimTemplates).To(HaveLen(1), "StatefulSet must retain PVC template while hibernated")
+
+				var got postgresv1alpha1.PostgresCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "sleepy"}, &got)).To(Succeed())
+				g.Expect(got.Status.Phase).To(Equal(postgresv1alpha1.ClusterPhaseHibernated))
+				cond := meta.FindStatusCondition(got.Status.Conditions, ConditionHibernation)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(cond.Reason).To(Equal(ReasonHibernated))
+				g.Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionReady).Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(got.Status.Shards).To(HaveLen(1))
+				g.Expect(got.Status.Shards[0].Primary).To(BeNil())
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+
+			By("rehydrating when annotation is set to off")
+			Eventually(func() error {
+				var got postgresv1alpha1.PostgresCluster
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(cluster), &got); err != nil {
+					return err
+				}
+				got.Annotations[AnnotationHibernation] = "off"
+				return k8sClient.Update(ctx, &got)
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				var sts appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: stsName}, &sts)).To(Succeed())
+				g.Expect(sts.Spec.Replicas).NotTo(BeNil())
+				g.Expect(*sts.Spec.Replicas).To(Equal(int32(2)))
+
+				var got postgresv1alpha1.PostgresCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "sleepy"}, &got)).To(Succeed())
+				cond := meta.FindStatusCondition(got.Status.Conditions, ConditionHibernation)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(ReasonNotHibernated))
+				g.Expect(got.Status.Phase).NotTo(Equal(postgresv1alpha1.ClusterPhaseHibernated))
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+		})
+	})
+
+	Context("when imageCatalogRef selects a runtime image", func() {
+		It("uses the catalog image and rolls the StatefulSet when the catalog entry changes", func() {
+			catalog := &postgresv1alpha1.ImageCatalog{
+				ObjectMeta: metav1.ObjectMeta{Name: "postgresql", Namespace: namespace},
+				Spec: postgresv1alpha1.ImageCatalogSpec{
+					Images: []postgresv1alpha1.ImageCatalogEntry{{
+						Major: 18,
+						Image: "registry.local/postgres:18.1",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, catalog)).To(Succeed())
+
+			cluster := &postgresv1alpha1.PostgresCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cataloged", Namespace: namespace},
+				Spec: postgresv1alpha1.PostgresClusterSpec{
+					PostgresVersion: "18",
+					ImageCatalogRef: &postgresv1alpha1.ImageCatalogRef{
+						APIGroup: "postgresql.cnpg.io",
+						Kind:     "ImageCatalog",
+						Name:     "postgresql",
+						Major:    18,
+					},
+					ShardingMode: postgresv1alpha1.ShardingModeNone,
+					Shards: postgresv1alpha1.ShardsSpec{
+						InitialCount: 1,
+						Replicas:     1,
+						Storage: postgresv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			stsName := ShardStatefulSetName("cataloged", 0)
+			var firstCatalogHash string
+			Eventually(func(g Gomega) {
+				var sts appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: stsName}, &sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+				g.Expect(sts.Spec.Template.Spec.InitContainers[0].Image).To(Equal("registry.local/postgres:18.1"))
+				g.Expect(sts.Spec.Template.Spec.Containers).To(HaveLen(1))
+				g.Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.local/postgres:18.1"))
+				firstCatalogHash = sts.Spec.Template.Annotations[postgresImageCatalogHashAnnotation]
+				g.Expect(firstCatalogHash).NotTo(BeEmpty())
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+
+			By("updating the catalog entry")
+			Eventually(func() error {
+				var got postgresv1alpha1.ImageCatalog
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(catalog), &got); err != nil {
+					return err
+				}
+				got.Spec.Images[0].Image = "registry.local/postgres:18.2"
+				return k8sClient.Update(ctx, &got)
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				var sts appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: stsName}, &sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.InitContainers[0].Image).To(Equal("registry.local/postgres:18.2"))
+				g.Expect(sts.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.local/postgres:18.2"))
+				g.Expect(sts.Spec.Template.Annotations[postgresImageCatalogHashAnnotation]).NotTo(Equal(firstCatalogHash))
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+		})
+	})
+
+	Context("when configured as a standalone replica cluster", func() {
+		It("bootstraps ordinal zero from the external source and disables local promotion", func() {
+			cluster := &postgresv1alpha1.PostgresCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "replica", Namespace: namespace},
+				Spec: postgresv1alpha1.PostgresClusterSpec{
+					PostgresVersion: "18",
+					ShardingMode:    postgresv1alpha1.ShardingModeNone,
+					ExternalClusters: []postgresv1alpha1.ExternalClusterSpec{{
+						Name: "primary-eu",
+						ConnectionParameters: map[string]string{
+							"host":    "primary-eu-rw.data.svc",
+							"port":    "5432",
+							"user":    "streaming_replica",
+							"dbname":  "postgres",
+							"sslmode": "prefer",
+						},
+						Password: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "primary-eu-password"},
+							Key:                  "password",
+						},
+						SSLKey: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "primary-eu-replication"},
+							Key:                  "tls.key",
+						},
+						SSLCert: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "primary-eu-replication"},
+							Key:                  "tls.crt",
+						},
+						SSLRootCert: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "primary-eu-ca"},
+							Key:                  "ca.crt",
+						},
+					}},
+					Bootstrap: &postgresv1alpha1.BootstrapSpec{
+						PgBaseBackup: &postgresv1alpha1.PgBaseBackupBootstrapSpec{
+							Source: "primary-eu",
+						},
+					},
+					Replica: &postgresv1alpha1.ReplicaClusterSpec{
+						Enabled: true,
+						Source:  "primary-eu",
+					},
+					Shards: postgresv1alpha1.ShardsSpec{
+						InitialCount: 1,
+						Replicas:     0,
+						Storage: postgresv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			stsName := ShardStatefulSetName("replica", 0)
+			Eventually(func(g Gomega) {
+				var sts appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: stsName}, &sts)).To(Succeed())
+				g.Expect(sts.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+				init := sts.Spec.Template.Spec.InitContainers[0]
+				initEnv := envMap(init.Env)
+				g.Expect(initEnv["PRIMARY_ENDPOINT"].Value).To(Equal("primary-eu-rw.data.svc:5432"))
+				g.Expect(initEnv["PRIMARY_USER"].Value).To(Equal("streaming_replica"))
+				g.Expect(initEnv["PRIMARY_DBNAME"].Value).To(Equal("postgres"))
+				g.Expect(initEnv["PRIMARY_SSLMODE"].Value).To(Equal("prefer"))
+				g.Expect(initEnv["REPLICA_CLUSTER_ENABLED"].Value).To(Equal("1"))
+				g.Expect(initEnv["PRIMARY_PASSWORD"].ValueFrom.SecretKeyRef.Name).To(Equal("primary-eu-password"))
+				g.Expect(initEnv["PRIMARY_PASSWORD"].ValueFrom.SecretKeyRef.Key).To(Equal("password"))
+				g.Expect(initEnv["PRIMARY_SSLKEY_FILE"].Value).To(Equal("/etc/postgres-external/source/tls.key"))
+				g.Expect(initEnv["PRIMARY_SSLCERT_FILE"].Value).To(Equal("/etc/postgres-external/source/tls.crt"))
+				g.Expect(initEnv["PRIMARY_SSLROOTCERT_FILE"].Value).To(Equal("/etc/postgres-external/source/ca.crt"))
+				g.Expect(init.Args).To(HaveLen(1))
+				g.Expect(init.Args[0]).To(ContainSubstring(`REPLICA_CLUSTER_ENABLED`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`pg_basebackup`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`-d "$PRIMARY_CONNINFO"`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`passfile=/tmp/primary.pgpass`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`sslkey=/tmp/primary-client.key`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`sslcert=/tmp/primary-client.crt`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`sslrootcert=/tmp/primary-root.crt`))
+				g.Expect(init.Args[0]).To(ContainSubstring(`standby.signal`))
+				g.Expect(init.VolumeMounts).To(ContainElement(corev1.VolumeMount{
+					Name:      "external-cluster-credentials",
+					MountPath: "/etc/postgres-external/source",
+					ReadOnly:  true,
+				}))
+
+				mainEnv := envMap(sts.Spec.Template.Spec.Containers[0].Env)
+				g.Expect(mainEnv["PRIMARY_ENDPOINT"].Value).To(Equal("primary-eu-rw.data.svc:5432"))
+				g.Expect(mainEnv["POSTGRES_REPLICA_CLUSTER"].Value).To(Equal("standalone"))
+
+				var credentialVolume *corev1.Volume
+				for i := range sts.Spec.Template.Spec.Volumes {
+					if sts.Spec.Template.Spec.Volumes[i].Name == "external-cluster-credentials" {
+						credentialVolume = &sts.Spec.Template.Spec.Volumes[i]
+					}
+				}
+				g.Expect(credentialVolume).NotTo(BeNil())
+				g.Expect(credentialVolume.Projected).NotTo(BeNil())
+				g.Expect(credentialVolume.Projected.Sources).To(HaveLen(3))
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+		})
+
+		It("rejects an invalid external source before creating database pods", func() {
+			cluster := &postgresv1alpha1.PostgresCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-replica", Namespace: namespace},
+				Spec: postgresv1alpha1.PostgresClusterSpec{
+					PostgresVersion: "18",
+					ShardingMode:    postgresv1alpha1.ShardingModeNone,
+					ExternalClusters: []postgresv1alpha1.ExternalClusterSpec{{
+						Name: "primary-eu",
+						ConnectionParameters: map[string]string{
+							"port": "5432",
+						},
+					}},
+					Bootstrap: &postgresv1alpha1.BootstrapSpec{
+						PgBaseBackup: &postgresv1alpha1.PgBaseBackupBootstrapSpec{
+							Source: "primary-eu",
+						},
+					},
+					Replica: &postgresv1alpha1.ReplicaClusterSpec{
+						Enabled: true,
+						Source:  "primary-eu",
+					},
+					Shards: postgresv1alpha1.ShardsSpec{
+						InitialCount: 1,
+						Replicas:     0,
+						Storage: postgresv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				var got postgresv1alpha1.PostgresCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "bad-replica"}, &got)).To(Succeed())
+				g.Expect(got.Status.Phase).To(Equal(postgresv1alpha1.ClusterPhaseDegraded))
+				g.Expect(got.Status.ObservedGeneration).To(Equal(got.Generation))
+
+				ready := meta.FindStatusCondition(got.Status.Conditions, ConditionReady)
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Reason).To(Equal(ReasonReplicaClusterRejected))
+				g.Expect(ready.Message).To(ContainSubstring("connectionParameters.host is required"))
+
+				progressing := meta.FindStatusCondition(got.Status.Conditions, ConditionProgressing)
+				g.Expect(progressing).NotTo(BeNil())
+				g.Expect(progressing.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(progressing.Reason).To(Equal(ReasonReplicaClusterRejected))
+
+				var sts appsv1.StatefulSet
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace,
+					Name:      ShardStatefulSetName("bad-replica", 0),
+				}, &sts)
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+		})
+	})
+
+	Context("when PostgresUser CRs target the cluster", func() {
+		It("publishes managedRolesStatus on the owning PostgresCluster", func() {
+			user := newManagedRoleUser("app", "roles")
+			user.Namespace = namespace
+			Expect(k8sClient.Create(ctx, user)).To(Succeed())
+			Eventually(func(g Gomega) {
+				var got postgresv1alpha1.PostgresUser
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(user), &got)).To(Succeed())
+				got.Status.Applied = true
+				got.Status.ObservedGeneration = got.Generation
+				got.Status.PasswordSecretResourceVersion = "rv-envtest"
+				g.Expect(k8sClient.Status().Update(ctx, &got)).To(Succeed())
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+
+			cluster := &postgresv1alpha1.PostgresCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "roles", Namespace: namespace},
+				Spec: postgresv1alpha1.PostgresClusterSpec{
+					PostgresVersion: "18",
+					ShardingMode:    postgresv1alpha1.ShardingModeNone,
+					Shards: postgresv1alpha1.ShardsSpec{
+						InitialCount: 1,
+						Replicas:     0,
+						Storage: postgresv1alpha1.StorageSpec{
+							Size: resource.MustParse("1Gi"),
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				var got postgresv1alpha1.PostgresCluster
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: "roles"}, &got)).To(Succeed())
+				g.Expect(got.Status.ManagedRolesStatus).NotTo(BeNil())
+				g.Expect(got.Status.ManagedRolesStatus.ByStatus["reconciled"]).To(ContainElement("app"))
+				g.Expect(got.Status.ManagedRolesStatus.ByStatus["reserved"]).To(ContainElements("postgres", "streaming_replica"))
+				g.Expect(got.Status.ManagedRolesStatus.PasswordStatus["app"].SecretResourceVersion).To(Equal("rv-envtest"))
+			}, envtestTimeout, envtestInterval).Should(Succeed())
+		})
+	})
 })
+
+func envMap(env []corev1.EnvVar) map[string]corev1.EnvVar {
+	out := make(map[string]corev1.EnvVar, len(env))
+	for _, item := range env {
+		out[item.Name] = item
+	}
+	return out
+}
 
 // markSTSReady 는 envtest 에서 부재한 STS controller 를 흉내내어 readyReplicas 를
 // 강제로 설정한다. status subresource 라 별도 Update 호출이 필요하다.

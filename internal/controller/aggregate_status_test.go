@@ -16,7 +16,10 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -56,6 +59,15 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	if err := corev1.AddToScheme(s); err != nil {
 		t.Fatalf("add corev1: %v", err)
 	}
+	if err := appsv1.AddToScheme(s); err != nil {
+		t.Fatalf("add appsv1: %v", err)
+	}
+	if err := batchv1.AddToScheme(s); err != nil {
+		t.Fatalf("add batchv1: %v", err)
+	}
+	if err := policyv1.AddToScheme(s); err != nil {
+		t.Fatalf("add policyv1: %v", err)
+	}
 	if err := postgresv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add postgres v1alpha1: %v", err)
 	}
@@ -87,6 +99,31 @@ func TestAggregateShardStatus_PrimaryAndReplica(t *testing.T) {
 	}
 	if out.Replicas[0].LagBytes != 1024 {
 		t.Errorf("Replica LagBytes = %d, want 1024", out.Replicas[0].LagBytes)
+	}
+}
+
+func TestAggregateShardStatus_PropagatesInstanceReasonAndMessage(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	pod := makePod("demo-shard-0-0", statusapi.Status{
+		Role:       statusapi.RoleReplica,
+		Ready:      false,
+		Endpoint:   "demo-shard-0-0.svc:5432",
+		Reason:     "RejoinPreparationFailed",
+		Message:    "pg_rewind failed; basebackup fallback failed",
+		LastUpdate: now,
+	}, true)
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(pod).Build()
+
+	out := aggregateShardStatus(context.Background(), c, newCluster(), 0, "demo-shard-0-headless")
+	if len(out.Replicas) != 1 {
+		t.Fatalf("replicas = %d, want 1", len(out.Replicas))
+	}
+	if out.Replicas[0].Reason != "RejoinPreparationFailed" {
+		t.Fatalf("replica reason = %q, want RejoinPreparationFailed", out.Replicas[0].Reason)
+	}
+	if out.Replicas[0].Message != "pg_rewind failed; basebackup fallback failed" {
+		t.Fatalf("replica message = %q", out.Replicas[0].Message)
 	}
 }
 

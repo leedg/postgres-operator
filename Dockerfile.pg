@@ -44,8 +44,13 @@ COPY --from=instance-builder /out/instance /usr/local/bin/instance
 # 비 root 운영 — postgres user (ADR 0006 dataplanePodSecurityContext UID 70).
 # postgres 공식 이미지의 postgres user 가 UID/GID 999 인데, ADR 0006 은 70 으로 동결.
 # K8s SecurityContext 가 runAsUser=70 강제하므로 image 안에 user 70 추가.
+# pgBackRest 는 BackupJob executionMode=job runner 와 후속 sidecar exec 가 같은
+# PG runtime image 를 재사용할 수 있도록 포함한다.
 USER root
-RUN groupadd -g 70 pg-keiailab \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pgbackrest \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 70 pg-keiailab \
     && useradd -u 70 -g 70 -m -d /var/lib/postgresql-keiailab -s /bin/bash pg-keiailab \
     && chmod 755 /usr/local/bin/instance
 USER 70:70

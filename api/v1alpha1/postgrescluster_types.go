@@ -281,6 +281,83 @@ type MonitoringSpec struct {
 	PrometheusRule *PrometheusRuleSpec `json:"prometheusRule,omitempty"`
 }
 
+// ExternalClusterSpec 는 replica cluster/bootstrap source 로 사용할 외부 PostgreSQL
+// cluster 접속 정보를 정의한다. CloudNativePG 의 externalClusters 표면과 호환되는
+// 최소 streaming path 부터 제공한다.
+type ExternalClusterSpec struct {
+	// Name 은 bootstrap/replica.source 에서 참조할 이름이다.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// ConnectionParameters 는 PostgreSQL connection string key/value 이다.
+	// 지원 key: host, port, user, dbname, sslmode. host 는 필수이고 port 는
+	// 미지정 시 5432 로 default 된다.
+	// +optional
+	ConnectionParameters map[string]string `json:"connectionParameters,omitempty"`
+
+	// Password 는 libpq password 인증에 사용할 Secret key 참조다.
+	// CloudNativePG externalClusters[].password 와 같은 형태다.
+	// +optional
+	Password *corev1.SecretKeySelector `json:"password,omitempty"`
+
+	// SSLKey 는 client certificate 인증에 사용할 private key Secret key 참조다.
+	// +optional
+	SSLKey *corev1.SecretKeySelector `json:"sslKey,omitempty"`
+
+	// SSLCert 는 client certificate 인증에 사용할 certificate Secret key 참조다.
+	// +optional
+	SSLCert *corev1.SecretKeySelector `json:"sslCert,omitempty"`
+
+	// SSLRootCert 는 source cluster server certificate 검증에 사용할 CA Secret key 참조다.
+	// +optional
+	SSLRootCert *corev1.SecretKeySelector `json:"sslRootCert,omitempty"`
+}
+
+// PgBaseBackupBootstrapSpec 은 외부 cluster 로부터 pg_basebackup 을 수행하는
+// bootstrap 모드다.
+type PgBaseBackupBootstrapSpec struct {
+	// Source 는 spec.externalClusters[].name 을 참조한다.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Required
+	Source string `json:"source"`
+}
+
+// BootstrapSpec 은 cluster bootstrap 방식을 표현한다.
+type BootstrapSpec struct {
+	// PgBaseBackup 은 streaming replication protocol 을 통해 외부 source 에서
+	// 물리 base backup 을 가져오는 bootstrap 방식이다.
+	// +optional
+	PgBaseBackup *PgBaseBackupBootstrapSpec `json:"pg_basebackup,omitempty"`
+}
+
+// ReplicaClusterSpec 은 CloudNativePG standalone/distributed replica cluster 의
+// 선언 표면이다. 0.3.0-alpha 에서는 standalone streaming replica cluster 의
+// continuous recovery 경로를 우선 지원한다.
+type ReplicaClusterSpec struct {
+	// Enabled 는 standalone replica cluster continuous recovery 를 활성화한다.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// Source 는 spec.externalClusters[].name 을 참조한다.
+	// +optional
+	Source string `json:"source,omitempty"`
+
+	// Primary 는 distributed topology 에서 현재 global primary cluster 이름이다.
+	// 0.3.0-alpha 에서는 API 표면만 제공하고 controlled switchover 는 후속 구현이다.
+	// +optional
+	Primary string `json:"primary,omitempty"`
+
+	// Self 는 resource name 과 다른 topology-local 이름을 쓸 때 지정한다.
+	// +optional
+	Self string `json:"self,omitempty"`
+
+	// PromotionToken 은 controlled switchover/promotion 토큰이다.
+	// 0.3.0-alpha 에서는 API 표면만 제공한다.
+	// +optional
+	PromotionToken string `json:"promotionToken,omitempty"`
+}
+
 // PostgresClusterSpec 는 PostgresCluster CR 의 desired state 다 (RFC 0001 §3).
 //
 // CEL 검증 (kubebuilder v0.15+):
@@ -288,12 +365,36 @@ type MonitoringSpec struct {
 // +kubebuilder:validation:XValidation:rule="self.shardingMode != 'native' || self.shards.initialCount >= 1",message="native sharding requires shards.initialCount >= 1"
 // +kubebuilder:validation:XValidation:rule="!has(self.router) || self.shardingMode == 'native'",message="router is only valid when shardingMode=native"
 // +kubebuilder:validation:XValidation:rule="!has(self.autoSplit) || self.autoSplit.enabled == false || self.shardingMode == 'native'",message="autoSplit requires shardingMode=native"
+// +kubebuilder:validation:XValidation:rule="!has(self.postgresql) || !has(self.postgresql.synchronous) || self.shards.replicas >= self.postgresql.synchronous.number",message="postgresql.synchronous.number must be <= shards.replicas"
 type PostgresClusterSpec struct {
 	// PostgresVersion 은 메이저 버전 문자열. 0.3.0-alpha 는 18 만 GA, 17 호환 유지.
 	// +kubebuilder:validation:Enum="17";"18"
 	// +kubebuilder:default="18"
 	// +optional
 	PostgresVersion string `json:"postgresVersion,omitempty"`
+
+	// ExternalClusters 는 bootstrap/replica source 로 사용할 외부 PostgreSQL
+	// cluster 목록이다.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	ExternalClusters []ExternalClusterSpec `json:"externalClusters,omitempty"`
+
+	// Bootstrap 은 initdb 외 bootstrap 방식을 정의한다. 현재 pg_basebackup 기반
+	// streaming bootstrap 을 지원한다.
+	// +optional
+	Bootstrap *BootstrapSpec `json:"bootstrap,omitempty"`
+
+	// Replica 는 standalone/distributed replica cluster 동작을 정의한다.
+	// +optional
+	Replica *ReplicaClusterSpec `json:"replica,omitempty"`
+
+	// ImageCatalogRef 는 PostgreSQL runtime image 를 ImageCatalog 또는
+	// ClusterImageCatalog 에서 선택한다. CNPG 의 spec.imageCatalogRef 와 같은
+	// 필드 형태를 사용하며, 설정 시 PostgresVersion 대신 Major 가 image/bin dir
+	// 선택의 단일 진실원이 된다.
+	// +optional
+	ImageCatalogRef *ImageCatalogRef `json:"imageCatalogRef,omitempty"`
 
 	// ShardingMode 는 단일 샤드 (none) 또는 자체 분산 SQL (native).
 	// +kubebuilder:default=none
@@ -330,6 +431,11 @@ type PostgresClusterSpec struct {
 	//
 	// +optional
 	Extensions []string `json:"extensions,omitempty"`
+
+	// PostgreSQL 은 PostgreSQL runtime 설정이다. synchronous_standby_names 같은
+	// 직접 설정 금지 GUC 는 이 구조화된 표면으로만 생성한다.
+	// +optional
+	PostgreSQL *PostgreSQLSpec `json:"postgresql,omitempty"`
 
 	// TLS 는 PostgreSQL server-side TLS 설정 (Pillar P7 §7).
 	// 0.3.0-alpha.5+ Phase 1 facade — CRD field 만 정의. Phase 2 에서 cert-manager
@@ -383,7 +489,7 @@ type TLSIssuerRef struct {
 }
 
 // ClusterPhase 는 cluster 의 상위 단계.
-// +kubebuilder:validation:Enum=Provisioning;Ready;Reconfiguring;Degraded
+// +kubebuilder:validation:Enum=Provisioning;Ready;Reconfiguring;Degraded;Hibernated
 type ClusterPhase string
 
 const (
@@ -391,7 +497,61 @@ const (
 	ClusterPhaseReady         ClusterPhase = "Ready"
 	ClusterPhaseReconfiguring ClusterPhase = "Reconfiguring"
 	ClusterPhaseDegraded      ClusterPhase = "Degraded"
+	ClusterPhaseHibernated    ClusterPhase = "Hibernated"
 )
+
+// SynchronousReplicationMethod 는 PostgreSQL synchronous_standby_names 의
+// quorum/priority 선택 방식을 표현한다.
+// +kubebuilder:validation:Enum=any;first
+type SynchronousReplicationMethod string
+
+const (
+	// SynchronousReplicationMethodAny 는 quorum 기반 ANY N (...) 방식이다.
+	SynchronousReplicationMethodAny SynchronousReplicationMethod = "any"
+	// SynchronousReplicationMethodFirst 는 priority 기반 FIRST N (...) 방식이다.
+	SynchronousReplicationMethodFirst SynchronousReplicationMethod = "first"
+)
+
+// SynchronousReplicationDataDurability 는 동기 복제에서 내구성/가용성 우선순위다.
+// +kubebuilder:validation:Enum=required;preferred
+type SynchronousReplicationDataDurability string
+
+const (
+	// SynchronousReplicationDataDurabilityRequired 는 요청한 synchronous standby 수가
+	// 부족하면 commit 을 대기시킨다.
+	SynchronousReplicationDataDurabilityRequired SynchronousReplicationDataDurability = "required"
+	// SynchronousReplicationDataDurabilityPreferred 는 현재 Ready replica 수에 맞춰
+	// quorum 을 낮춰 write availability 를 유지한다.
+	SynchronousReplicationDataDurabilityPreferred SynchronousReplicationDataDurability = "preferred"
+)
+
+// SynchronousReplicationSpec 는 PostgreSQL physical synchronous replication 설정이다.
+// CloudNativePG 의 `.spec.postgresql.synchronous` 표면과 호환되는 최소 핵심
+// 필드(method/number/dataDurability)를 제공한다.
+type SynchronousReplicationSpec struct {
+	// Method 는 quorum(any) 또는 priority(first) 기반 동기 standby 선택 방식이다.
+	// +kubebuilder:validation:Required
+	Method SynchronousReplicationMethod `json:"method"`
+
+	// Number 는 commit 이 응답을 기다릴 synchronous standby 수다.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Required
+	Number int32 `json:"number"`
+
+	// DataDurability 는 replica 부족 시 write 를 block 할지(required), Ready replica
+	// 수에 맞춰 quorum 을 낮출지(preferred)를 결정한다.
+	// +kubebuilder:validation:Enum=required;preferred
+	// +kubebuilder:default=required
+	// +optional
+	DataDurability SynchronousReplicationDataDurability `json:"dataDurability,omitempty"`
+}
+
+// PostgreSQLSpec 는 PostgreSQL runtime configuration 표면이다.
+type PostgreSQLSpec struct {
+	// Synchronous 는 physical synchronous replication 설정이다. nil 이면 disabled.
+	// +optional
+	Synchronous *SynchronousReplicationSpec `json:"synchronous,omitempty"`
+}
 
 // ShardEndpoint 는 샤드 멤버 (primary 또는 replica) 1 개의 관찰 상태.
 type ShardEndpoint struct {
@@ -410,6 +570,14 @@ type ShardEndpoint struct {
 	// LagBytes 는 replica 의 WAL lag (bytes). primary 는 0 또는 미설정.
 	// +optional
 	LagBytes int64 `json:"lagBytes,omitempty"`
+
+	// Reason 은 endpoint 가 Ready=false 또는 degraded 인 machine-readable 원인이다.
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// Message 는 endpoint 상태의 human-readable 상세 메시지다.
+	// +optional
+	Message string `json:"message,omitempty"`
 }
 
 // ShardStatus 는 단일 샤드의 관찰 상태.
@@ -452,6 +620,35 @@ type ClusterRouterStatus struct {
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
+// ManagedRolePasswordStatus 는 managed role password 반영 상태다.
+type ManagedRolePasswordStatus struct {
+	// SecretResourceVersion 은 마지막으로 성공 반영한 password Secret resourceVersion 이다.
+	// +optional
+	SecretResourceVersion string `json:"secretResourceVersion,omitempty"`
+
+	// ObservedGeneration 은 password 를 반영한 PostgresUser generation 이다.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
+// ManagedRolesStatus 는 PostgresCluster 에 속한 PostgresUser 들의 집계 상태다.
+// CloudNativePG 의 status.managedRolesStatus 표면과 같은 byStatus /
+// cannotReconcile / passwordStatus 구성을 제공한다.
+type ManagedRolesStatus struct {
+	// ByStatus 는 상태별 role 이름 목록이다.
+	// 대표 상태: reserved, reconciled, pending-reconciliation.
+	// +optional
+	ByStatus map[string][]string `json:"byStatus,omitempty"`
+
+	// CannotReconcile 은 operator 가 자동 복구할 수 없는 role 오류를 role 별로 기록한다.
+	// +optional
+	CannotReconcile map[string][]string `json:"cannotReconcile,omitempty"`
+
+	// PasswordStatus 는 password Secret 이 성공 반영된 role 의 Secret revision 을 기록한다.
+	// +optional
+	PasswordStatus map[string]ManagedRolePasswordStatus `json:"passwordStatus,omitempty"`
+}
+
 // PostgresClusterStatus 는 PostgresCluster CR 의 관찰 상태 (RFC 0001 §3.2).
 type PostgresClusterStatus struct {
 	// Phase 는 cluster 의 상위 단계.
@@ -469,6 +666,10 @@ type PostgresClusterStatus struct {
 	// Router 는 라우터 풀 관찰 상태 (shardingMode=native 시).
 	// +optional
 	Router *ClusterRouterStatus `json:"router,omitempty"`
+
+	// ManagedRolesStatus 는 이 클러스터를 참조하는 PostgresUser CR 들의 집계 상태다.
+	// +optional
+	ManagedRolesStatus *ManagedRolesStatus `json:"managedRolesStatus,omitempty"`
 
 	// Conditions 는 K8s 표준 condition 집합.
 	// 권장 type: Ready / Progressing / BackupHealthy / AutoSplitEligible / RouterReady.

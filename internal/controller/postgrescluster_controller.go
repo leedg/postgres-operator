@@ -29,6 +29,8 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -40,17 +42,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	postgresv1alpha1 "github.com/keiailab/postgres-operator/api/v1alpha1"
+	"github.com/keiailab/postgres-operator/internal/controller/failover"
 	"github.com/keiailab/postgres-operator/internal/plugin"
 )
 
-const statusPollInterval = 5 * time.Second
+const (
+	statusPollInterval = 5 * time.Second
+
+	// AnnotationHibernation 은 CloudNativePG 의 선언형 하이버네이션 스위치와
+	// 같은 annotation 이다. cnpg.io/hibernation=on 이면 database Pod 를 0개로
+	// 줄이고 PVC 소유권은 재수화를 위해 보존한다.
+	AnnotationHibernation = "cnpg.io/hibernation"
+)
 
 // PostgresClusterReconciler 는 PostgresCluster CR 을 reconcile 한다.
 type PostgresClusterReconciler struct {
@@ -66,11 +81,18 @@ type PostgresClusterReconciler struct {
 	// §3.4. SetupWithManager 가 자동 주입 — cmd/main.go 측에서는 명시 setting
 	// 불필요. nil 이면 Eventf 호출이 panic — Setup 호출 보장 의무.
 	Recorder events.EventRecorder
+
+	// PromotionPodExecutor 는 controller-layer failover promotion 이 replica Pod
+	// 안의 postgres container 로 실행할 pods/exec 경로다. nil 이면 SetupWithManager
+	// 가 manager rest.Config 기반 production executor 를 주입한다.
+	PromotionPodExecutor BackupSidecarExecutor
 }
 
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=imagecatalogs;clusterimagecatalogs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresusers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch
@@ -110,10 +132,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	pgVersion := cluster.Spec.PostgresVersion
-	if pgVersion == "" {
-		pgVersion = "18"
-	}
+	pgVersion := imageMajorFromSpec(&cluster)
 
 	combo, ok := lookupCombo(pgVersion, r.FeatureGates)
 	if !ok {
@@ -132,6 +151,38 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		return ctrl.Result{}, nil
 	}
+	resolvedImage, err := r.resolvePostgresImage(ctx, &cluster, combo)
+	if err != nil {
+		setCondition(&cluster.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonImageCatalogRejected, err.Error())
+		setCondition(&cluster.Status.Conditions, ConditionProgressing, metav1.ConditionFalse, ReasonImageCatalogRejected,
+			"image catalog reference rejected before creating database pods")
+		cluster.Status.Phase = postgresv1alpha1.ClusterPhaseDegraded
+		cluster.Status.ObservedGeneration = cluster.Generation
+		if r.Recorder != nil {
+			r.Recorder.Eventf(&cluster, nil, corev1.EventTypeWarning, ReasonImageCatalogRejected, ReasonImageCatalogRejected, "%v", err)
+		}
+		if statusErr := r.Status().Update(ctx, &cluster); statusErr != nil {
+			logger.Error(statusErr, "Failed to update status with image catalog rejection")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
+	replicaBootstrap, err := replicaBootstrapConfigForCluster(&cluster)
+	if err != nil {
+		setCondition(&cluster.Status.Conditions, ConditionReady, metav1.ConditionFalse, ReasonReplicaClusterRejected, err.Error())
+		setCondition(&cluster.Status.Conditions, ConditionProgressing, metav1.ConditionFalse, ReasonReplicaClusterRejected,
+			"replica cluster reference rejected before creating database pods")
+		cluster.Status.Phase = postgresv1alpha1.ClusterPhaseDegraded
+		cluster.Status.ObservedGeneration = cluster.Generation
+		if r.Recorder != nil {
+			r.Recorder.Eventf(&cluster, nil, corev1.EventTypeWarning, ReasonReplicaClusterRejected, ReasonReplicaClusterRejected, "%v", err)
+		}
+		if statusErr := r.Status().Update(ctx, &cluster); statusErr != nil {
+			logger.Error(statusErr, "Failed to update status with replica cluster rejection")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
 
 	// 0. instance manager 가 사용할 RBAC (ServiceAccount + Role + RoleBinding) upsert.
 	// shard StatefulSet 보다 먼저 — Pod 가 SA reference 를 사용하므로 fail-fast 회피.
@@ -147,6 +198,11 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// 1. shard 자원 3종 upsert (ordinal 0..InitialCount-1)
 	shardCount := cluster.Spec.Shards.InitialCount
 	members := int32(1) + cluster.Spec.Shards.Replicas
+	hibernating := hibernationRequested(&cluster)
+	desiredMembers := members
+	if hibernating {
+		desiredMembers = 0
+	}
 	shardStatuses := make([]postgresv1alpha1.ShardStatus, 0, shardCount)
 	allShardPrimaryReady := true
 
@@ -155,7 +211,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		svcName := ShardServiceName(cluster.Name, ord)
 		stsName := ShardStatefulSetName(cluster.Name, ord)
 
-		if err := r.upsert(ctx, &cluster, buildConfigMap(&cluster, cmName, "shard", ord, r.Plugins)); err != nil {
+		cm := buildConfigMap(&cluster, cmName, "shard", ord, r.Plugins)
+		configHash := postgresConfigHash(cm.Data)
+		if err := r.upsert(ctx, &cluster, cm); err != nil {
 			return r.handleUpsertErr(ctx, &cluster, err, "shard ConfigMap", logger)
 		}
 		if err := r.upsert(ctx, &cluster, buildHeadlessService(&cluster, svcName, "shard", ord)); err != nil {
@@ -166,7 +224,9 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		// path 를 활성화한다. 없으면 빈 값 — bootstrap script 가 ord==0 또는 endpoint
 		// 부재일 때 자동으로 initdb path 로 fallback.
 		primaryEndpoint := ""
-		if int(ord) < len(cluster.Status.Shards) {
+		if replicaBootstrap != nil {
+			primaryEndpoint = replicaBootstrap.Endpoint
+		} else if !hibernating && int(ord) < len(cluster.Status.Shards) {
 			if p := cluster.Status.Shards[ord].Primary; p != nil {
 				primaryEndpoint = p.Endpoint
 			}
@@ -174,17 +234,18 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		desiredSTS := buildPGStatefulSet(
 			&cluster, stsName, svcName,
 			ord,
-			combo.Image, cmName, combo.PostgresMajor,
-			members,
+			resolvedImage.Image, cmName, resolvedImage.PostgresMajor,
+			desiredMembers,
 			cluster.Spec.Shards.Storage, cluster.Spec.Shards.Resources,
 			primaryEndpoint,
+			configHash,
 		)
 		if err := r.upsert(ctx, &cluster, desiredSTS); err != nil {
 			return r.handleUpsertErr(ctx, &cluster, err, "shard StatefulSet", logger)
 		}
 
 		// shard PDB (PR #31): members>=2 시 자동 생성. valkey-operator PR #49 패턴.
-		if shouldAutoCreatePDB(members) {
+		if !hibernating && shouldAutoCreatePDB(members) {
 			pdb := BuildShardPDB(&cluster, ord, members)
 			if err := r.upsert(ctx, &cluster, pdb); err != nil {
 				return r.handleUpsertErr(ctx, &cluster, err, "shard PDB", logger)
@@ -207,6 +268,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 		if !primaryReady {
 			allShardPrimaryReady = false
+		}
+		if hibernating {
+			shardStatuses = append(shardStatuses, postgresv1alpha1.ShardStatus{
+				Name:    fmt.Sprintf("shard-%d", ord),
+				Ordinal: ord,
+			})
+			continue
 		}
 		// RFC 0006 R2 — Pod annotation 기반 live aggregation. 우선 시도 후
 		// 결과가 비면 STS readyReplicas 기반 fallback (annotation 부재 시).
@@ -239,9 +307,13 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return r.handleUpsertErr(ctx, &cluster, err, "router Service", logger)
 		}
 		// router 이미지: P12-T2 까지 PG 베이스 이미지 placeholder.
+		routerReplicas := cluster.Spec.Router.Replicas
+		if hibernating {
+			routerReplicas = 0
+		}
 		desiredDep := buildRouterDeployment(
-			&cluster, depName, cmName, combo.Image,
-			cluster.Spec.Router.Replicas,
+			&cluster, depName, cmName, resolvedImage.Image,
+			routerReplicas,
 			cluster.Spec.Router.Resources,
 		)
 		if err := r.upsert(ctx, &cluster, desiredDep); err != nil {
@@ -260,7 +332,7 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			observedReady = observed.Status.ReadyReplicas
 		}
 		routerStatus = &postgresv1alpha1.ClusterRouterStatus{
-			Replicas:      cluster.Spec.Router.Replicas,
+			Replicas:      routerReplicas,
 			ReadyReplicas: observedReady,
 			Endpoint:      fmt.Sprintf("%s.%s.svc.cluster.local:%d", svcName, cluster.Namespace, pgPort),
 		}
@@ -280,8 +352,27 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	prevPhase := cluster.Status.Phase
 	cluster.Status.Shards = shardStatuses
 	cluster.Status.Router = routerStatus
+	managedRolesStatus, err := r.managedRolesStatus(ctx, &cluster)
+	if err != nil {
+		logger.Error(err, "Failed to aggregate managed role status")
+		return ctrl.Result{}, err
+	}
+	cluster.Status.ManagedRolesStatus = managedRolesStatus
 	cluster.Status.ObservedGeneration = cluster.Generation
-	applyClusterConditions(&cluster, shardCount, allShardPrimaryReady, routerActive, routerStatus)
+	failoverShardName, failoverDecision := clusterFailoverDecision(shardStatuses)
+	if prevPhase == postgresv1alpha1.ClusterPhaseReady && failoverDecision.Failed && failoverDecision.PromotionCandidate != nil {
+		if err := r.executeClusterPromotion(ctx, &cluster, failoverShardName, failoverDecision); err != nil {
+			logger.Error(err, "Failed to execute failover promotion",
+				"shard", failoverShardName, "pod", failoverDecision.PromotionCandidate.Pod)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(&cluster, nil, corev1.EventTypeWarning, "FailoverPromotionFailed", "FailoverPromotionFailed",
+					"shard=%q pod=%q: %v", failoverShardName, failoverDecision.PromotionCandidate.Pod, err)
+			}
+			failoverDecision.Message = fmt.Sprintf("%s; promotion execution failed: %v", failoverDecision.Message, err)
+		}
+	}
+	applyClusterConditions(&cluster, shardCount, allShardPrimaryReady, routerActive, routerStatus, hibernating,
+		prevPhase == postgresv1alpha1.ClusterPhaseReady, failoverDecision)
 
 	// RFC-0017 §3.4: Phase 가 *최초 Ready 도달* 시점에만 Event 발행 (idempotent —
 	// 매 reconcile noise 회피). prevPhase 비교로 transition 감지.
@@ -297,8 +388,16 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		logger.Error(err, "Failed to update PostgresCluster status")
 		return ctrl.Result{}, err
 	}
+	ObservePostgresClusterMetrics(&cluster)
 
 	return ctrl.Result{RequeueAfter: statusPollInterval}, nil
+}
+
+func hibernationRequested(cluster *postgresv1alpha1.PostgresCluster) bool {
+	if cluster == nil || cluster.Annotations == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(cluster.Annotations[AnnotationHibernation]), "on")
 }
 
 // applyClusterConditions 는 reconcile 산출물 (shard 준비 상태, router 활성/준비
@@ -309,8 +408,34 @@ func applyClusterConditions(
 	shardCount int32,
 	allShardPrimaryReady, routerActive bool,
 	routerStatus *postgresv1alpha1.ClusterRouterStatus,
+	hibernating bool,
+	wasReady bool,
+	failoverDecision failover.Decision,
 ) {
 	conds := &cluster.Status.Conditions
+	if hibernating {
+		cluster.Status.Phase = postgresv1alpha1.ClusterPhaseHibernated
+		setCondition(conds, ConditionHibernation, metav1.ConditionTrue, ReasonHibernated,
+			"Cluster has been hibernated")
+		setCondition(conds, ConditionShardsReady, metav1.ConditionFalse, ReasonHibernated,
+			"database pods intentionally stopped; PVCs retained")
+		if routerActive {
+			setCondition(conds, ConditionRouterReady, metav1.ConditionFalse, ReasonHibernated,
+				"router replicas intentionally scaled to zero during hibernation")
+		} else {
+			setCondition(conds, ConditionRouterReady, metav1.ConditionTrue, ReasonNotApplicable,
+				"router disabled (shardingMode=none or router.enabled=false)")
+		}
+		setCondition(conds, ConditionFailoverReady, metav1.ConditionFalse, ReasonHibernated,
+			"failover suspended while cluster is hibernated")
+		setCondition(conds, ConditionReady, metav1.ConditionFalse, ReasonHibernated,
+			"cluster hibernated; database pods intentionally stopped")
+		setCondition(conds, ConditionProgressing, metav1.ConditionFalse, ReasonHibernated,
+			"hibernate steady state reached")
+		return
+	}
+	setCondition(conds, ConditionHibernation, metav1.ConditionFalse, ReasonNotHibernated,
+		"Cluster is not hibernated")
 
 	if allShardPrimaryReady && shardCount > 0 {
 		setCondition(conds, ConditionShardsReady, metav1.ConditionTrue, ReasonAvailable,
@@ -335,8 +460,24 @@ func applyClusterConditions(
 			"waiting for router readiness")
 	}
 
+	failoverDegraded := wasReady && failoverDecision.Failed
+	if failoverDegraded {
+		message := failoverDecision.Message
+		if failoverDecision.PromotionCandidate != nil {
+			message = fmt.Sprintf("%s; promotion candidate=%s", message, failoverDecision.PromotionCandidate.Pod)
+		}
+		setCondition(conds, ConditionFailoverReady, metav1.ConditionFalse, string(failoverDecision.Reason), message)
+	} else {
+		setCondition(conds, ConditionFailoverReady, metav1.ConditionTrue, ReasonAvailable,
+			"no failover action required")
+	}
+
 	clusterReady := allShardPrimaryReady && shardCount > 0 && routerReady
-	if clusterReady {
+	if failoverDegraded {
+		cluster.Status.Phase = postgresv1alpha1.ClusterPhaseDegraded
+		setCondition(conds, ConditionReady, metav1.ConditionFalse, string(failoverDecision.Reason), failoverDecision.Message)
+		setCondition(conds, ConditionProgressing, metav1.ConditionFalse, ReasonAvailable, "primary failure detected after Ready")
+	} else if clusterReady {
 		cluster.Status.Phase = postgresv1alpha1.ClusterPhaseReady
 		setCondition(conds, ConditionReady, metav1.ConditionTrue, ReasonAvailable, "all subsystems ready")
 		setCondition(conds, ConditionProgressing, metav1.ConditionFalse, ReasonAvailable, "reconcile reached steady state")
@@ -345,6 +486,96 @@ func applyClusterConditions(
 		setCondition(conds, ConditionReady, metav1.ConditionFalse, ReasonProgressing, "reconcile in progress")
 		setCondition(conds, ConditionProgressing, metav1.ConditionTrue, ReasonReconciling, "creating or waiting for subresources")
 	}
+}
+
+func clusterFailoverDecision(shards []postgresv1alpha1.ShardStatus) (string, failover.Decision) {
+	for _, shard := range shards {
+		decision := failover.DetectPrimaryFailure(shard)
+		if decision.Failed {
+			return shard.Name, decision
+		}
+	}
+	return "", failover.Decision{Reason: failover.ReasonNone}
+}
+
+func (r *PostgresClusterReconciler) managedRolesStatus(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+) (*postgresv1alpha1.ManagedRolesStatus, error) {
+	var users postgresv1alpha1.PostgresUserList
+	if err := r.List(ctx, &users, client.InNamespace(cluster.Namespace)); err != nil {
+		return nil, err
+	}
+	status := managedRolesStatusForUsers(cluster, users.Items)
+	return &status, nil
+}
+
+func managedRolesStatusForUsers(
+	cluster *postgresv1alpha1.PostgresCluster,
+	users []postgresv1alpha1.PostgresUser,
+) postgresv1alpha1.ManagedRolesStatus {
+	const (
+		roleStatusReserved              = "reserved"
+		roleStatusReconciled            = "reconciled"
+		roleStatusPendingReconciliation = "pending-reconciliation"
+	)
+
+	status := postgresv1alpha1.ManagedRolesStatus{
+		ByStatus: map[string][]string{
+			roleStatusReserved: {"postgres", "streaming_replica"},
+		},
+		CannotReconcile: map[string][]string{},
+		PasswordStatus:  map[string]postgresv1alpha1.ManagedRolePasswordStatus{},
+	}
+
+	for _, user := range users {
+		if user.Namespace != cluster.Namespace || user.Spec.Cluster.Name != cluster.Name || user.Spec.Name == "" {
+			continue
+		}
+		roleName := user.Spec.Name
+		bucket := roleStatusPendingReconciliation
+		if user.Status.Applied && user.Status.ObservedGeneration == user.Generation {
+			bucket = roleStatusReconciled
+		}
+		status.ByStatus[bucket] = append(status.ByStatus[bucket], roleName)
+
+		if !user.Status.Applied && user.Status.Message != "" {
+			status.CannotReconcile[roleName] = []string{user.Status.Message}
+		}
+		if user.Status.PasswordSecretResourceVersion != "" {
+			status.PasswordStatus[roleName] = postgresv1alpha1.ManagedRolePasswordStatus{
+				SecretResourceVersion: user.Status.PasswordSecretResourceVersion,
+				ObservedGeneration:    user.Status.ObservedGeneration,
+			}
+		}
+	}
+
+	for state := range status.ByStatus {
+		sort.Strings(status.ByStatus[state])
+	}
+	if len(status.CannotReconcile) == 0 {
+		status.CannotReconcile = nil
+	}
+	if len(status.PasswordStatus) == 0 {
+		status.PasswordStatus = nil
+	}
+	return status
+}
+
+func (r *PostgresClusterReconciler) postgresClustersForUser(
+	_ context.Context,
+	obj client.Object,
+) []reconcile.Request {
+	user, ok := obj.(*postgresv1alpha1.PostgresUser)
+	if !ok || user.Spec.Cluster.Name == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: user.Namespace,
+			Name:      user.Spec.Cluster.Name,
+		},
+	}}
 }
 
 // reconcileTLS 는 Pillar P7 §7 의 cert-manager Certificate CR upsert 를 처리한다.
@@ -524,8 +755,27 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// events API 마이그레이션 완료 (RFC-0023 Phase 2, 2026-05-11).
 		r.Recorder = mgr.GetEventRecorder("postgrescluster-controller")
 	}
+	if r.PromotionPodExecutor == nil {
+		executor, err := NewKubernetesBackupSidecarExecutor(mgr.GetConfig())
+		if err != nil {
+			return err
+		}
+		r.PromotionPodExecutor = executor
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresCluster{}).
+		Watches(&postgresv1alpha1.PostgresUser{},
+			handler.EnqueueRequestsFromMapFunc(r.postgresClustersForUser),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
+		Watches(&postgresv1alpha1.ImageCatalog{},
+			handler.EnqueueRequestsFromMapFunc(r.postgresClustersForImageCatalog),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
+		Watches(&postgresv1alpha1.ClusterImageCatalog{},
+			handler.EnqueueRequestsFromMapFunc(r.postgresClustersForClusterImageCatalog),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).

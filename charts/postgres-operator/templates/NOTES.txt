@@ -8,9 +8,11 @@ keiailab/postgres-operator alpha (Chart {{ .Chart.Version }} / App {{ .Chart.App
 📋 ServiceAccount + RBAC:
   kubectl get sa,clusterrole,clusterrolebinding -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
 
-🧬 CRDs (PostgresCluster, BackupJob):
+🧬 CRDs (PostgresCluster, BackupJob, ScheduledBackup, Pooler):
   kubectl get crd postgresclusters.postgres.keiailab.io
   kubectl get crd backupjobs.postgres.keiailab.io
+  kubectl get crd scheduledbackups.postgres.keiailab.io
+  kubectl get crd poolers.postgres.keiailab.io
 
 CRD lifecycle을 별도로 관리하려면 설치 시 Helm 기본 옵션을 사용:
   helm install {{ .Release.Name }} keiailab/postgres-operator --skip-crds

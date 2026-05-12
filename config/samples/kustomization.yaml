@@ -5,4 +5,10 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
 - postgres_v1alpha1_postgrescluster_dev.yaml
+# - postgres_v1alpha1_imagecatalog.yaml  # namespace 단위 imageCatalogRef 샘플
+# - postgres_v1alpha1_clusterimagecatalog.yaml  # cluster-wide imageCatalogRef 샘플
+# - postgres_v1alpha1_postgrescluster_replica.yaml  # 외부 source 접근성 필요
 # - postgres_v1alpha1_postgrescluster_prod.yaml  # production: storageClassName "fast-ssd" 필요
+# - postgres_v1alpha1_postgresdatabase.yaml  # quickstart PostgresCluster Ready 후 적용
+# - postgres_v1alpha1_postgresuser.yaml  # quickstart PostgresCluster Ready 후 적용
+# - postgres_v1alpha1_pooler_podmonitor.yaml  # Prometheus Operator PodMonitor CRD 필요

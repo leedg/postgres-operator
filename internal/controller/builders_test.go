@@ -87,6 +87,7 @@ func TestBuildPGStatefulSet_AppliesSecurityContextAndEphemeralMounts(t *testing.
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		corev1.ResourceRequirements{},
 		"",
+		"test-config-hash",
 	)
 
 	assertDataplaneSecurityContext(t, &sts.Spec.Template.Spec, "PG StatefulSet")
@@ -106,7 +107,8 @@ func TestBuildPGStatefulSet_InjectsInstanceEnv(t *testing.T) {
 		1,
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		corev1.ResourceRequirements{},
-		"",
+		"demo-shard-3-2.demo-shard-3-headless.ns1.svc.cluster.local:5432",
+		"test-config-hash",
 	)
 
 	if got, want := len(sts.Spec.Template.Spec.Containers), 1; got != want {
@@ -127,6 +129,7 @@ func TestBuildPGStatefulSet_InjectsInstanceEnv(t *testing.T) {
 		"POSTGRES_CONFIG_FILE":   "/etc/postgres-operator/conf/postgresql.conf",
 		"POSTGRES_HBA_FILE":      "/etc/postgres-operator/conf/pg_hba.conf",
 		"POSTGRES_LOCAL_DSN":     "host=/var/run/postgresql user=postgres dbname=postgres",
+		"PRIMARY_ENDPOINT":       "demo-shard-3-2.demo-shard-3-headless.ns1.svc.cluster.local:5432",
 	}
 	for name, want := range expectedValues {
 		got, ok := envByName[name]
@@ -165,6 +168,171 @@ func TestBuildConfigMap_IncludesPGHBA(t *testing.T) {
 	}
 }
 
+func TestBuildConfigMap_RendersRequiredSynchronousReplication(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Shards: postgresv1alpha1.ShardsSpec{Replicas: 2},
+			PostgreSQL: &postgresv1alpha1.PostgreSQLSpec{
+				Synchronous: &postgresv1alpha1.SynchronousReplicationSpec{
+					Method:         postgresv1alpha1.SynchronousReplicationMethodAny,
+					Number:         1,
+					DataDurability: postgresv1alpha1.SynchronousReplicationDataDurabilityRequired,
+				},
+			},
+		},
+	}
+
+	cm := buildConfigMap(cluster, "demo-cm", "shard", 0, nil)
+	conf := cm.Data["postgresql.conf"]
+	want := `synchronous_standby_names = 'ANY 1 ("demo-shard-0-0","demo-shard-0-1","demo-shard-0-2")'`
+	if !strings.Contains(conf, want) {
+		t.Fatalf("postgresql.conf missing required synchronous standby names %q, got:\n%s", want, conf)
+	}
+	if !strings.Contains(conf, "synchronous_commit = on\n") {
+		t.Fatalf("postgresql.conf must explicitly keep synchronous_commit=on, got:\n%s", conf)
+	}
+}
+
+func TestBuildConfigMap_RendersPreferredSynchronousReplicationFromReadyReplicas(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Shards: postgresv1alpha1.ShardsSpec{Replicas: 3},
+			PostgreSQL: &postgresv1alpha1.PostgreSQLSpec{
+				Synchronous: &postgresv1alpha1.SynchronousReplicationSpec{
+					Method:         postgresv1alpha1.SynchronousReplicationMethodAny,
+					Number:         2,
+					DataDurability: postgresv1alpha1.SynchronousReplicationDataDurabilityPreferred,
+				},
+			},
+		},
+		Status: postgresv1alpha1.PostgresClusterStatus{
+			Shards: []postgresv1alpha1.ShardStatus{{
+				Ordinal: 0,
+				Primary: &postgresv1alpha1.ShardEndpoint{
+					Pod:   "demo-shard-0-0",
+					Ready: true,
+				},
+				Replicas: []postgresv1alpha1.ShardEndpoint{
+					{Pod: "demo-shard-0-1", Ready: true},
+					{Pod: "demo-shard-0-2", Ready: false},
+					{Pod: "demo-shard-0-3", Ready: true},
+				},
+			}},
+		},
+	}
+
+	cm := buildConfigMap(cluster, "demo-cm", "shard", 0, nil)
+	conf := cm.Data["postgresql.conf"]
+	want := `synchronous_standby_names = 'ANY 2 ("demo-shard-0-1","demo-shard-0-3")'`
+	if !strings.Contains(conf, want) {
+		t.Fatalf("preferred synchronous replication must use ready replicas only, want %q, got:\n%s", want, conf)
+	}
+	if strings.Contains(conf, "demo-shard-0-0") || strings.Contains(conf, "demo-shard-0-2") {
+		t.Fatalf("preferred synchronous replication must exclude primary and unready replicas, got:\n%s", conf)
+	}
+}
+
+func TestBuildConfigMap_PreferredSynchronousReplicationLowersQuorumToAvailableReplicas(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Shards: postgresv1alpha1.ShardsSpec{Replicas: 3},
+			PostgreSQL: &postgresv1alpha1.PostgreSQLSpec{
+				Synchronous: &postgresv1alpha1.SynchronousReplicationSpec{
+					Method:         postgresv1alpha1.SynchronousReplicationMethodAny,
+					Number:         2,
+					DataDurability: postgresv1alpha1.SynchronousReplicationDataDurabilityPreferred,
+				},
+			},
+		},
+		Status: postgresv1alpha1.PostgresClusterStatus{
+			Shards: []postgresv1alpha1.ShardStatus{{
+				Ordinal: 0,
+				Replicas: []postgresv1alpha1.ShardEndpoint{
+					{Pod: "demo-shard-0-1", Ready: false},
+					{Pod: "demo-shard-0-2", Ready: true},
+					{Pod: "demo-shard-0-3", Ready: false},
+				},
+			}},
+		},
+	}
+
+	cm := buildConfigMap(cluster, "demo-cm", "shard", 0, nil)
+	conf := cm.Data["postgresql.conf"]
+	want := `synchronous_standby_names = 'ANY 1 ("demo-shard-0-2")'`
+	if !strings.Contains(conf, want) {
+		t.Fatalf("preferred synchronous replication must lower quorum to available replicas, want %q, got:\n%s", want, conf)
+	}
+}
+
+func TestRenderPGHBAConf_AllowsPgRewindNormalConnectionBeforeScram(t *testing.T) {
+	t.Parallel()
+
+	conf := renderPGHBAConf(false)
+	rewindLine := "host    all             postgres        10.0.0.0/8              trust"
+	scramLine := "host    all             all             10.0.0.0/8              scram-sha-256"
+	rewindIndex := strings.Index(conf, rewindLine)
+	if rewindIndex < 0 {
+		t.Fatalf("pg_hba.conf must allow pg_rewind normal source connection for postgres, got:\n%s", conf)
+	}
+	scramIndex := strings.Index(conf, scramLine)
+	if scramIndex < 0 {
+		t.Fatalf("pg_hba.conf missing default scram host line, got:\n%s", conf)
+	}
+	if rewindIndex > scramIndex {
+		t.Fatalf("pg_rewind trust line must appear before default scram line, got:\n%s", conf)
+	}
+}
+
+func TestRenderPGHBAConf_TLSUsesHostSSLForPgRewindNormalConnection(t *testing.T) {
+	t.Parallel()
+
+	conf := renderPGHBAConf(true)
+	want := "hostssl all             postgres        10.0.0.0/8              trust"
+	if !strings.Contains(conf, want) {
+		t.Fatalf("TLS pg_hba.conf must use hostssl for pg_rewind source connection, want %q, got:\n%s", want, conf)
+	}
+}
+
+func TestRenderPostgresConf_EnablesWalLogHintsForPgRewind(t *testing.T) {
+	t.Parallel()
+
+	conf := renderPostgresConf(nil, nil, false, nil)
+	if !strings.Contains(conf, "wal_log_hints = on\n") {
+		t.Fatalf("postgresql.conf must enable wal_log_hints for pg_rewind, got:\n%s", conf)
+	}
+}
+
+func TestBuildPGStatefulSet_AnnotatesPostgresConfigHash(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns1"},
+	}
+	sts := buildPGStatefulSet(
+		cluster,
+		"demo-shard-0", "demo-shard-0-headless",
+		0,
+		"example.com/postgres:18", "demo-shard-0-config", "18",
+		2,
+		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+		corev1.ResourceRequirements{},
+		"",
+		"abc123",
+	)
+	if got := sts.Spec.Template.Annotations[postgresConfigHashAnnotation]; got != "abc123" {
+		t.Fatalf("pod template config hash annotation = %q, want abc123", got)
+	}
+}
+
 func TestBuildPGStatefulSet_HasBootstrapAndServiceAccount(t *testing.T) {
 	t.Parallel()
 
@@ -180,6 +348,7 @@ func TestBuildPGStatefulSet_HasBootstrapAndServiceAccount(t *testing.T) {
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		corev1.ResourceRequirements{},
 		"",
+		"test-config-hash",
 	)
 	pod := &sts.Spec.Template.Spec
 	if pod.ServiceAccountName != "demo-instance" {
@@ -200,7 +369,7 @@ func TestBuildPGStatefulSet_HasBootstrapAndServiceAccount(t *testing.T) {
 func TestBuildBootstrapContainer_OrdinalZero_RunsInitdb(t *testing.T) {
 	t.Parallel()
 
-	c := buildBootstrapContainer("img:18", "18", 0, "", 2)
+	c := buildBootstrapContainer("img:18", "18", 0, "", 2, false, "", "", "", nil)
 	if c.Name != bootstrapContainerName {
 		t.Errorf("Name = %q, want bootstrap", c.Name)
 	}
@@ -253,7 +422,7 @@ func TestBuildBootstrapContainer_OrdinalZero_RunsInitdb(t *testing.T) {
 func TestBuildBootstrapContainer_ExistingPGDATA_NormalizesPermissions(t *testing.T) {
 	t.Parallel()
 
-	c := buildBootstrapContainer("img:18", "18", 0, "", 1)
+	c := buildBootstrapContainer("img:18", "18", 0, "", 1, false, "", "", "", nil)
 	if len(c.Args) != 1 {
 		t.Fatalf("Args length = %d, want 1", len(c.Args))
 	}
@@ -269,6 +438,24 @@ func TestBuildBootstrapContainer_ExistingPGDATA_NormalizesPermissions(t *testing
 	}
 }
 
+func TestBuildBootstrapContainer_ExistingPGDATAMarksAnyOldPrimaryAsStandby(t *testing.T) {
+	t.Parallel()
+
+	c := buildBootstrapContainer("img:18", "18", 0, "demo-shard-0-1.demo-shard-0.default.svc.cluster.local:5432", 2, false, "", "", "", nil)
+	script := c.Args[0]
+
+	for _, want := range []string{
+		`case "$PRIMARY_HOST" in`,
+		`"$POD_NAME"|"$POD_NAME".*) PRIMARY_IS_SELF=1 ;;`,
+		`[ "$MEMBER_COUNT" -gt 1 ] && [ -n "$PRIMARY_HOST" ] && [ "$PRIMARY_IS_SELF" = "0" ] && [ ! -f "$DATA/standby.signal" ]`,
+		restartPrimaryAsStandbyMarker,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("existing PGDATA rejoin script missing %q", want)
+		}
+	}
+}
+
 // NOTE: 본 테스트는 buildBootstrapContainer 를 shardOrdinal=1 로 호출하지만,
 // 실제 런타임 분기는 *POD_ORDINAL* (downward API 로 Pod 마다 다른 값) 으로
 // 결정된다. 단위 테스트는 downward API 를 시뮬레이트할 수 없으므로 *script
@@ -276,7 +463,7 @@ func TestBuildBootstrapContainer_ExistingPGDATA_NormalizesPermissions(t *testing
 func TestBuildBootstrapContainer_NonZero_RunsBasebackup(t *testing.T) {
 	t.Parallel()
 
-	c := buildBootstrapContainer("img:18", "18", 1, "primary.svc:5432", 2)
+	c := buildBootstrapContainer("img:18", "18", 1, "primary.svc:5432", 2, false, "", "", "", nil)
 	if c.Name != bootstrapContainerName {
 		t.Errorf("Name = %q, want bootstrap", c.Name)
 	}
@@ -285,6 +472,9 @@ func TestBuildBootstrapContainer_NonZero_RunsBasebackup(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q", want)
 		}
+	}
+	if !strings.Contains(script, `application_name=$POD_NAME`) || !strings.Contains(script, `PRIMARY_CONNINFO`) {
+		t.Fatalf("primary_conninfo must set application_name to POD_NAME for synchronous replication, got:\n%s", script)
 	}
 	if !strings.Contains(script, `POD_ORDINAL="${POD_NAME##*-}"`) {
 		t.Error(`script must contain POD_ORDINAL extraction: POD_ORDINAL="${POD_NAME##*-}"`)
@@ -458,6 +648,7 @@ func TestBuildPGStatefulSet_ReadinessProbe_FastInitialDelay(t *testing.T) {
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		corev1.ResourceRequirements{},
 		"",
+		"test-config-hash",
 	)
 	if got := len(sts.Spec.Template.Spec.Containers); got != 1 {
 		t.Fatalf("containers count = %d, want 1", got)
@@ -503,6 +694,7 @@ func TestBuildPGStatefulSet_DefaultResources_BurstableQoS(t *testing.T) {
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		corev1.ResourceRequirements{}, // empty — default 적용 기대
 		"",
+		"test-config-hash",
 	)
 	if got := len(sts.Spec.Template.Spec.Containers); got != 1 {
 		t.Fatalf("containers count = %d, want 1", got)
@@ -542,6 +734,7 @@ func TestBuildPGStatefulSet_DefaultResources_BurstableQoS(t *testing.T) {
 		postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
 		customRes,
 		"",
+		"test-config-hash",
 	)
 	gotCPU := sts2.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	if want := resource.MustParse("500m"); gotCPU.Cmp(want) != 0 {

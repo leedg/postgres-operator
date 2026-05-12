@@ -49,16 +49,22 @@ const (
 	ConditionProgressing       = "Progressing"
 	ConditionShardsReady       = "ShardsReady"
 	ConditionRouterReady       = "RouterReady"
+	ConditionFailoverReady     = "FailoverReady"
+	ConditionHibernation       = "cnpg.io/hibernation"
 	ConditionBackupHealthy     = "BackupHealthy"
 	ConditionAutoSplitEligible = "AutoSplitEligible"
 
 	// Reasons — 일반 lifecycle
-	ReasonReconciling      = "Reconciling"
-	ReasonResourcesCreated = "ResourcesCreated"
-	ReasonVersionRejected  = "VersionRejected"
-	ReasonAvailable        = "Available"
-	ReasonProgressing      = "Progressing"
-	ReasonNotApplicable    = "NotApplicable"
+	ReasonReconciling            = "Reconciling"
+	ReasonResourcesCreated       = "ResourcesCreated"
+	ReasonVersionRejected        = "VersionRejected"
+	ReasonAvailable              = "Available"
+	ReasonProgressing            = "Progressing"
+	ReasonNotApplicable          = "NotApplicable"
+	ReasonHibernated             = "Hibernated"
+	ReasonNotHibernated          = "NotHibernated"
+	ReasonImageCatalogRejected   = "ImageCatalogRejected"
+	ReasonReplicaClusterRejected = "ReplicaClusterRejected"
 
 	// Reasons — HA / Failover (P2-T3 이후 활성)
 	ReasonPromoting    = "Promoting"

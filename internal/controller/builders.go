@@ -12,6 +12,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -69,6 +70,21 @@ const (
 	// pgRunDir 는 Unix socket directory (peer auth). dataplaneEphemeralVolumeMounts 에서
 	// emptyDir 로 마운트되며 instance 가 LocalDSN 에서 사용한다.
 	pgRunDir = "/var/run/postgresql"
+
+	// postgresConfigHashAnnotation 은 mounted postgresql.conf/pg_hba.conf 변경 시
+	// StatefulSet template 을 바꿔 rolling reconcile 을 유도한다.
+	postgresConfigHashAnnotation = "postgres.keiailab.io/postgres-config-sha256"
+
+	// postgresImageCatalogHashAnnotation 은 ImageCatalog/ClusterImageCatalog 의 image
+	// 선택값이 바뀔 때 StatefulSet template drift 를 운영자가 쉽게 추적하도록 남긴다.
+	postgresImageCatalogHashAnnotation = "postgres.keiailab.io/postgres-image-catalog-sha256"
+
+	externalClusterCredentialsVolumeName = "external-cluster-credentials"
+	externalClusterCredentialsMountPath  = "/etc/postgres-external/source"
+	primaryPGPassFile                    = "/tmp/primary.pgpass"
+	primaryClientKeyFile                 = "/tmp/primary-client.key"
+	primaryClientCertFile                = "/tmp/primary-client.crt"
+	primaryRootCertFile                  = "/tmp/primary-root.crt"
 
 	// postgresUserUID는 PostgreSQL 표준 postgres user의 UID/GID다.
 	// ADR 0006에 의해 동결된 데이터플레인 Pod의 runAsUser/runAsGroup/fsGroup 기본값.
@@ -161,6 +177,91 @@ func dataplaneEphemeralVolumes() []corev1.Volume {
 	}
 }
 
+func externalClusterCredentialEnv(config *replicaBootstrapConfig) []corev1.EnvVar {
+	if config == nil {
+		return nil
+	}
+	env := []corev1.EnvVar{}
+	if secretKeySelectorConfigured(config.Password) {
+		env = append(env, corev1.EnvVar{
+			Name: "PRIMARY_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: config.Password,
+			},
+		})
+	}
+	if secretKeySelectorConfigured(config.SSLKey) {
+		env = append(env, corev1.EnvVar{Name: "PRIMARY_SSLKEY_FILE", Value: externalClusterCredentialsMountPath + "/tls.key"})
+	}
+	if secretKeySelectorConfigured(config.SSLCert) {
+		env = append(env, corev1.EnvVar{Name: "PRIMARY_SSLCERT_FILE", Value: externalClusterCredentialsMountPath + "/tls.crt"})
+	}
+	if secretKeySelectorConfigured(config.SSLRootCert) {
+		env = append(env, corev1.EnvVar{Name: "PRIMARY_SSLROOTCERT_FILE", Value: externalClusterCredentialsMountPath + "/ca.crt"})
+	}
+	return env
+}
+
+func externalClusterCredentialVolumeMounts(config *replicaBootstrapConfig) []corev1.VolumeMount {
+	if !externalClusterTLSConfigured(config) {
+		return nil
+	}
+	return []corev1.VolumeMount{{
+		Name:      externalClusterCredentialsVolumeName,
+		MountPath: externalClusterCredentialsMountPath,
+		ReadOnly:  true,
+	}}
+}
+
+func externalClusterCredentialVolumes(config *replicaBootstrapConfig) []corev1.Volume {
+	if !externalClusterTLSConfigured(config) {
+		return nil
+	}
+	mode := int32(0o444)
+	sources := []corev1.VolumeProjection{}
+	if secretKeySelectorConfigured(config.SSLKey) {
+		sources = append(sources, externalClusterSecretProjection(config.SSLKey, "tls.key"))
+	}
+	if secretKeySelectorConfigured(config.SSLCert) {
+		sources = append(sources, externalClusterSecretProjection(config.SSLCert, "tls.crt"))
+	}
+	if secretKeySelectorConfigured(config.SSLRootCert) {
+		sources = append(sources, externalClusterSecretProjection(config.SSLRootCert, "ca.crt"))
+	}
+	return []corev1.Volume{{
+		Name: externalClusterCredentialsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				DefaultMode: &mode,
+				Sources:     sources,
+			},
+		},
+	}}
+}
+
+func externalClusterSecretProjection(ref *corev1.SecretKeySelector, path string) corev1.VolumeProjection {
+	return corev1.VolumeProjection{
+		Secret: &corev1.SecretProjection{
+			LocalObjectReference: corev1.LocalObjectReference{Name: ref.Name},
+			Items: []corev1.KeyToPath{{
+				Key:  ref.Key,
+				Path: path,
+			}},
+		},
+	}
+}
+
+func externalClusterTLSConfigured(config *replicaBootstrapConfig) bool {
+	return config != nil &&
+		(secretKeySelectorConfigured(config.SSLKey) ||
+			secretKeySelectorConfigured(config.SSLCert) ||
+			secretKeySelectorConfigured(config.SSLRootCert))
+}
+
+func secretKeySelectorConfigured(ref *corev1.SecretKeySelector) bool {
+	return ref != nil && ref.Name != "" && ref.Key != ""
+}
+
 // renderSharedPreloadLibraries는 enabledNames 에 매칭되는 ExtensionPlugin 만
 // 우선순위 순으로 직렬화하여 shared_preload_libraries 값을 만든다 (RFC 0006 R1).
 //
@@ -181,9 +282,20 @@ func renderSharedPreloadLibraries(reg *plugin.Registry, enabledNames []string) s
 	return strings.Join(names, ",")
 }
 
+type synchronousPostgresConfig struct {
+	Method       string
+	Number       int32
+	StandbyNames []string
+}
+
 // renderPostgresConf는 postgresql.conf의 본문을 생성한다 (RFC 0006 R1 — per-cluster
 // extension list).
-func renderPostgresConf(reg *plugin.Registry, enabledExtensions []string, tlsOn bool) string {
+func renderPostgresConf(
+	reg *plugin.Registry,
+	enabledExtensions []string,
+	tlsOn bool,
+	syncConfig *synchronousPostgresConfig,
+) string {
 	var sb strings.Builder
 	sb.WriteString("# Generated by keiailab-postgres-operator. Do not edit by hand.\n")
 	sb.WriteString("listen_addresses = '*'\n")
@@ -192,11 +304,22 @@ func renderPostgresConf(reg *plugin.Registry, enabledExtensions []string, tlsOn 
 	fmt.Fprintf(&sb, "unix_socket_directories = '%s'\n", pgRunDir)
 	// WAL + replication 기본값 — replicas>0 일 때 streaming replication 전제.
 	sb.WriteString("wal_level = replica\n")
+	// pg_rewind 전제. data checksums 없는 기존 스토리지에서도 failover 후
+	// former primary 를 current primary timeline 으로 되감을 수 있게 한다.
+	sb.WriteString("wal_log_hints = on\n")
 	sb.WriteString("max_wal_senders = 10\n")
 	sb.WriteString("max_replication_slots = 10\n")
 	sb.WriteString("hot_standby = on\n")
 	if spl := renderSharedPreloadLibraries(reg, enabledExtensions); spl != "" {
 		fmt.Fprintf(&sb, "shared_preload_libraries = '%s'\n", spl)
+	}
+	if syncConfig != nil && syncConfig.Number > 0 && len(syncConfig.StandbyNames) > 0 {
+		fmt.Fprintf(&sb, "synchronous_standby_names = '%s %d (%s)'\n",
+			syncConfig.Method,
+			syncConfig.Number,
+			strings.Join(quoteSynchronousStandbyNames(syncConfig.StandbyNames), ","),
+		)
+		sb.WriteString("synchronous_commit = on\n")
 	}
 	// Pillar P7 §7 Phase 3b: TLS server cert 활성. cert-manager Certificate (Phase 2)
 	// 가 발급한 Secret 이 STS volume mount (Phase 3a) 로 /etc/ssl/postgres 경로에
@@ -212,10 +335,143 @@ func renderPostgresConf(reg *plugin.Registry, enabledExtensions []string, tlsOn 
 	return sb.String()
 }
 
+func quoteSynchronousStandbyNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, `"`+strings.ReplaceAll(name, `"`, `""`)+`"`)
+	}
+	return out
+}
+
+func synchronousConfigForShard(
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardOrdinal int32,
+) *synchronousPostgresConfig {
+	if cluster == nil || shardOrdinal < 0 || cluster.Spec.PostgreSQL == nil ||
+		cluster.Spec.PostgreSQL.Synchronous == nil {
+		return nil
+	}
+	sync := cluster.Spec.PostgreSQL.Synchronous
+	if sync.Number <= 0 || cluster.Spec.Shards.Replicas < sync.Number {
+		return nil
+	}
+
+	method := "ANY"
+	if sync.Method == postgresv1alpha1.SynchronousReplicationMethodFirst {
+		method = "FIRST"
+	}
+
+	durability := sync.DataDurability
+	if durability == "" {
+		durability = postgresv1alpha1.SynchronousReplicationDataDurabilityRequired
+	}
+
+	names := requiredSynchronousStandbyNames(cluster, shardOrdinal)
+	number := sync.Number
+	if durability == postgresv1alpha1.SynchronousReplicationDataDurabilityPreferred {
+		names = preferredSynchronousStandbyNames(cluster, shardOrdinal)
+		if int32(len(names)) < number {
+			number = int32(len(names))
+		}
+	}
+	if number <= 0 || len(names) == 0 {
+		return nil
+	}
+	return &synchronousPostgresConfig{
+		Method:       method,
+		Number:       number,
+		StandbyNames: names,
+	}
+}
+
+func requiredSynchronousStandbyNames(cluster *postgresv1alpha1.PostgresCluster, shardOrdinal int32) []string {
+	desired := desiredShardPodNames(cluster.Name, shardOrdinal, cluster.Spec.Shards.Replicas, true)
+	shard := shardStatusByOrdinal(cluster.Status.Shards, shardOrdinal)
+	if shard == nil {
+		return desired
+	}
+
+	var readyReplicas []string
+	var unreadyReplicas []string
+	for _, replica := range shard.Replicas {
+		if replica.Pod == "" {
+			continue
+		}
+		if replica.Ready {
+			readyReplicas = append(readyReplicas, replica.Pod)
+		} else {
+			unreadyReplicas = append(unreadyReplicas, replica.Pod)
+		}
+	}
+	sort.Strings(readyReplicas)
+	sort.Strings(unreadyReplicas)
+
+	seen := map[string]bool{}
+	out := make([]string, 0, len(desired))
+	add := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	for _, name := range readyReplicas {
+		add(name)
+	}
+	for _, name := range unreadyReplicas {
+		add(name)
+	}
+	if shard.Primary != nil {
+		add(shard.Primary.Pod)
+	}
+	for _, name := range desired {
+		add(name)
+	}
+	return out
+}
+
+func preferredSynchronousStandbyNames(cluster *postgresv1alpha1.PostgresCluster, shardOrdinal int32) []string {
+	shard := shardStatusByOrdinal(cluster.Status.Shards, shardOrdinal)
+	if shard == nil {
+		return nil
+	}
+	names := make([]string, 0, len(shard.Replicas))
+	for _, replica := range shard.Replicas {
+		if replica.Pod != "" && replica.Ready {
+			names = append(names, replica.Pod)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func shardStatusByOrdinal(shards []postgresv1alpha1.ShardStatus, ordinal int32) *postgresv1alpha1.ShardStatus {
+	for i := range shards {
+		if shards[i].Ordinal == ordinal {
+			return &shards[i]
+		}
+	}
+	return nil
+}
+
+func desiredShardPodNames(clusterName string, shardOrdinal, replicas int32, includePrimary bool) []string {
+	first := int32(1)
+	if includePrimary {
+		first = 0
+	}
+	names := make([]string, 0, int(replicas)+1)
+	stsName := ShardStatefulSetName(clusterName, shardOrdinal)
+	for podOrdinal := first; podOrdinal <= replicas; podOrdinal++ {
+		names = append(names, fmt.Sprintf("%s-%d", stsName, podOrdinal))
+	}
+	return names
+}
+
 // renderPGHBAConf 는 pg_hba.conf 본문을 생성한다.
 //
 // 인증 정책 (alpha 단계 — production 은 추후 ADR + secret 기반 강화):
 //   - local Unix socket: trust (instance manager 가 peer auth 로 LocalDSN 사용)
+//   - pg_rewind source connection: cluster 내부 postgres normal connection trust
 //   - host (cluster 내부 10.0.0.0/8 + 172.16.0.0/12 + 192.168.0.0/16): scram-sha-256
 //   - replication: cluster 내부 trust (alpha — secret rotation 후속)
 func renderPGHBAConf(tlsOn bool) string {
@@ -229,13 +485,16 @@ func renderPGHBAConf(tlsOn bool) string {
 	return fmt.Sprintf(`# Generated by keiailab-postgres-operator. Do not edit by hand.
 # TYPE  DATABASE        USER            ADDRESS                 METHOD
 local   all             all                                     trust
+%-7s all             postgres        10.0.0.0/8              trust
+%-7s all             postgres        172.16.0.0/12           trust
+%-7s all             postgres        192.168.0.0/16          trust
 %-7s all             all             10.0.0.0/8              scram-sha-256
 %-7s all             all             172.16.0.0/12           scram-sha-256
 %-7s all             all             192.168.0.0/16          scram-sha-256
 host    replication     all             10.0.0.0/8              trust
 host    replication     all             172.16.0.0/12           trust
 host    replication     all             192.168.0.0/16          trust
-`, hostType, hostType, hostType)
+`, hostType, hostType, hostType, hostType, hostType, hostType)
 }
 
 // buildConfigMap은 shard/router 모두에서 동일 패턴으로 사용된다.
@@ -245,17 +504,35 @@ host    replication     all             192.168.0.0/16          trust
 // router ConfigMap 은 router 가 PG runtime 이 아니므로 pg_hba 는 생략 가능하나,
 // 동일 builder 사용 위해 포함 (router 가 무시).
 func buildConfigMap(cluster *postgresv1alpha1.PostgresCluster, name, role string, shardOrdinal int32, reg *plugin.Registry) *corev1.ConfigMap {
+	data := postgresConfigData(cluster, shardOrdinal, reg)
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: cluster.Namespace,
 			Labels:    SelectorLabels(cluster.Name, role, shardOrdinal),
 		},
-		Data: map[string]string{
-			"postgresql.conf": renderPostgresConf(reg, cluster.Spec.Extensions, tlsEnabled(cluster)),
-			"pg_hba.conf":     renderPGHBAConf(tlsEnabled(cluster)),
-		},
+		Data: data,
 	}
+}
+
+func postgresConfigData(
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardOrdinal int32,
+	reg *plugin.Registry,
+) map[string]string {
+	return map[string]string{
+		"postgresql.conf": renderPostgresConf(
+			reg,
+			cluster.Spec.Extensions,
+			tlsEnabled(cluster),
+			synchronousConfigForShard(cluster, shardOrdinal),
+		),
+		"pg_hba.conf": renderPGHBAConf(tlsEnabled(cluster)),
+	}
+}
+
+func postgresConfigHash(data map[string]string) string {
+	return sha256Hex(data["postgresql.conf"] + "\x00" + data["pg_hba.conf"])
 }
 
 // buildHeadlessService는 StatefulSet과 짝이 되는 ClusterIP=None Service를 만든다.
@@ -393,13 +670,79 @@ func buildInstanceRoleBinding(cluster *postgresv1alpha1.PostgresCluster) *rbacv1
 //
 // standby.signal 은 instance manager 가 leader election 결과에 따라 OnStartedLeading
 // 에서 제거하고 OnStoppedLeading 에서 재생성한다 (RFC 0006 R3 Task A).
-func buildBootstrapContainer(image, pgMajor string, shardOrdinal int32, primaryEndpoint string, members int32) corev1.Container {
+func buildBootstrapContainer(
+	image, pgMajor string,
+	shardOrdinal int32,
+	primaryEndpoint string,
+	members int32,
+	replicaClusterEnabled bool,
+	primaryUser string,
+	primaryDBName string,
+	primarySSLMode string,
+	primaryCredentialConfig *replicaBootstrapConfig,
+) corev1.Container {
 	binDir := pgBinDir(pgMajor)
+	replicaClusterValue := "0"
+	if replicaClusterEnabled {
+		replicaClusterValue = "1"
+	}
 	script := `set -eu
 DATA="` + pgDataSubdir + `"
 PRIMARY_ENDPOINT="${PRIMARY_ENDPOINT:-}"
+PRIMARY_USER="${PRIMARY_USER:-postgres}"
+PRIMARY_DBNAME="${PRIMARY_DBNAME:-postgres}"
+PRIMARY_SSLMODE="${PRIMARY_SSLMODE:-prefer}"
+PRIMARY_PASSWORD="${PRIMARY_PASSWORD:-}"
+PRIMARY_SSLKEY_FILE="${PRIMARY_SSLKEY_FILE:-}"
+PRIMARY_SSLCERT_FILE="${PRIMARY_SSLCERT_FILE:-}"
+PRIMARY_SSLROOTCERT_FILE="${PRIMARY_SSLROOTCERT_FILE:-}"
 POD_ORDINAL="${POD_NAME##*-}"
 MEMBER_COUNT="${POSTGRES_MEMBER_COUNT:-1}"
+REPLICA_CLUSTER_ENABLED="${REPLICA_CLUSTER_ENABLED:-0}"
+PRIMARY_HOST=""
+PRIMARY_IS_SELF=0
+if [ -n "$PRIMARY_ENDPOINT" ]; then
+  PRIMARY_HOST="${PRIMARY_ENDPOINT%:*}"
+  case "$PRIMARY_HOST" in
+    "$POD_NAME"|"$POD_NAME".*) PRIMARY_IS_SELF=1 ;;
+    *) PRIMARY_IS_SELF=0 ;;
+  esac
+fi
+
+escape_pgpass() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/:/\\:/g'
+}
+
+prepare_primary_conninfo() {
+  PRIMARY_PORT="${PRIMARY_ENDPOINT##*:}"
+  PRIMARY_CONNINFO="host=$PRIMARY_HOST port=$PRIMARY_PORT user=$PRIMARY_USER dbname=$PRIMARY_DBNAME sslmode=$PRIMARY_SSLMODE application_name=$POD_NAME"
+  if [ -n "$PRIMARY_PASSWORD" ]; then
+    {
+      printf '%s:' "$(escape_pgpass "$PRIMARY_HOST")"
+      printf '%s:' "$(escape_pgpass "$PRIMARY_PORT")"
+      printf '%s:' "$(escape_pgpass "$PRIMARY_DBNAME")"
+      printf '%s:' "$(escape_pgpass "$PRIMARY_USER")"
+      printf '%s\n' "$(escape_pgpass "$PRIMARY_PASSWORD")"
+    } > "` + primaryPGPassFile + `"
+    chmod 0600 "` + primaryPGPassFile + `"
+    PRIMARY_CONNINFO="$PRIMARY_CONNINFO passfile=` + primaryPGPassFile + `"
+  fi
+  if [ -n "$PRIMARY_SSLKEY_FILE" ]; then
+    cp "$PRIMARY_SSLKEY_FILE" "` + primaryClientKeyFile + `"
+    chmod 0600 "` + primaryClientKeyFile + `"
+    PRIMARY_CONNINFO="$PRIMARY_CONNINFO sslkey=` + primaryClientKeyFile + `"
+  fi
+  if [ -n "$PRIMARY_SSLCERT_FILE" ]; then
+    cp "$PRIMARY_SSLCERT_FILE" "` + primaryClientCertFile + `"
+    chmod 0600 "` + primaryClientCertFile + `"
+    PRIMARY_CONNINFO="$PRIMARY_CONNINFO sslcert=` + primaryClientCertFile + `"
+  fi
+  if [ -n "$PRIMARY_SSLROOTCERT_FILE" ]; then
+    cp "$PRIMARY_SSLROOTCERT_FILE" "` + primaryRootCertFile + `"
+    chmod 0600 "` + primaryRootCertFile + `"
+    PRIMARY_CONNINFO="$PRIMARY_CONNINFO sslrootcert=` + primaryRootCertFile + `"
+  fi
+}
 
 if [ -f "$DATA/PG_VERSION" ]; then
   chmod 0700 "$DATA"
@@ -423,11 +766,33 @@ if [ -f "$DATA/PG_VERSION" ]; then
       echo "removed stale postmaster.pid (PID $STALE_PID not alive in /proc)"
     fi
   fi
-  if [ "$POD_ORDINAL" = "0" ] && [ "$MEMBER_COUNT" -gt 1 ] && [ ! -f "$DATA/standby.signal" ]; then
+  if [ "$REPLICA_CLUSTER_ENABLED" = "1" ] && [ -n "$PRIMARY_HOST" ] && [ ! -f "$DATA/standby.signal" ]; then
+    prepare_primary_conninfo
+    touch "$DATA/standby.signal"
+    printf "primary_conninfo = '%s'\n" "$PRIMARY_CONNINFO" >> "$DATA/postgresql.auto.conf"
+    echo "existing PGDATA marked for standalone replica continuous recovery"
+  elif [ "$MEMBER_COUNT" -gt 1 ] && [ -n "$PRIMARY_HOST" ] && [ "$PRIMARY_IS_SELF" = "0" ] && [ ! -f "$DATA/standby.signal" ]; then
     touch "$DATA/` + restartPrimaryAsStandbyMarker + `"
-    echo "existing ordinal-0 PGDATA in HA cluster; marking for standby restart"
+    echo "existing PGDATA in HA cluster has a different primary endpoint; marking for standby restart"
   fi
   echo "PGDATA already initialized at $DATA; permissions normalized; skipping bootstrap"
+  exit 0
+fi
+
+# Replica cluster mode = ordinal zero is also seeded from external source and must
+# stay in continuous recovery. Fail closed if the source endpoint is absent.
+if [ "$REPLICA_CLUSTER_ENABLED" = "1" ]; then
+  if [ -z "$PRIMARY_ENDPOINT" ]; then
+    echo "replica cluster bootstrap requires PRIMARY_ENDPOINT" >&2
+    exit 1
+  fi
+  prepare_primary_conninfo
+  mkdir -p "$DATA"
+  chmod 0700 "$DATA"
+  ` + binDir + `/pg_basebackup -D "$DATA" -d "$PRIMARY_CONNINFO" --no-password --wal-method=stream --checkpoint=fast
+  touch "$DATA/standby.signal"
+  printf "primary_conninfo = '%s'\n" "$PRIMARY_CONNINFO" >> "$DATA/postgresql.auto.conf"
+  echo "standalone replica pg_basebackup completed; standby.signal + primary_conninfo configured"
   exit 0
 fi
 
@@ -440,13 +805,12 @@ if [ "$POD_ORDINAL" = "0" ] || [ -z "$PRIMARY_ENDPOINT" ]; then
   ` + binDir + `/initdb -D "$DATA" --auth-local=trust --auth-host=scram-sha-256 --username=postgres --encoding=UTF8 --locale=C
   echo "initdb completed at $DATA"
 else
-  PRIMARY_HOST="${PRIMARY_ENDPOINT%:*}"
-  PRIMARY_PORT="${PRIMARY_ENDPOINT##*:}"
+  prepare_primary_conninfo
   mkdir -p "$DATA"
   chmod 0700 "$DATA"
-  ` + binDir + `/pg_basebackup -D "$DATA" -h "$PRIMARY_HOST" -p "$PRIMARY_PORT" -U postgres --no-password --wal-method=stream --checkpoint=fast
+  ` + binDir + `/pg_basebackup -D "$DATA" -d "$PRIMARY_CONNINFO" --no-password --wal-method=stream --checkpoint=fast
   touch "$DATA/standby.signal"
-  printf "primary_conninfo = 'host=%s port=%s user=postgres'\n" "$PRIMARY_HOST" "$PRIMARY_PORT" >> "$DATA/postgresql.auto.conf"
+  printf "primary_conninfo = '%s'\n" "$PRIMARY_CONNINFO" >> "$DATA/postgresql.auto.conf"
   echo "pg_basebackup completed; standby.signal + primary_conninfo configured"
 fi
 `
@@ -455,28 +819,39 @@ fi
 		Image:   image,
 		Command: []string{"sh", "-c"},
 		Args:    []string{script},
-		Env: []corev1.EnvVar{
+		Env: append([]corev1.EnvVar{
 			{Name: "SHARD_ORDINAL", Value: fmt.Sprintf("%d", shardOrdinal)},
 			{Name: "PRIMARY_ENDPOINT", Value: primaryEndpoint},
 			{Name: "POSTGRES_MEMBER_COUNT", Value: fmt.Sprintf("%d", members)},
+			{Name: "REPLICA_CLUSTER_ENABLED", Value: replicaClusterValue},
+			{Name: "PRIMARY_USER", Value: primaryUser},
+			{Name: "PRIMARY_DBNAME", Value: primaryDBName},
+			{Name: "PRIMARY_SSLMODE", Value: primarySSLMode},
 			{
 				Name: "POD_NAME",
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
 				},
 			},
-		},
+		}, externalClusterCredentialEnv(primaryCredentialConfig)...),
 		SecurityContext: dataplaneContainerSecurityContext(),
-		VolumeMounts: append([]corev1.VolumeMount{
+		VolumeMounts: append(append([]corev1.VolumeMount{
 			{Name: "data", MountPath: pgDataMountPath},
-		}, dataplaneEphemeralVolumeMounts()...),
+		}, dataplaneEphemeralVolumeMounts()...), externalClusterCredentialVolumeMounts(primaryCredentialConfig)...),
 	}
 }
 
 // buildInstanceEnv 는 instance manager (PID 1) 에 주입할 환경 변수 집합을 만든다.
-// downward API + spec 매개변수 + 고정 경로의 합산.
-func buildInstanceEnv(clusterName string, shardOrdinal int32, pgMajor string, members int32) []corev1.EnvVar {
-	return []corev1.EnvVar{
+// downward API + spec 매개변수 + current primary endpoint + 고정 경로의 합산.
+func buildInstanceEnv(
+	clusterName string,
+	shardOrdinal int32,
+	pgMajor string,
+	members int32,
+	primaryEndpoint string,
+	replicaClusterEnabled bool,
+) []corev1.EnvVar {
+	env := []corev1.EnvVar{
 		// downward API — Pod / Namespace 식별자.
 		{
 			Name: "POD_NAME",
@@ -501,6 +876,7 @@ func buildInstanceEnv(clusterName string, shardOrdinal int32, pgMajor string, me
 		{Name: "POSTGRES_ROLE", Value: "shard"},
 		{Name: "POSTGRES_SHARD_ORDINAL", Value: fmt.Sprintf("%d", shardOrdinal)},
 		{Name: "POSTGRES_MEMBER_COUNT", Value: fmt.Sprintf("%d", members)},
+		{Name: "PRIMARY_ENDPOINT", Value: primaryEndpoint},
 		// supervise.Config — image 안 표준 경로 + ConfigMap mount + Unix socket.
 		{Name: "POSTGRES_BIN_DIR", Value: pgBinDir(pgMajor)},
 		{Name: "POSTGRES_DATA_DIR", Value: pgDataSubdir},
@@ -508,6 +884,10 @@ func buildInstanceEnv(clusterName string, shardOrdinal int32, pgMajor string, me
 		{Name: "POSTGRES_HBA_FILE", Value: pgHbaFile},
 		{Name: "POSTGRES_LOCAL_DSN", Value: "host=" + pgRunDir + " user=postgres dbname=postgres"},
 	}
+	if replicaClusterEnabled {
+		env = append(env, corev1.EnvVar{Name: "POSTGRES_REPLICA_CLUSTER", Value: "standalone"})
+	}
+	return env
 }
 
 // buildPGStatefulSet은 단일 shard 의 StatefulSet desired state 를 만든다.
@@ -525,8 +905,19 @@ func buildPGStatefulSet(
 	storage postgresv1alpha1.StorageSpec,
 	resources corev1.ResourceRequirements,
 	primaryEndpoint string,
+	configHash string,
 ) *appsv1.StatefulSet {
 	labels := SelectorLabels(cluster.Name, "shard", shardOrdinal)
+	replicaConfig, _ := replicaBootstrapConfigForCluster(cluster)
+	replicaClusterEnabled := replicaConfig != nil
+	primaryUser := ""
+	primaryDBName := ""
+	primarySSLMode := ""
+	if replicaConfig != nil {
+		primaryUser = replicaConfig.User
+		primaryDBName = replicaConfig.DBName
+		primarySSLMode = replicaConfig.SSLMode
+	}
 
 	// QoS 기본값 — 사용자 spec.shards.resources 미지정 시 Burstable QoS 보장.
 	// BestEffort 는 kube-scheduler eviction 1순위 — production 위험.
@@ -566,17 +957,23 @@ func buildPGStatefulSet(
 			Replicas:    &members,
 			Selector:    &metav1.LabelSelector{MatchLabels: labels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+					Annotations: map[string]string{
+						postgresConfigHashAnnotation:       configHash,
+						postgresImageCatalogHashAnnotation: sha256Hex(image),
+					},
+				},
 				Spec: corev1.PodSpec{
 					SecurityContext:    dataplanePodSecurityContext(),
 					ServiceAccountName: InstanceServiceAccountName(cluster.Name),
-					InitContainers:     []corev1.Container{buildBootstrapContainer(image, pgMajor, shardOrdinal, primaryEndpoint, members)},
+					InitContainers:     []corev1.Container{buildBootstrapContainer(image, pgMajor, shardOrdinal, primaryEndpoint, members, replicaClusterEnabled, primaryUser, primaryDBName, primarySSLMode, replicaConfig)},
 					Containers: []corev1.Container{{
 						Name:            pgContainerName,
 						Image:           image,
 						Resources:       resources,
 						SecurityContext: dataplaneContainerSecurityContext(),
-						Env:             buildInstanceEnv(cluster.Name, shardOrdinal, pgMajor, members),
+						Env:             buildInstanceEnv(cluster.Name, shardOrdinal, pgMajor, members, primaryEndpoint, replicaClusterEnabled),
 						Ports: []corev1.ContainerPort{
 							{Name: "postgres", ContainerPort: pgPort, Protocol: corev1.ProtocolTCP},
 							{Name: "probe", ContainerPort: instanceProbePort, Protocol: corev1.ProtocolTCP},
@@ -615,14 +1012,14 @@ func buildPGStatefulSet(
 							{Name: "config", MountPath: pgConfigMountPath, ReadOnly: true},
 						}, dataplaneEphemeralVolumeMounts()...), tlsVolumeMounts(cluster)...),
 					}},
-					Volumes: append(append([]corev1.Volume{{
+					Volumes: append(append(append([]corev1.Volume{{
 						Name: "config",
 						VolumeSource: corev1.VolumeSource{
 							ConfigMap: &corev1.ConfigMapVolumeSource{
 								LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 							},
 						},
-					}}, dataplaneEphemeralVolumes()...), tlsVolumes(cluster)...),
+					}}, dataplaneEphemeralVolumes()...), tlsVolumes(cluster)...), externalClusterCredentialVolumes(replicaConfig)...),
 					// argos cycle 21 stop hook 26차: modern HA 5-layer 활성.
 					// Layer 2 TopologySpreadConstraints (multi-node 분산 SPOF 차단)
 					// + Layer 3 PriorityClassName (evict 우선순위) — CR Spec.Shards

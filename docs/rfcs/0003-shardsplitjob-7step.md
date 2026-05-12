@@ -4,29 +4,29 @@
 - Date: 2026-05-02
 - Authors: @phil
 - Target: Phase P4 (~v0.7.0)
-- Supersedes: 없음 (신규)
+- Supersedes: none (new)
 
 ## §1 Summary
 
-`ShardSplitJob` CRD 를 도입하고, **PostgreSQL logical replication 기반 7-step online resharding workflow** 를 정의한다. 단계: **Provisioning → Streaming → CatchingUp → Diffing → Cutover → Cleanup → Done**. Cutover 단계에서 router 가 source shard 의 write 를 fence (수ms ~ 수백ms) 한 후 final lag drain → ShardRange atomic 갱신 → fence 해제 순서로 진행한다. 데이터 손실 0, cutover 동안 read 가용성 유지, P99 cutover 시간 < 500ms 가 목표. 실패 시 cutover 이전은 rollback, 이후는 forward-only 정책.
+Introduce the `ShardSplitJob` CRD and define a **7-step online resharding workflow based on PostgreSQL logical replication**. Stages: **Provisioning → Streaming → CatchingUp → Diffing → Cutover → Cleanup → Done**. In the Cutover stage, the router fences writes for the source shard (a few ms to a few hundred ms), then drains final lag → atomically updates the ShardRange → unfences in that order. Goals: zero data loss, read availability maintained during cutover, P99 cutover time < 500ms. On failure: rollback before cutover, forward-only afterward.
 
 ## §2 Motivation
 
-### §2.1 문제
+### §2.1 Problem
 
-분산 DB 의 핵심 가치는 *온라인 무중단 재분할* 능력이다. 그러나 hidden complexity 가 매우 높다:
+The core value of a distributed DB is the ability to *re-partition online without downtime*. The hidden complexity is very high:
 
-- **데이터 일관성**: source 와 target shard 가 *완전 일치* 한 시점에 cutover.
-- **트랜잭션 경계**: 진행 중 transaction 의 atomicity 보장.
-- **Sequence sync**: SERIAL / IDENTITY 컬럼 시퀀스가 target 에서 jump 없이 이어져야.
-- **Materialized view**: source 에 의존하는 mview 무효화/재생성.
-- **Prepared statement plan cache**: client 의 plan 이 stale shard 를 가리킬 수 있음.
-- **Cutover SLA**: write 차단 시간이 application timeout (보통 5~10s) 을 절대 초과 X.
+- **Data consistency**: cutover at the moment when source and target shard are *fully aligned*.
+- **Transaction boundary**: atomicity of in-flight transactions.
+- **Sequence sync**: SERIAL / IDENTITY column sequences must continue without a jump on the target.
+- **Materialized views**: invalidate / regenerate mviews that depend on the source.
+- **Prepared statement plan cache**: client plans may point at a stale shard.
+- **Cutover SLA**: the write-blocked window must never exceed the application timeout (typically 5~10s).
 
-### §2.2 사용자 시나리오
+### §2.2 User scenarios
 
-**시나리오 1: 수동 split (P4 GA)**
-운영자가 모니터링에서 shard-a (200GB, p99 300ms) 과부하 감지:
+**Scenario 1: manual split (P4 GA)**
+An operator notices from monitoring that shard-a is overloaded (200GB, p99 300ms):
 ```yaml
 apiVersion: postgresql.tools/v1alpha1
 kind: ShardSplitJob
@@ -34,19 +34,19 @@ metadata: { name: split-shard-a-20260502, namespace: prod }
 spec:
   cluster: foo
   sourceShard: shard-a
-  splitPoint: "0x20000000"          # hash range 중간점
+  splitPoint: "0x20000000"          # midpoint of the hash range
   newShard: shard-a-1
 ```
-operator 가 7 단계 자동 진행, 30 분 ~ 수 시간 후 `phase: Done`. application 은 무중단.
+The operator runs the 7 stages automatically; after 30 minutes to several hours, `phase: Done`. The application has zero downtime.
 
-**시나리오 2: 자동 split (P5)**
-KEDA 가 `autoSplit.triggers` 충족 감지 → operator 가 ShardSplitJob 자동 생성. `requireApproval: true` 시 `phase: Pending` 에서 멈춤, 사용자가 `kubectl annotate ssj/... approval=yes` 로 재개.
+**Scenario 2: auto split (P5)**
+KEDA observes that `autoSplit.triggers` are satisfied → the operator auto-creates a ShardSplitJob. When `requireApproval: true`, it stops at `phase: Pending`, and the user resumes it with `kubectl annotate ssj/... approval=yes`.
 
-### §2.3 비목표
+### §2.3 Non-goals
 
-- shard merge (역방향) — P6+ 별도 RFC.
-- non-hash vindex 의 split — P5 range/consistent-hash 확장 후 별도 작업.
-- cross-cluster migration — P7+.
+- Shard merge (reverse direction) — separate RFC in P6+.
+- Splitting a non-hash vindex — separate work after the P5 range/consistent-hash extension.
+- Cross-cluster migration — P7+.
 
 ## §3 Design / Specification
 
@@ -59,13 +59,13 @@ metadata: { name: split-shard-a-20260502, namespace: prod }
 spec:
   cluster: foo                       # required
   sourceShard: shard-a                # required
-  splitPoint: "0x20000000"            # required, vindex 의존 표현
-  newShard: shard-a-1                  # required, 신규 shard 이름
-  # 선택
-  parallelism: 4                       # logical decoding worker 수
-  diffSampleRate: 0.01                 # diff 단계 sampling (1%)
+  splitPoint: "0x20000000"            # required, vindex-dependent representation
+  newShard: shard-a-1                  # required, new shard name
+  # optional
+  parallelism: 4                       # number of logical decoding workers
+  diffSampleRate: 0.01                 # sampling rate at the diff stage (1%)
   cutoverTimeoutSeconds: 30
-  approval: pending | approved         # autoSplit 승인 게이트 (P5+)
+  approval: pending | approved         # approval gate for autoSplit (P5+)
 status:
   phase: Provisioning | Streaming | CatchingUp | Diffing | Cutover | Cleanup | Done | Failed | Pending
   startedAt: "2026-05-02T10:00:00Z"
@@ -91,28 +91,28 @@ status:
   failurePhase: ""
 ```
 
-### §3.2 7 단계 상세 알고리즘
+### §3.2 7-stage detailed algorithm
 
 #### Phase 1: Provisioning
 
 ```
-1. operator 가 신규 shard StatefulSet (`<cluster>-<newShard>`) 생성
-2. PVC bound, pod ready 대기 (timeout 10min)
-3. instance manager 기동, primary election 완료 (RFC 0003 election 사용)
-4. 초기 schema 복제: pg_dump --schema-only source | pg_restore target
+1. The operator creates the new shard's StatefulSet (`<cluster>-<newShard>`)
+2. Wait for PVC bound, pod ready (timeout 10min)
+3. instance manager starts, primary election completes (use RFC 0003 election)
+4. Initial schema replication: pg_dump --schema-only source | pg_restore target
 5. status.phase: Provisioning → Streaming
 ```
 
-idempotent: 재진입 시 기존 StatefulSet 재사용. 실패 시 rollback (target shard 삭제) 가능.
+Idempotent: on re-entry, reuse the existing StatefulSet. On failure, rollback (delete the target shard) is possible.
 
 #### Phase 2: Streaming
 
-PG **native logical decoding** (PG 16+) 또는 `pglogical` extension 활용. 본 RFC 는 native logical decoding 채택 (extension 의존 0):
+Use PG **native logical decoding** (PG 16+) or the `pglogical` extension. This RFC adopts native logical decoding (zero extension dependency):
 
 ```sql
 -- source shard
 SELECT pg_create_logical_replication_slot('split_<newShard>', 'pgoutput');
-CREATE PUBLICATION split_<newShard>_pub FOR TABLE <분산테이블들>
+CREATE PUBLICATION split_<newShard>_pub FOR TABLE <distributed tables>
   WHERE (vindex_hash(distribution_column) >= 0x20000000
          AND vindex_hash(distribution_column) < 0x40000000);
 
@@ -123,34 +123,34 @@ CREATE SUBSCRIPTION split_<newShard>_sub
   WITH (copy_data = true, create_slot = false, slot_name = 'split_<newShard>');
 ```
 
-⚠ PG row-filter 는 `WHERE` expression 만 지원. 분산 column 의 hash 값을 expression 으로 표현하기 위해 **source shard 에 stored generated column** `_vindex_hash` 를 미리 추가하는 것이 권장 패턴 (스키마 마이그레이션 P3 단계에서 자동 도입).
+⚠ PG row-filter only supports `WHERE` expressions. To express the hash of the distribution column as an expression, the recommended pattern is to **add a stored generated column** `_vindex_hash` on the source shard ahead of time (auto-introduced during the P3 schema-migration stage).
 
 ```
-- copy_data: 초기 스냅샷 + 이후 streaming
-- operator 가 `pg_stat_subscription` polling 으로 진행률 갱신
-- bytesStreamed / bytesTotal 비율을 status.progressPercent 에 반영
+- copy_data: initial snapshot + subsequent streaming
+- The operator polls `pg_stat_subscription` to update progress
+- Reflects the bytesStreamed / bytesTotal ratio in status.progressPercent
 ```
 
 #### Phase 3: CatchingUp
 
 ```
-- 초기 copy 완료 후 streaming-only 모드
-- 매 1s polling: lag = source.LSN - subscription.received_lsn
-- lag < 100ms 가 30s 연속 유지되면 phase 전환
-- timeout (default 1h) 초과 시 Failed
+- After initial copy, streaming-only mode
+- Poll every 1s: lag = source.LSN - subscription.received_lsn
+- Transition phase when lag < 100ms is sustained for 30s
+- Failed on timeout (default 1h)
 ```
 
 #### Phase 4: Diffing
 
 ```
-- 분산 테이블 별로 row count 비교 (source 의 split 범위 vs target 전체)
-- spec.diffSampleRate (default 1%) 만큼 row sample 해 SHA256 비교
-- mismatch 발생 시 logical replication apply lag 증가 가능성 → 잠시 대기 후 재시도 (3회)
-- 최종 mismatch 0 → Cutover 진입, 아니면 Failed
+- Per distributed table, compare row counts (the split range on source vs. all of target)
+- Sample rows at spec.diffSampleRate (default 1%) and compare SHA256
+- On mismatch, possibly due to logical-replication apply lag → wait briefly and retry (3 times)
+- Final mismatch 0 → enter Cutover; otherwise Failed
 ```
 
 ```sql
--- diff 쿼리 (source / target 각각 실행)
+-- diff query (run on source / target each)
 SELECT count(*), md5(string_agg(md5(t.*::text), ',' ORDER BY id))
 FROM <table> t
 WHERE vindex_hash(distribution_column) >= 0x20000000
@@ -158,79 +158,79 @@ WHERE vindex_hash(distribution_column) >= 0x20000000
   AND id % 100 = 0;   -- 1% sampling
 ```
 
-#### Phase 5: Cutover (가장 critical)
+#### Phase 5: Cutover (most critical)
 
-목표: write 차단 시간 < 500ms (P99).
+Target: write-blocked window < 500ms (P99).
 
 ```
 1. cutover.fenceStartedAt = now()
-2. operator → 모든 router pod 에 gRPC fence 신호:
+2. operator → all router pods send gRPC fence signal:
      FenceShardWrites(cluster=foo, shard=shard-a, range=[0x20000000, 0x40000000))
-   router 는 해당 범위 write 를 즉시 50000 (custom error code) 반환,
-   read 는 그대로 source 에 forwarding.
-3. final lag drain: lag == 0 도달 대기 (max 5s)
-   - source 의 마지막 commit LSN 확인 → target 이 그 LSN 까지 apply 대기
-4. ShardRange CRD atomic update:
+   The router returns 50000 (custom error code) immediately for writes in that range,
+   while forwarding reads to the source as-is.
+3. final lag drain: wait until lag == 0 (max 5s)
+   - confirm source's last commit LSN → wait for target to apply up to that LSN
+4. atomic update of ShardRange CRD:
    ranges:
      - { lo: 0x00000000, hi: 0x1FFFFFFF, shard: shard-a }
-     - { lo: 0x20000000, hi: 0x3FFFFFFF, shard: shard-a-1 }   # 신규
+     - { lo: 0x20000000, hi: 0x3FFFFFFF, shard: shard-a-1 }   # new
      - ...
    server-side apply + optimistic lock
-5. router 들이 watch event 받아 routing table 갱신 (~50ms)
-6. operator → 모든 router 에 unfence 신호
+5. routers receive the watch event and refresh their routing tables (~50ms)
+6. operator → all routers send unfence signal
 7. cutover.fenceEndedAt = now()
    cutover.durationMs = fenceEndedAt - fenceStartedAt
 ```
 
-**fence 메커니즘**:
-- router 는 fence 상태를 in-memory map (`map[range]fenced`) 으로 관리.
-- gRPC 호출은 모든 router replica 에 broadcast (operator 가 EndpointSlice 로 enumerate).
-- router 한 대 응답 실패 시 cutover abort (전체 rollback).
+**Fence mechanism**:
+- The router manages fence state in an in-memory map (`map[range]fenced`).
+- The gRPC call is broadcast to all router replicas (the operator enumerates them via EndpointSlice).
+- If one router fails to respond, abort the cutover (full rollback).
 
-**Hidden complexity 처리**:
+**Hidden complexity handling**:
 
-| 이슈 | 처리 |
+| Issue | Handling |
 |---|---|
-| **Sequence sync** | source 의 `setval(seq, last_value)` 결과를 target 에 직접 적용 (cutover 직후) |
-| **Materialized view** | source 의 mview 정의를 target 에 복제 + REFRESH (Diffing 단계) |
-| **Prepared statement plan cache** | router 가 routing table reload 시 client 별 plan cache 무효화 (PG ProtocolVersion 3.0 의 Close + Parse 재발행) |
-| **활성 transaction** | fence 시점 source shard 의 in-flight tx 는 ABORT (source 에 `pg_terminate_backend` for affected ranges). client 는 retry 로 새 shard 에 연결 |
+| **Sequence sync** | apply the result of `setval(seq, last_value)` from source directly on target (right after cutover) |
+| **Materialized view** | replicate the mview definitions from source to target + REFRESH (during the Diffing stage) |
+| **Prepared statement plan cache** | when the router reloads its routing table, invalidate per-client plan caches (re-emit Close + Parse per PG ProtocolVersion 3.0) |
+| **In-flight transactions** | at fence time, ABORT in-flight tx on the source shard (`pg_terminate_backend` for the affected ranges). Clients retry and connect to the new shard |
 
 #### Phase 6: Cleanup
 
 ```
-1. source shard 의 split 범위 row 삭제:
+1. Delete rows in the split range from the source shard:
    DELETE FROM <table>
    WHERE vindex_hash(distribution_column) >= 0x20000000
      AND vindex_hash(distribution_column) < 0x40000000;
-   (parallelism 분할, throttled DELETE — wal pressure 회피)
-2. logical replication slot + publication + subscription 제거
-3. ShardRange status.generation++ 확인 (모든 router 가 동기화됨)
-4. operator 가 배포한 임시 리소스 (gen column 등) 정리
+   (partition by parallelism, throttled DELETE — avoid wal pressure)
+2. Remove the logical replication slot + publication + subscription
+3. Verify ShardRange status.generation++ (all routers synchronized)
+4. Clean up temporary resources deployed by the operator (gen column, etc.)
 ```
 
 #### Phase 7: Done
 
 ```
 - status.phase = Done
-- completedAt 기록
-- PostgresCluster.status.shards[] 갱신 (신규 shard 등재)
-- audit log: split 결과를 incident-kb (성공도 기록 권장)
+- Record completedAt
+- Update PostgresCluster.status.shards[] (register the new shard)
+- audit log: record the split result in incident-kb (recommended even on success)
 ```
 
-### §3.3 실패 / Rollback 정책
+### §3.3 Failure / rollback policy
 
-| 단계 | 실패 시 | 회복 |
+| Stage | On failure | Recovery |
 |---|---|---|
-| Provisioning | target shard pod 미생성 | StatefulSet 삭제 → ShardSplitJob 삭제 후 재시도 |
-| Streaming | replication 단절 | slot 보존 시 자동 재개. slot 손상 시 Provisioning 부터 재시작 |
-| CatchingUp | lag 무한 증가 | source write 부하 줄이거나 target 자원 증설 후 재시도 |
-| Diffing | mismatch 발생 | 3회 재시도 → 실패 시 Failed (운영자 수동 조사) |
-| **Cutover** | router fence 응답 실패 | 즉시 abort, fence 해제, source 정상화 (~수백ms 영향) |
-| Cleanup | DELETE 실패 | source 에 잔존 row 는 *논리적으로 unreachable* (router 가 새 shard 로 보냄) → forward-only, 백그라운드 재시도 |
+| Provisioning | target shard pod not created | Delete StatefulSet → delete ShardSplitJob and retry |
+| Streaming | replication broke | If slot is preserved, resume automatically. If slot is damaged, restart from Provisioning |
+| CatchingUp | lag grows unboundedly | Reduce write load on source or expand target resources, then retry |
+| Diffing | mismatch occurs | Retry 3 times → on failure, Failed (manual operator investigation) |
+| **Cutover** | router fence response fails | Immediate abort, unfence, restore source (~hundreds of ms impact) |
+| Cleanup | DELETE fails | Remaining rows on source are *logically unreachable* (router routes to the new shard) → forward-only, background retry |
 | Done | — | — |
 
-**Cutover 이후는 forward-only**: ShardRange 가 갱신되어 router 가 새 routing 사용 중. rollback 하려면 *역방향 split* (P6+ merge 기능) 필요.
+**After cutover, forward-only**: ShardRange has been updated and routers are using the new routing. To roll back, you need a *reverse split* (the merge feature, P6+).
 
 ### §3.4 CRD validation
 
@@ -266,87 +266,87 @@ type ShardSplitJobSpec struct {
 }
 ```
 
-### §3.5 Cutover SLA 측정
+### §3.5 Cutover SLA measurement
 
-router 의 prometheus metric:
+Router prometheus metrics:
 ```
 postgresql_router_shard_fence_duration_seconds{cluster, shard} histogram
 postgresql_router_shard_fence_writes_rejected_total{cluster, shard} counter
 ```
 
-operator 의 e2e 검증:
+Operator e2e verification:
 ```bash
 make test-e2e PILLAR=p4 -- --focus="cutover SLA"
-# 100 회 split 시뮬레이션 후 P99 fence_duration < 500ms 확인
+# Simulate 100 splits, verify P99 fence_duration < 500ms
 ```
 
 ## §4 Drawbacks / Trade-offs
 
-- **logical replication 의존성**: PG 16+ 필수 (PG 18 에서 row-filter + binary protocol 안정). PG 15 이하 환경은 미지원 → CRD validation 으로 차단.
-- **stored generated column 추가 부담**: 분산 테이블에 `_vindex_hash` column 추가 → 약간의 storage / write overhead. 운영 영향 < 5% (벤치 검증 필요).
-- **diff 단계 false positive**: 1% sampling 으로 3회 재시도 했음에도 mismatch 발생 가능 (간헐적 replication lag). 완화: sampling rate 동적 증가 + admin escalation alert.
-- **cutover 동안 write 거부**: `cutoverTimeoutSeconds` 초과 시 client retry 폭주 가능. 완화: client 가이드 (exponential backoff + jitter).
+- **Logical-replication dependency**: PG 16+ required (PG 18 stabilizes row-filter + binary protocol). PG 15 and below are unsupported → blocked at CRD validation.
+- **Stored generated column overhead**: adding `_vindex_hash` columns to distributed tables → some storage / write overhead. Operational impact < 5% (benchmark verification required).
+- **False positives in the diff stage**: even with 3 retries and 1% sampling, mismatches can occur (intermittent replication lag). Mitigation: dynamically increase sampling rate + admin escalation alert.
+- **Writes rejected during cutover**: if `cutoverTimeoutSeconds` is exceeded, client retry storms may occur. Mitigation: client guidance (exponential backoff + jitter).
 
 ## §5 Alternatives Considered
 
-| 대안 | 거절 사유 |
+| Alternative | Reason for rejection |
 |---|---|
-| **pg_dump + pg_restore (offline)** | 다운타임 발생, 대규모 shard 에서 시간 소요 큼 |
-| **trigger-based replication (Slony, Bucardo)** | 외부 의존 (BSD/Apache 호환이지만 운영 복잡), PG native 가 우수 |
-| **physical replication + range filter** | physical replication 은 row filter 불가 (전체 복제 후 DELETE 필요) |
-| **shadow write (dual-write from app)** | application 변경 필요, 본 operator 의 추상화 위반 |
-| **Citus `citus_split_shard_by_split_points`** | Citus 의존 (AGPL, 폐기 결정) |
+| **pg_dump + pg_restore (offline)** | causes downtime; takes too long for large shards |
+| **trigger-based replication (Slony, Bucardo)** | external dependency (BSD/Apache compatible, but operationally complex); PG native is superior |
+| **physical replication + range filter** | physical replication cannot row-filter (need to replicate everything and DELETE afterward) |
+| **shadow write (dual-write from app)** | requires application changes; violates this operator's abstraction |
+| **Citus `citus_split_shard_by_split_points`** | Citus dependency (AGPL, decided to abandon) |
 
 ## §6 Open Questions
 
-1. PG 16 의 logical replication 의 DDL replication 부재 → split 진행 중 ALTER TABLE 발생 시 깨짐. 운영 권고: split 진행 중 schema migration 차단 (admission webhook). 자동화 가능한가?
-2. `cutover.durationMs` P99 < 500ms 가 모든 cluster 크기에서 달성 가능한가? 1024-shard 클러스터의 router fence broadcast 가 bottleneck 될 가능성 → 벤치 후 P5 단계에서 evaluation.
-3. ShardSplitJob 의 history 보관 정책 (Done 후 N 일) — TTL controller 이용? `ttlSecondsAfterFinished: 604800` (7 일) 권장.
+1. PG 16 logical replication does not replicate DDL → an ALTER TABLE during a split breaks it. Operational guidance: block schema migration during a split (admission webhook). Can this be automated?
+2. Is P99 `cutover.durationMs` < 500ms achievable at every cluster size? In a 1024-shard cluster, the router fence broadcast could become a bottleneck → evaluate at the P5 stage after benchmarking.
+3. ShardSplitJob history retention policy (N days after Done) — use the TTL controller? `ttlSecondsAfterFinished: 604800` (7 days) recommended.
 
 ## §7 Implementation Plan
 
-### P3 (~v0.6.0) 사전 작업
+### P3 (~v0.6.0) preliminary work
 
-- [ ] 분산 테이블에 `_vindex_hash` stored generated column 자동 추가하는 schema migration (별도 RFC/ADR).
-- [ ] router 의 fence API gRPC interface 정의 (`internal/router/fence.proto`).
+- [ ] Schema migration that automatically adds the `_vindex_hash` stored generated column to distributed tables (separate RFC/ADR).
+- [ ] Define the router's fence API gRPC interface (`internal/router/fence.proto`).
 
-### P4 (~v0.7.0) 본 RFC 구현
+### P4 (~v0.7.0) implementation of this RFC
 
-- [ ] `api/v1alpha1/shardsplitjob_types.go` (kubebuilder marker).
+- [ ] `api/v1alpha1/shardsplitjob_types.go` (kubebuilder markers).
 - [ ] `internal/controller/resharder/controller.go` 7-phase state machine.
-- [ ] `internal/controller/resharder/phases/` 각 단계 1 파일 (provisioning.go, streaming.go, ...).
-- [ ] router 의 fence 처리 (`internal/router/fence.go`).
-- [ ] e2e: 4-shard → split 1 → 5-shard, 데이터 정합 + cutover SLA P99 < 500ms.
-- [ ] chaos test: streaming 도중 source kill / target kill / network partition.
+- [ ] `internal/controller/resharder/phases/` one file per phase (provisioning.go, streaming.go, ...).
+- [ ] Router fence handling (`internal/router/fence.go`).
+- [ ] e2e: 4-shard → split 1 → 5-shard, data consistency + cutover SLA P99 < 500ms.
+- [ ] chaos test: source kill / target kill / network partition during streaming.
 
-### P5 (~v0.8.0) 자동화
+### P5 (~v0.8.0) automation
 
-- [ ] KEDA → ShardSplitJob 자동 생성 (`approval: pending` 상태로).
-- [ ] approval annotation gate (`kubectl annotate ssj/... approval=approved`).
+- [ ] KEDA → auto-create ShardSplitJob (with `approval: pending`).
+- [ ] Approval annotation gate (`kubectl annotate ssj/... approval=approved`).
 
-### 검증 명령
+### Verification commands
 
 ```bash
-go test ./internal/controller/resharder/...        # 단위 (state machine)
-go test ./internal/router/fence/...                # fence 단위
+go test ./internal/controller/resharder/...        # unit (state machine)
+go test ./internal/router/fence/...                # fence unit
 make test-e2e PILLAR=p4 -- --focus="ShardSplitJob"
-make test-chaos PILLAR=p4                          # chaos-mesh 시나리오
-make bench PILLAR=p4                               # cutover SLA 측정
+make test-chaos PILLAR=p4                          # chaos-mesh scenarios
+make bench PILLAR=p4                               # measure cutover SLA
 ```
 
-성공 기준:
-- 데이터 손실 0 (1M row insert during split → diff 후 모두 일치).
-- Cutover P99 < 500ms (100 회 측정).
-- 실패 시 idempotent retry 로 동일 결과 도달.
+Success criteria:
+- Zero data loss (insert 1M rows during split → all match after diff).
+- Cutover P99 < 500ms (100 measurements).
+- Idempotent retry on failure reaches the same outcome.
 
 ## §8 References
 
 - Plan: `~/.claude/plans/eager-wobbling-torvalds.md` §3.3, §7.2 P4
 - PostgreSQL Logical Replication: https://www.postgresql.org/docs/18/logical-replication.html
 - pg_create_logical_replication_slot: https://www.postgresql.org/docs/18/functions-replication.html
-- Vitess VReplication (참조 only): https://vitess.io/docs/reference/vreplication/
-- Citus split_shard (참조 only, 코드 차용 0): https://docs.citusdata.com/en/stable/develop/api_udf.html
+- Vitess VReplication (for reference only): https://vitess.io/docs/reference/vreplication/
+- Citus split_shard (for reference only, 0 code reuse): https://docs.citusdata.com/en/stable/develop/api_udf.html
 - RFC 0001: PostgresCluster CRD v2
 - RFC 0002: ShardRange CRD
 - RFC 0004: pg-router architecture
-- ADR 0003: License policy (AGPL/BUSL 금지)
+- ADR 0003: License policy (no AGPL/BUSL)

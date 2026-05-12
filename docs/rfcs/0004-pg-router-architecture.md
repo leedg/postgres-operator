@@ -1,54 +1,54 @@
-# RFC-0004: pg-router 아키텍처
+# RFC-0004: pg-router architecture
 
 - Status: Draft
 - Date: 2026-05-02
 - Authors: @phil
 - Target: Phase P2 (~v0.5.0) ~ P6 (~v0.9.0)
-- Supersedes: 없음 (신규)
+- Supersedes: none (new)
 
 ## §1 Summary
 
-`pg-router` 는 **stateless PostgreSQL wire protocol proxy** 이다. application 의 PG 연결을 받아 SQL 을 parse → vindex 평가 → 단일 shard fast-path forwarding 또는 multi-shard scatter-gather 수행 후 응답을 merge 한다. 모든 분산 메타데이터 (ShardRange) 를 K8s API 로 watch 하며, 자체 상태는 보유하지 않는다 (HPA 자유 스케일). Phase 별 점진 도입: **P2** = hash vindex + 단일-shard 라우팅, **P3** = vindex 확장 + scatter-gather, **P6** = 분산 트랜잭션 coordinator. 단일 endpoint 로 application 추상화하고, single-shard fast-path latency 오버헤드 < 1ms 가 목표.
+`pg-router` is a **stateless PostgreSQL wire protocol proxy**. It accepts the application's PG connections, parses the SQL → evaluates the vindex → performs either single-shard fast-path forwarding or multi-shard scatter-gather, then merges responses. It watches all distributed metadata (ShardRange) via the K8s API and holds no state of its own (free HPA scaling). Gradual introduction by phase: **P2** = hash vindex + single-shard routing, **P3** = vindex extensions + scatter-gather, **P6** = distributed transaction coordinator. It abstracts the application behind a single endpoint, with a target single-shard fast-path latency overhead < 1ms.
 
 ## §2 Motivation
 
-### §2.1 문제
+### §2.1 Problem
 
-자체 분산 SQL 의 핵심 컴포넌트 — application 에 *PG 호환 단일 endpoint* 를 제공하면서 sharding/replication 을 추상화. 요구사항:
+A core component of the self-built distributed SQL — provides a *PG-compatible single endpoint* to the application while abstracting sharding/replication. Requirements:
 
-- **PG wire protocol 100% 호환**: libpq, JDBC, asyncpg, pq.Conn 등 모든 정식 driver 동작.
-- **stateless**: HPA 로 0~N pod 자유 스케일.
-- **low latency**: 단일-shard 쿼리는 직접 PG 호출 대비 < 1ms 추가.
-- **fault tolerant**: backend shard 1 개 실패가 다른 shard 의 쿼리에 영향 0.
-- **observable**: 쿼리 단위 prometheus / OpenTelemetry trace.
+- **100% PG wire protocol compatibility**: all canonical drivers (libpq, JDBC, asyncpg, pq.Conn, etc.) work.
+- **Stateless**: free HPA scaling from 0 to N pods.
+- **Low latency**: single-shard queries add < 1ms vs. a direct PG call.
+- **Fault tolerant**: a failure of one backend shard has zero impact on queries to other shards.
+- **Observable**: per-query prometheus / OpenTelemetry traces.
 
-### §2.2 사용자 시나리오
+### §2.2 User scenarios
 
-**시나리오 1: application 연결**
+**Scenario 1: application connection**
 ```python
 conn = psycopg.connect("postgres://user:pass@foo-router.prod.svc:5432/foo")
 cur = conn.execute("SELECT * FROM users WHERE tenant_id = %s", (42,))
-# router: tenant_id=42 → murmur3 hash → 0x71... → shard-1 → 직접 forwarding
+# router: tenant_id=42 → murmur3 hash → 0x71... → shard-1 → direct forwarding
 # latency: 0.3ms (router) + 1.2ms (shard) = 1.5ms
 ```
 
-**시나리오 2: scatter-gather (P3+)**
+**Scenario 2: scatter-gather (P3+)**
 ```python
 cur = conn.execute("SELECT count(*) FROM users")
-# router: WHERE 절 없음 → 모든 shard scatter
-# 각 shard: SELECT count(*) → router 가 SUM aggregate
-# latency: 5ms (가장 느린 shard) + 0.5ms (router merge) = 5.5ms
+# router: no WHERE clause → scatter to all shards
+# Each shard: SELECT count(*) → router applies SUM aggregate
+# latency: 5ms (slowest shard) + 0.5ms (router merge) = 5.5ms
 ```
 
-### §2.3 비목표
+### §2.3 Non-goals
 
-- SQL rewriting / federation (이종 DB) — 범위 외, 영구.
-- materialized view 분산 — P7+.
-- pg_stat_statements / EXPLAIN 호환 (분산 plan visibility) — P6 별도 작업.
+- SQL rewriting / federation (heterogeneous DBs) — out of scope, permanently.
+- Distributed materialized views — P7+.
+- pg_stat_statements / EXPLAIN compatibility (distributed plan visibility) — separate work in P6.
 
 ## §3 Design / Specification
 
-### §3.1 컴포넌트 분해
+### §3.1 Component decomposition
 
 ```
 ┌──────────────────────────────────────────────────────────┐
@@ -71,15 +71,15 @@ cur = conn.execute("SELECT count(*) FROM users")
 └──────────────────────────────────────────────────────────┘
 ```
 
-각 router pod 는 **stateless** — 재시작/재배포 자유. 유일한 *재시작 비용*: connection pool warmup + plan cache miss.
+Each router pod is **stateless** — free to restart/redeploy. The only *restart cost*: connection pool warmup + plan cache miss.
 
 ### §3.2 wire protocol parser
 
-라이브러리: **pg_query_go** (PostgreSQL License, 호환). PG core parser 를 그대로 사용 → 100% 문법 호환.
+Library: **pg_query_go** (PostgreSQL License, compatible). Uses the PG core parser as-is → 100% syntax compatibility.
 
-지원 message:
+Supported messages:
 
-| 메시지 | P2 | P3 | P6 |
+| Message | P2 | P3 | P6 |
 |---|---|---|---|
 | StartupMessage / AuthRequest / SSLRequest | ✓ | ✓ | ✓ |
 | Simple Query (`Q`) | ✓ | ✓ | ✓ |
@@ -87,10 +87,10 @@ cur = conn.execute("SELECT count(*) FROM users")
 | COPY FROM / COPY TO | partial | ✓ | ✓ |
 | LISTEN / NOTIFY | single-shard | single-shard | — |
 | FETCH (cursor) | — | — | — |
-| SAVEPOINT (분산) | — | — | partial |
+| SAVEPOINT (distributed) | — | — | partial |
 | advisory lock (cluster-wide) | — | — | — |
 
-미지원 항목은 router 가 **명시적 에러** (PG SQLSTATE 0A000 `feature_not_supported`) 반환. silent skip 금지.
+For unsupported items, the router returns an **explicit error** (PG SQLSTATE 0A000 `feature_not_supported`). No silent skipping.
 
 ### §3.3 planner
 
@@ -99,10 +99,10 @@ type Plan interface {
     Execute(ctx context.Context, conn *Connection) error
 }
 
-// 단일-shard fast path (P2+)
+// single-shard fast path (P2+)
 type SingleShardPlan struct {
     Shard   string
-    Query   string  // 원본 SQL 그대로
+    Query   string  // original SQL as-is
     Bind    []byte
 }
 
@@ -110,40 +110,40 @@ type SingleShardPlan struct {
 type ScatterPlan struct {
     Shards     []string
     Query      string
-    Aggregate  AggSpec   // count/sum/avg/min/max — router 후처리
+    Aggregate  AggSpec   // count/sum/avg/min/max — post-processed by router
     OrderBy    []OrderClause
     Limit      int
 }
 
-// distributed JOIN (P6+, colocated 만)
+// distributed JOIN (P6+, colocated only)
 type ColocatedJoinPlan struct {
     Shards []string
-    Query  string  // 각 shard 에서 동일 쿼리, 결과 UNION ALL
+    Query  string  // identical query on each shard, results UNION ALL
 }
 
-// 거부 (P2~P5: 명시적 cross-shard JOIN)
+// reject (P2~P5: explicit cross-shard JOIN)
 type RejectPlan struct{ Reason string }
 ```
 
-**plan 결정 알고리즘** (단순화):
+**Plan decision algorithm** (simplified):
 ```
 1. parse SQL → AST (pg_query_go)
-2. table 들의 keyspace 추출 (분산 / reference / colocated)
-3. WHERE 절에서 vindex column 의 = / IN 추출
-4. 추출 성공 + 단일 shard 매칭 → SingleShardPlan
-5. 추출 실패 + read-only + aggregate 가능 → ScatterPlan
-6. 분산 JOIN + 모든 table 이 colocated 그룹 → ColocatedJoinPlan
-7. 그 외 → RejectPlan ("cross-shard JOIN not supported")
+2. extract the tables' keyspaces (distributed / reference / colocated)
+3. extract = / IN on vindex columns from the WHERE clause
+4. extraction success + matches a single shard → SingleShardPlan
+5. extraction fails + read-only + aggregatable → ScatterPlan
+6. distributed JOIN + all tables in the same colocated group → ColocatedJoinPlan
+7. otherwise → RejectPlan ("cross-shard JOIN not supported")
 ```
 
 ### §3.4 plan cache
 
-**LRU cache** (key = SQL 정규화 + bind type signature, value = compiled Plan):
+**LRU cache** (key = normalized SQL + bind-type signature, value = compiled Plan):
 
 ```go
 type PlanCache struct {
     mu    sync.RWMutex
-    lru   *lru.Cache[planKey, Plan]   // size 1024 default
+    lru   *lru.Cache[planKey, Plan]   // default size 1024
 }
 
 func (c *PlanCache) GetOrCompile(sql string, bindTypes []OID) Plan {
@@ -158,21 +158,21 @@ func (c *PlanCache) GetOrCompile(sql string, bindTypes []OID) Plan {
 }
 ```
 
-**무효화**: ShardRange `status.generation` 변경 시 *전체* plan cache flush. 빈도가 낮아 (split 시 1 회) 비용 무시.
+**Invalidation**: when ShardRange `status.generation` changes, flush the *entire* plan cache. Low frequency (once per split), so cost is negligible.
 
 ### §3.5 connection pool (per-shard)
 
-각 shard 별 pool. PG `MaxConnections` (default 100) 한계 회피 위해 router 가 application 측 connection 을 *내부적으로 multiplex*.
+A pool per shard. To avoid PG's `MaxConnections` (default 100) limit, the router *internally multiplexes* application connections.
 
 ```go
 type ShardPool struct {
-    primary    *PGXPool   // master 쓰기
-    replicas   []*PGXPool // read 분산 (latest-aware)
+    primary    *PGXPool   // master writes
+    replicas   []*PGXPool // read distribution (latest-aware)
     config     PoolConfig // size, idleTimeout, ...
 }
 ```
 
-**옵션 (P3+)**: per-tenant 격리.
+**Option (P3+)**: per-tenant isolation.
 ```yaml
 spec:
   router:
@@ -181,13 +181,13 @@ spec:
       tenantColumn: tenant_id
       maxConnsPerTenant: 10
 ```
-"noisy neighbor" 효과 제거. 단, connection 갯수 증가 → shard 부하.
+Removes "noisy neighbor" effects. Note: the number of connections grows → shard load increases.
 
-**transaction-aware**: BEGIN ~ COMMIT 사이에는 같은 backend connection 고정 (transaction sticky).
+**Transaction-aware**: between BEGIN ~ COMMIT, the same backend connection is pinned (transaction sticky).
 
 ### §3.6 scatter-gather concurrency (P3+)
 
-기본 default `concurrency: 8` (8 개 shard 까지 병렬). 더 많으면 batch 단위 처리.
+Default `concurrency: 8` (parallel across up to 8 shards). Larger fan-outs are processed in batches.
 
 ```go
 func (p *ScatterPlan) Execute(ctx context.Context, conn *Connection) error {
@@ -210,39 +210,39 @@ func (p *ScatterPlan) Execute(ctx context.Context, conn *Connection) error {
 }
 ```
 
-merge 단계는 router 측 stream 처리 (memory pressure 회피):
-- `count(*)` → 단순 합산.
+The merge stage is stream-processed at the router (to avoid memory pressure):
+- `count(*)` → simple summation.
 - `ORDER BY ... LIMIT N` → top-N heap.
-- `GROUP BY` → router 측 hash aggregate.
+- `GROUP BY` → hash aggregate on the router side.
 
 ### §3.7 distributed transaction coordinator (P6+)
 
-자세한 spec 은 RFC 0005 참조. 본 RFC 는 router 의 책임 영역만:
+See RFC 0005 for the detailed spec. This RFC only covers the router's responsibilities:
 
 ```go
 type DTxCoordinator struct {
     txID      uuid.UUID
-    shards    []*ShardConn  // 참여 shard 들
+    shards    []*ShardConn  // participating shards
     state     TxState        // Active | Preparing | Prepared | Committing | Aborting
-    log       *TxLog          // operator leader 가 etcd lease 로 관리
+    log       *TxLog          // managed by the operator leader via etcd lease
 }
 
-// router 가 BEGIN 받으면:
-// - 단일 shard 인 경우: 직접 PG BEGIN forwarding (오버헤드 0)
-// - 다중 shard 가 추후 발견: lazy 2PC 시작
+// When the router receives BEGIN:
+// - For a single shard: forward PG BEGIN directly (zero overhead)
+// - When a second shard appears later: start lazy 2PC
 ```
 
-**recovery**: router crash 시 in-flight prepared txn 은 operator leader 가 가시화 (etcd 의 tx log 조회). 새 router 가 takeover 후 PREPARED 상태 txn 들에 대해 COMMIT 또는 ROLLBACK 결정.
+**Recovery**: on router crash, in-flight prepared txns are made visible by the operator leader (lookup tx log in etcd). After a new router takes over, it decides COMMIT or ROLLBACK for txns in the PREPARED state.
 
-### §3.8 보안
+### §3.8 Security
 
-- **TLS 강제**: client → router (mTLS optional), router → shard (mTLS 필수, cert-manager 발급).
-- **인증 위임**: router 는 SCRAM-SHA-256 만 지원. md5 미지원 (PG 15+ deprecated).
-- **role 매핑**: PG role 은 모든 shard 에 동일 정의 (operator 가 sync). per-router 가상 role 미지원 (P7+).
+- **TLS enforced**: client → router (mTLS optional), router → shard (mTLS mandatory, certs issued by cert-manager).
+- **Authentication delegation**: the router supports only SCRAM-SHA-256. md5 is not supported (PG 15+ deprecated).
+- **Role mapping**: PG roles are defined identically on all shards (the operator syncs them). Per-router virtual roles are not supported (P7+).
 
-### §3.9 관찰성
+### §3.9 Observability
 
-prometheus metrics (HPA 입력 포함):
+prometheus metrics (including HPA inputs):
 ```
 postgresql_router_query_duration_seconds{plan_type, status}  histogram
 postgresql_router_active_connections{role=client|backend}    gauge
@@ -253,7 +253,7 @@ postgresql_router_scatter_concurrency                        gauge
 postgresql_router_shard_fence_writes_rejected_total          counter
 ```
 
-OpenTelemetry trace: 1 query = 1 root span + 1 span per shard.
+OpenTelemetry traces: 1 query = 1 root span + 1 span per shard.
 
 ### §3.10 HPA / Autoscale
 
@@ -278,73 +278,73 @@ spec:
 
 ## §4 Drawbacks / Trade-offs
 
-- **추가 hop latency**: 단일-shard 라도 +0.5~1ms 오버헤드 (parse + lookup + forwarding). 성능 critical app 에는 단점. 완화: shard 의 primary Service 를 직접 노출 (router 우회) 하는 *bypass mode* 옵션 (P5+ 검토).
-- **unsupported feature 다수**: cursor / advisory lock / SAVEPOINT 분산 등 영구 미지원 항목이 application portability 제약. 완화: 명확한 문서 + e2e 테스트로 지원 범위 lock-in.
-- **plan cache invalidation overhead**: split 시 모든 router 의 cache flush → 쿼리 latency 일시 spike. 완화: 점진 무효화 (ShardRange 의 keyspace 단위만 flush).
-- **stateful 한 client 행위 (`SET search_path`)**: per-connection state 는 router 가 sticky 처리. shard 간 동기화 필요한 SET 은 모두 거부 (예: `SET LOCAL`).
+- **Extra hop latency**: even single-shard adds +0.5~1ms overhead (parse + lookup + forwarding). A downside for performance-critical apps. Mitigation: consider a *bypass mode* option (P5+) that exposes the shard's primary Service directly (bypassing the router).
+- **Many unsupported features**: cursor / advisory lock / distributed SAVEPOINT etc. are permanently unsupported, constraining application portability. Mitigation: clear documentation + lock the supported range with e2e tests.
+- **plan cache invalidation overhead**: every split flushes the cache on every router → temporary spike in query latency. Mitigation: incremental invalidation (flush only the keyspace of the affected ShardRange).
+- **Stateful client behavior (`SET search_path`)**: per-connection state is handled stickily by the router. SET statements that require cross-shard sync are all rejected (e.g., `SET LOCAL`).
 
 ## §5 Alternatives Considered
 
-| 대안 | 거절 사유 |
+| Alternative | Reason for rejection |
 |---|---|
-| **PgBouncer + 자체 sharding logic 추가** | PgBouncer 는 connection pool 만, SQL parse 미지원. 포크 부담 |
-| **HAProxy (PG 모드)** | wire protocol 이해 부족, vindex 기반 라우팅 불가 |
-| **Vitess vtgate 차용 (Apache 2.0)** | MySQL 전용. PG 포팅 = 사실상 신규 프로젝트 |
-| **Citus router** | AGPL, 폐기 결정 |
-| **client-side sharding (libpq 확장)** | application 변경 부담, language 별 SDK 다수 필요 |
+| **PgBouncer + add own sharding logic** | PgBouncer is only a connection pool, no SQL parsing. Fork burden |
+| **HAProxy (PG mode)** | Insufficient understanding of the wire protocol, cannot do vindex-based routing |
+| **Reuse Vitess vtgate (Apache 2.0)** | MySQL-only. PG porting = essentially a new project |
+| **Citus router** | AGPL, decided to abandon |
+| **client-side sharding (libpq extension)** | Application change burden, many language-specific SDKs needed |
 
 ## §6 Open Questions
 
-1. `LISTEN/NOTIFY` 의 cluster-wide 전파 — 별도 pub-sub bus 도입? P5+ RFC 후보.
-2. `EXPLAIN` 출력 — router 가 distributed plan 을 어떻게 표현? PG 호환 format vs 자체 format.
-3. read replica 라우팅의 staleness tolerance — annotation 으로 명시 (`/*+ stale_ok=5s */`)? application 전환 부담 vs router default.
+1. Cluster-wide propagation for `LISTEN/NOTIFY` — introduce a separate pub-sub bus? Candidate for P5+ RFC.
+2. `EXPLAIN` output — how should the router represent a distributed plan? PG-compatible format vs. our own format.
+3. Staleness tolerance for read-replica routing — express via annotation (`/*+ stale_ok=5s */`)? Application transition burden vs. router default.
 
 ## §7 Implementation Plan
 
 ### P2 (~v0.5.0)
 
-- [ ] `cmd/router/main.go` + `internal/router/` 패키지 구조.
+- [ ] `cmd/router/main.go` + `internal/router/` package structure.
 - [ ] PG wire protocol frontend (`internal/router/wire/frontend.go`):
   - StartupMessage, SSL/TLS, SCRAM auth.
   - Simple + Extended query.
-- [ ] hash vindex 평가 (`internal/vindex/hash.go`).
-- [ ] 단일-shard plan + 직접 forwarding.
-- [ ] ShardRange watch + routing table reload.
-- [ ] connection pool (pgx 의 pgxpool 활용, MIT).
-- [ ] HPA + ServiceMonitor + NetworkPolicy chart 추가.
-- [ ] e2e: 4-shard 쿼리 → 정확한 shard 라우팅, latency P99 < 5ms.
+- [ ] Hash vindex evaluation (`internal/vindex/hash.go`).
+- [ ] Single-shard plan + direct forwarding.
+- [ ] ShardRange watch + routing-table reload.
+- [ ] Connection pool (use pgxpool from pgx, MIT).
+- [ ] HPA + ServiceMonitor + NetworkPolicy chart additions.
+- [ ] e2e: 4-shard queries → exact shard routing, latency P99 < 5ms.
 
 ### P3 (~v0.6.0)
 
-- [ ] vindex 확장 (range, consistent-hash, lookup).
+- [ ] vindex extensions (range, consistent-hash, lookup).
 - [ ] scatter-gather plan + merge (count/sum/avg/min/max/order-by-limit).
-- [ ] plan cache LRU.
-- [ ] read replica 라우팅 (latest-aware).
+- [ ] LRU plan cache.
+- [ ] Read-replica routing (latest-aware).
 
 ### P6 (~v0.9.0)
 
-- [ ] dtx coordinator (2PC 기반, RFC 0005 와 통합).
-- [ ] colocated JOIN.
-- [ ] saga 명시 declaration 처리.
+- [ ] dtx coordinator (2PC-based, integrated with RFC 0005).
+- [ ] Colocated JOIN.
+- [ ] Handle explicit saga declarations.
 
-### 검증 명령
+### Verification commands
 
 ```bash
-go test ./internal/router/...                       # 단위
-go test ./internal/router/wire/...                  # PG wire 호환 fuzz
+go test ./internal/router/...                       # unit
+go test ./internal/router/wire/...                  # PG wire compatibility fuzz
 make test-e2e PILLAR=p2 -- --focus="router single-shard"
-make bench PILLAR=p2 -- --target=router-latency     # P99 < 1ms 추가 오버헤드 확인
+make bench PILLAR=p2 -- --target=router-latency     # verify P99 < 1ms added overhead
 make test-e2e PILLAR=p3 -- --focus="scatter-gather"
 make test-driver-compat                              # libpq, JDBC, asyncpg, pq.Conn smoke
 ```
 
 ## §8 References
 
-- Plan: `~/.claude/plans/eager-wobbling-torvalds.md` §2.3 신설 컴포넌트, §3.3 알고리즘
+- Plan: `~/.claude/plans/eager-wobbling-torvalds.md` §2.3 newly added components, §3.3 algorithm
 - pg_query_go: https://github.com/pganalyze/pg_query_go (PostgreSQL License)
 - pgx: https://github.com/jackc/pgx (MIT)
 - PostgreSQL Frontend/Backend Protocol: https://www.postgresql.org/docs/18/protocol.html
-- Vitess vtgate (참조 only, 코드 차용 0): https://vitess.io/docs/concepts/vtgate/
+- Vitess vtgate (for reference only, 0 code reuse): https://vitess.io/docs/concepts/vtgate/
 - RFC 0001: PostgresCluster CRD v2
 - RFC 0002: ShardRange CRD
 - RFC 0003: ShardSplitJob 7-step

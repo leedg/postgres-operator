@@ -1,28 +1,28 @@
-# RFC-0001: PostgresCluster CRD v2 (재정의)
+# RFC-0001: PostgresCluster CRD v2 (redefinition)
 
 - Status: Draft
 - Date: 2026-05-02
 - Authors: @phil
 - Target: Phase P1 (~v0.4.0)
-- Supersedes: `_archive/v0.x/0001-*` ~ `0005-*` (Citus backend 의존 모델 폐기)
+- Supersedes: `_archive/v0.x/0001-*` ~ `0005-*` (the Citus-backend-dependent model is abandoned)
 
 ## §1 Summary
 
-`PostgresCluster` CRD 의 `spec` / `status` 를 재정의한다. 기존 0.2.0-alpha 의 `sharding.backend: vanilla|citus` 이중 모델을 폐기하고, **자체 native 분산 SQL** 단일 경로를 채택한다. `shards`, `router`, `autoSplit`, `backup` 4 개 핵심 섹션을 도입하고 status 에 `shards[]` array 를 추가하여 multi-shard 토폴로지를 가시화한다. Phase P1 에서는 `shards.initialCount=1` (single-shard) 만 GA 로 지원하며 `router` / `autoSplit` 필드는 P2+ 에서 활성화된다.
+Redefine the `spec` / `status` of the `PostgresCluster` CRD. Abandon the dual model of `sharding.backend: vanilla|citus` from the previous 0.2.0-alpha, and adopt a single path of **self-built native distributed SQL**. Introduce 4 core sections — `shards`, `router`, `autoSplit`, `backup` — and add a `shards[]` array under status to expose the multi-shard topology. In Phase P1, only `shards.initialCount=1` (single-shard) is supported as GA; the `router` / `autoSplit` fields are activated from P2 onward.
 
 ## §2 Motivation
 
-### §2.1 폐기 사유
+### §2.1 Reason for abandonment
 
-기존 `PostgresClusterSpec` 은 RFC 0005 (Phase 2A 동결) 에서 `ShardingPlugin` 인터페이스를 통해 Citus / vanilla 두 backend 를 추상화했다. 사용자 결정 (2026-05-02) 으로 외부 분산 SQL 의존 (Citus AGPL, CockroachDB BUSL, CNPG API drift) 을 모두 제거하고 *자체 분산 SQL* 으로 단일화함에 따라:
+The previous `PostgresClusterSpec` abstracted two backends (Citus / vanilla) via the `ShardingPlugin` interface in RFC 0005 (Phase 2A freeze). With the user decision (2026-05-02) to remove all external distributed-SQL dependencies (Citus AGPL, CockroachDB BUSL, CNPG API drift) and unify on *self-built distributed SQL*:
 
-- backend 추상화 자체가 over-engineering 이 됨 (구현체 1 개).
-- `sharding.backend` enum 은 의미 상실.
-- shard 단위 메타데이터 (StatefulSet 명, primary endpoint, size) 가 status 에 부재.
+- Backend abstraction itself becomes over-engineering (only 1 implementation).
+- The `sharding.backend` enum loses meaning.
+- Per-shard metadata (StatefulSet name, primary endpoint, size) is missing from status.
 
-### §2.2 사용자 시나리오
+### §2.2 User scenarios
 
-**시나리오 1: single-shard 시작**
+**Scenario 1: start single-shard**
 ```yaml
 apiVersion: postgresql.tools/v1alpha1
 kind: PostgresCluster
@@ -32,26 +32,26 @@ spec:
   shards: { initialCount: 1, storage: { size: 50Gi }, replicas: 2 }
   backup: { schedule: "0 2 * * *" }
 ```
-사용자는 router 를 거치지 않고 primary Service (`foo-shard-0-primary`) 로 직접 연결. 운영 중 트래픽 증가 시 P2 이상 업그레이드 후 shard 추가.
+The user connects directly to the primary Service (`foo-shard-0-primary`) without going through the router. When traffic grows during operation, upgrade to P2 or later and then add shards.
 
-**시나리오 2: multi-shard + router**
+**Scenario 2: multi-shard + router**
 ```yaml
 spec:
   shards: { initialCount: 4, storage: { size: 100Gi }, replicas: 2 }
   router: { replicas: 3, autoscale: { enabled: true, minReplicas: 2, maxReplicas: 20 } }
   autoSplit: { enabled: true, triggers: { sizeThresholdGB: 100 } }
 ```
-Application 은 `foo-router` Service 1 개에만 연결. operator 가 router Deployment + ShardRange 기본값 + KEDA ScaledObject 자동 생성.
+The application connects to a single `foo-router` Service. The operator auto-creates the router Deployment, the ShardRange default, and the KEDA ScaledObject.
 
-### §2.3 비목표
+### §2.3 Non-goals
 
-- multi-tenant DB-per-tenant 격리 (별도 RFC, P5+).
-- 외부 PostgreSQL 흡수 (already-running PG import) — P7+.
-- declarative HBA / role 관리 — P3 별도 CRD.
+- Multi-tenant DB-per-tenant isolation (separate RFC, P5+).
+- Importing external PostgreSQL (already-running PG import) — P7+.
+- Declarative HBA / role management — separate CRD in P3.
 
 ## §3 Design / Specification
 
-### §3.1 spec 전체 구조
+### §3.1 Full spec structure
 
 ```yaml
 apiVersion: postgresql.tools/v1alpha1
@@ -66,9 +66,9 @@ spec:
       size: 100Gi                  # required
       storageClass: gp3-iops       # optional
       accessModes: ["ReadWriteOnce"]
-    replicas: 2                    # per-shard async replica 수, default 1
+    replicas: 2                    # per-shard async replica count, default 1
     resources: { requests, limits }
-    affinity: { ... }              # 표준 PodAffinity
+    affinity: { ... }              # standard PodAffinity
     tolerations: [...]
   router:
     enabled: true                  # default true if shardingMode=native
@@ -98,7 +98,7 @@ spec:
     prometheusRule: { enabled: true }
 ```
 
-### §3.2 status 전체 구조
+### §3.2 Full status structure
 
 ```yaml
 status:
@@ -224,7 +224,7 @@ CEL validation (kubebuilder v0.15+):
 // +kubebuilder:validation:XValidation:rule="!has(self.autoSplit) || self.autoSplit.enabled == false || self.shardingMode == 'native'",message="autoSplit requires shardingMode=native"
 ```
 
-### §3.4 Status 머신
+### §3.4 Status machine
 
 ```
 Provisioning ──(all shards ready)──▶ Ready
@@ -232,74 +232,74 @@ Ready ──(shard add/split/replica scale)──▶ Reconfiguring ──▶ Rea
 Ready ──(any shard primary down > 30s)──▶ Degraded ──(recover)──▶ Ready
 ```
 
-`conditions[]` 표준 type: `Ready`, `Progressing`, `BackupHealthy`, `AutoSplitEligible`, `RouterReady` (P2+).
+`conditions[]` standard types: `Ready`, `Progressing`, `BackupHealthy`, `AutoSplitEligible`, `RouterReady` (P2+).
 
-### §3.5 Default 동작
+### §3.5 Default behavior
 
-| 필드 | default | 비고 |
+| Field | default | Note |
 |---|---|---|
 | `postgresVersion` | `"18"` | LTS |
-| `shardingMode` | `"none"` | router/autoSplit 비활성 |
+| `shardingMode` | `"none"` | router/autoSplit disabled |
 | `shards.replicas` | `1` | sync replica 1 + async 0 |
-| `router.replicas` | `2` | HA 최소 |
-| `autoSplit.enabled` | `false` | 사고 방지 |
+| `router.replicas` | `2` | HA minimum |
+| `autoSplit.enabled` | `false` | accident prevention |
 | `autoSplit.requireApproval` | `true` | production safety |
-| `backup.enabled` | `false` | 사용자 명시 opt-in |
+| `backup.enabled` | `false` | requires explicit user opt-in |
 
 ## §4 Drawbacks / Trade-offs
 
-- **호환성 깨짐**: 기존 0.2.0-alpha `spec.sharding.backend` 사용자는 manifest 재작성 필수. alpha 채널이라 허용되지만 사용자 통지 (CHANGELOG breaking change) 필수.
-- **status 비대화**: shards 가 1024 개일 때 `status.shards[]` 가 매우 커짐 (~1MB 가능). etcd object size limit (1.5MB) 근접. P5+ 에서 별도 `ShardStatus` CRD 분리 검토.
-- **field bloat**: 12 개 sub-spec 으로 학습 곡선 가파름. 완화: `kubectl explain postgrescluster.spec` + helm `values.yaml` 1-line preset.
+- **Compatibility break**: existing 0.2.0-alpha users of `spec.sharding.backend` must rewrite their manifests. Allowed because of the alpha channel, but user notification (CHANGELOG breaking change) is required.
+- **status bloat**: when there are 1024 shards, `status.shards[]` becomes very large (~1MB possible). Approaches the etcd object size limit (1.5MB). Consider splitting into a separate `ShardStatus` CRD from P5+.
+- **field bloat**: the learning curve is steep with 12 sub-specs. Mitigation: `kubectl explain postgrescluster.spec` + 1-line helm `values.yaml` presets.
 
 ## §5 Alternatives Considered
 
-| 대안 | 거절 사유 |
+| Alternative | Reason for rejection |
 |---|---|
-| **CRD 분리** (`PostgresCluster` + `PostgresShardSet` + `PostgresRouter`) | reconcile 복잡도 ↑, single-shard 사용자에게 over-engineering |
-| **annotation 기반 sharding** (CRD 변경 X) | type safety 부재, kubectl explain 불가, IDE 자동완성 불가 |
-| **CNPG 호환 spec 채용** | 우리 결정 (의존 제거) 와 충돌, API drift 위험 영구 부담 |
+| **CRD split** (`PostgresCluster` + `PostgresShardSet` + `PostgresRouter`) | reconcile complexity ↑, over-engineering for single-shard users |
+| **annotation-based sharding** (no CRD change) | no type safety, no kubectl explain, no IDE autocompletion |
+| **Adopt CNPG-compatible spec** | conflicts with our decision (dependency removal); permanent risk of API drift |
 
 ## §6 Open Questions
 
-1. `shards.replicas` 명칭 모호 (per-shard async replica 수 vs 전체 shard 수). → P1 구현 시 `shards.replicasPerShard` 로 명명 변경 검토.
-2. `autoSplit.triggers` AND/OR 의미 (현재 모두 AND). 사용자 명시 표현식 (`expr: "size > 100 && cpu > 70"`) 도입 여부 → P5 결정.
-3. `monitoring.grafanaDashboard` 자동 배포는 본 RFC 범위 외 (별도 RFC 0006 candidate).
+1. The name `shards.replicas` is ambiguous (per-shard async replica count vs. total shard count). → Consider renaming to `shards.replicasPerShard` at P1 implementation time.
+2. AND/OR semantics of `autoSplit.triggers` (currently all AND). Whether to introduce a user-explicit expression (`expr: "size > 100 && cpu > 70"`) → decide at P5.
+3. Automatic deployment of `monitoring.grafanaDashboard` is out of scope for this RFC (candidate for separate RFC 0006).
 
 ## §7 Implementation Plan
 
-### P0 (이번 세션)
-- [x] 본 RFC Draft 작성.
-- [ ] `api/v1alpha1/postgrescluster_types.go` 신규 spec/status 정의 (P1 작업).
+### P0 (this session)
+- [x] Draft this RFC.
+- [ ] Define the new spec/status in `api/v1alpha1/postgrescluster_types.go` (P1 work).
 
 ### P1 (~v0.4.0)
-- [ ] `api/v1alpha1/postgrescluster_types.go` 재구현 (kubebuilder marker 포함).
-- [ ] `make manifests` → CRD yaml 생성 검증.
-- [ ] `internal/controller/postgrescluster_controller.go` upsert 경로 갱신 (single-shard reconcile).
-- [ ] CEL validation rule 단위 테스트 (`api/v1alpha1/postgrescluster_validation_test.go`).
-- [ ] e2e: single-shard 배포 → primary write/read → status.shards[0].sizeBytes 갱신 확인.
+- [ ] Reimplement `api/v1alpha1/postgrescluster_types.go` (including kubebuilder markers).
+- [ ] Verify CRD yaml generation via `make manifests`.
+- [ ] Update the upsert path in `internal/controller/postgrescluster_controller.go` (single-shard reconcile).
+- [ ] Unit-test CEL validation rules (`api/v1alpha1/postgrescluster_validation_test.go`).
+- [ ] e2e: single-shard deployment → primary write/read → confirm status.shards[0].sizeBytes updates.
 
-### P2~P5 (점진 활성)
-- P2: `router.*` 필드 reconcile (Deployment 생성).
-- P4: `autoSplit.*` 필드 reconcile (ShardSplitJob 자동 생성).
-- P5: `autoSplit.requireApproval` annotation gate 구현.
+### P2~P5 (gradual activation)
+- P2: reconcile `router.*` fields (create Deployment).
+- P4: reconcile `autoSplit.*` fields (auto-create ShardSplitJob).
+- P5: implement the `autoSplit.requireApproval` annotation gate.
 
-### 검증 명령
+### Verification commands
 
 ```bash
 make manifests && make generate
 go test ./api/v1alpha1/...                        # CEL + struct validation
-make test                                          # 전체 단위
+make test                                          # all unit tests
 helm template charts/postgres-operator | kubectl apply --dry-run=server -f -
-make test-e2e PILLAR=p1                            # single-shard 시나리오
+make test-e2e PILLAR=p1                            # single-shard scenario
 ```
 
 ## §8 References
 
 - Plan: `~/.claude/plans/eager-wobbling-torvalds.md` §3.2
-- Archive: `docs/rfcs/_archive/v0.x/0001-vanilla-default.md` (구 single-backend 결정)
-- Archive: `docs/rfcs/_archive/v0.x/0005-sharding-plugin-interface.md` (구 dual-backend 추상화)
+- Archive: `docs/rfcs/_archive/v0.x/0001-vanilla-default.md` (old single-backend decision)
+- Archive: `docs/rfcs/_archive/v0.x/0005-sharding-plugin-interface.md` (old dual-backend abstraction)
 - Kubebuilder CEL validation: https://book.kubebuilder.io/reference/markers/crd-validation.html
-- Operator Capability Levels: https://operatorframework.io/operator-capabilities/ (Auto Pilot 도달 목표)
+- Operator Capability Levels: https://operatorframework.io/operator-capabilities/ (Auto Pilot reach goal)
 - ADR 0001: `docs/kb/adr/0001-self-built-distributed-sql.md`
 - ADR 0004: `docs/kb/adr/0004-crd-managed-by-operator.md`

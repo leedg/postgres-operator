@@ -110,7 +110,7 @@ simultaneously.
 **PVC fencing (P2-T2, active since 2026-04-28)** — in scenario C the old
 leader returning from the dead would cause split-brain; PVC-label-based
 fencing prevents it. See
-[RFC-0007 Appendix A — PVC fencing protocol](../rfcs/0007-ha-election-and-fencing.md#6-부록-a--pvc-fencing-프로토콜-상세-p2-t2-implemented-2026-04-28)
+[RFC-0007 Appendix A — PVC fencing protocol](../rfcs/0007-ha-election-and-fencing.md#6-appendix-a--pvc-fencing-protocol-details-p2-t2-implemented-2026-04-28)
 for the full protocol. Knob: `--fencing-disabled` (development only,
 forbidden in production).
 

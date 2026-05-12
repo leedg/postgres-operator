@@ -1,18 +1,18 @@
-# ADR-0006: GitOps deploy 오버레이 도입 (3-repo 정합)
+# ADR-0006: Introducing the GitOps deploy overlay (3-repo alignment)
 
-- Date: 2026-05-06 (revised 2026-05-08: live GitOps 배포 상태 반영)
+- Date: 2026-05-06 (revised 2026-05-08: reflect live GitOps deployment status)
 - Status: Accepted
 - Authors: @eightynine01
 
 ## Context
 
-`keiailab/{mongodb,postgresql,valkey}-operator` 3 repo 는 Operator SDK / kubebuilder 로 부트스트랩 되어 모두 `config/{crd,rbac,manager,default,...}` kustomize 트리를 가진다. `config/default` 는 namespace 를 `<op>-operator-system` 으로, namePrefix 를 `<op>-operator-` 로 강제한다. 이는 `make deploy` 같은 *단발성 클러스터 푸시* 에 적합하지만 GitOps (ArgoCD 가 git → cluster 단방향 동기) 시나리오에서는 다음 문제가 있다:
+The 3 repos `keiailab/{mongodb,postgresql,valkey}-operator` were bootstrapped from Operator SDK / kubebuilder and all carry a `config/{crd,rbac,manager,default,...}` kustomize tree. `config/default` forces the namespace to `<op>-operator-system` and the namePrefix to `<op>-operator-`. This is appropriate for *one-shot cluster pushes* such as `make deploy`, but in a GitOps scenario (ArgoCD does git → cluster one-way sync) it has the following problems:
 
-1. ArgoCD Application 의 `destination.namespace` 가 `prod` 로 운영되는데 `config/default` 의 `namespace: <op>-operator-system` 와 어긋남 → drift 가 영구화.
-2. `config/default` 가 자동 생성하는 Namespace 리소스 (`<op>-operator-system`) 를 ArgoCD 가 매번 만들려 함 → prod 클러스터의 *사전 생성된 prod ns* 정책과 충돌.
-3. 3 repo 중 mongodb-operator 만 `deploy/overlays/prod/` 진입점이 있어 정합성 불일치.
+1. The ArgoCD Application's `destination.namespace` is operated as `prod`, but `config/default` says `namespace: <op>-operator-system` — they disagree → drift becomes permanent.
+2. ArgoCD repeatedly tries to create the Namespace resource (`<op>-operator-system`) that `config/default` auto-generates → conflicts with the prod cluster's *pre-created prod ns* policy.
+3. Of the 3 repos, only mongodb-operator has the `deploy/overlays/prod/` entry point, so the structures are inconsistent.
 
-### 현 운영 상태 (2026-05-06 인벤토리, kubectl 직접 조회)
+### Current operating state (2026-05-06 inventory, direct kubectl queries)
 
 ```
 $ kubectl config current-context
@@ -33,42 +33,42 @@ platform-data-valkey     OutOfSync   Degraded
 
 <!-- live-verified: 2026-05-06 -->
 
-도출 결정:
+Derived decisions:
 
-- **ns 통합 정책 적용**: argos 2026-05-06 사용자 명시 cycle 에 따라 5 차트 (cnpg/mongodb/valkey/nats/clickhouse) 모두 `data` ns 단일 통합. 본 ADR 의 `deploy/overlays/prod/kustomization.yaml` 도 `namespace: data` 로 정합 (envName=prod 는 식별자로만 유지).
-- **StorageClass 정합**: `ceph-block` 부재. argos 클러스터의 default = `ceph-rbd`. CR sample 의 `storageClass` 도 `ceph-rbd` 로 변경.
-- **postgresql 배포 상태 갱신(2026-05-08)**: 최초 2026-05-06 인벤토리에서는 ApplicationSet path 에 postgresql 이 없었으나, 이후 argos-platform-data Helm wrapper (`platform/data/postgres-operator`) 가 production source of truth 로 채택됐다. 현재 `platform-data-postgres-operator` 는 `Synced/Healthy`, controller Deployment 는 `1/1`, `PostgresCluster/argos-postgres` 는 `Ready=True` 이다. 본 deploy/ 는 직접 적용용 대체 진입점으로 유지한다.
-- **mongodb / valkey**: 각각 argos-platform-data umbrella chart 와 bitnami chart 로 운영 중. 본 deploy/ 는 *대안/예비 진입점*. 동시 적용 시 helm release 충돌.
+- **Apply ns unification policy**: per the argos 2026-05-06 user-explicit cycle, unify all 5 charts (cnpg/mongodb/valkey/nats/clickhouse) into the single `data` ns. The `deploy/overlays/prod/kustomization.yaml` of this ADR also aligns with `namespace: data` (envName=prod is kept only as an identifier).
+- **StorageClass alignment**: `ceph-block` is absent. The default of the argos cluster is `ceph-rbd`. The `storageClass` in CR samples is also changed to `ceph-rbd`.
+- **postgresql deployment status update (2026-05-08)**: at the initial 2026-05-06 inventory, postgresql was not in the ApplicationSet path, but the argos-platform-data Helm wrapper (`platform/data/postgres-operator`) was subsequently adopted as the production source of truth. Currently `platform-data-postgres-operator` is `Synced/Healthy`, the controller Deployment is `1/1`, and `PostgresCluster/argos-postgres` is `Ready=True`. This `deploy/` is retained as an alternative direct-apply entry point.
+- **mongodb / valkey**: operated via the argos-platform-data umbrella chart and the bitnami chart, respectively. This `deploy/` is an *alternative/standby entry point*. Applying both simultaneously will cause a helm release conflict.
 
 ## Decision
 
-각 operator repo 에 mongodb-operator 와 동일 구조의 GitOps 오버레이 계층을 도입한다.
+Introduce, in each operator repo, a GitOps overlay layer with the same structure as in mongodb-operator.
 
 ```
 deploy/
 ├── overlays/prod/
-│   ├── kustomization.yaml      # config/{crd,rbac,manager} 를 prod ns 로 묶음
-│   └── delete-namespace.yaml   # 자동 생성 Namespace 를 strategic-merge 로 제거
-└── <workload>.yaml             # CR 인스턴스 (db ns, ArgoCD 별도 application)
+│   ├── kustomization.yaml      # bundles config/{crd,rbac,manager} into the prod ns
+│   └── delete-namespace.yaml   # removes the auto-generated Namespace via strategic-merge
+└── <workload>.yaml             # CR instance (db ns, separate ArgoCD application)
 ```
 
-- `kustomization.yaml` 의 `namespace: data` 가 모든 namespaced 리소스에 적용된다.
-- `patches.target.name` 은 *namePrefix 적용 전 raw name* (`system`) 으로 잡는다 — overlay 가 `config/default` 가 아닌 `config/manager` 를 직접 import 하므로.
-- CR 인스턴스는 `data` namespace 를 사용하며 별개 ArgoCD application 또는 Helm wrapper 로 동기화한다 (operator 와 workload 의 라이프사이클 분리).
+- `namespace: data` in `kustomization.yaml` applies to all namespaced resources.
+- `patches.target.name` uses the *raw name before namePrefix is applied* (`system`) — the overlay imports `config/manager` directly, not `config/default`.
+- CR instances use the `data` namespace and are synced via a separate ArgoCD application or Helm wrapper (operator and workload lifecycles are separated).
 
 ## Consequences
 
-긍정:
-- ArgoCD application source 후보가 `deploy/overlays/prod` 로 명시화 — argos-platform-data 의 umbrella chart 가 본 path 를 dependency 로 흡수하거나, 또는 본 path 를 *직접* ApplicationSet generator path 로 등록 가능.
-- `config/default` 는 *로컬 개발* 용도로 보존되어 `make deploy` 워크플로 회귀 없음.
-- 3 repo 가 동일 구조를 가져 운영자 인지 부하 감소.
+Positive:
+- The ArgoCD application source candidate is made explicit as `deploy/overlays/prod` — either the argos-platform-data umbrella chart absorbs this path as a dependency, or this path can be registered *directly* as the ApplicationSet generator path.
+- `config/default` is preserved for *local development*, so the `make deploy` workflow does not regress.
+- The 3 repos share the same structure, reducing operator cognitive load.
 
-부정:
-- `config/manager/manager.yaml` 의 raw name 이 `system` 인 것에 의존. kubebuilder scaffold 가 향후 변경되면 patch target 도 갱신 필요.
-- mongodb-operator 의 `config/manager/manager.yaml` 은 full name (`mongodb-operator-system`) 으로 수동 변경되어 있어 patch target name 만 1 줄 비대칭. 본 repo 는 kubebuilder scaffold 를 그대로 두는 쪽을 택함 (재생성 안전성 우선).
+Negative:
+- Depends on the raw name `system` in `config/manager/manager.yaml`. If the kubebuilder scaffold changes in the future, the patch target must be updated.
+- In mongodb-operator, `config/manager/manager.yaml` has been manually changed to use the full name (`mongodb-operator-system`), so the patch target name has a 1-line asymmetry. This repo chooses to leave the kubebuilder scaffold as-is (prioritizing regeneration safety).
 
 ## Alternatives Considered
 
-1. **`config/default` 를 직접 ArgoCD source 로 사용** — namespace 강제 변경 어렵고 자동 생성 Namespace 리소스 이슈 그대로. 거절.
-2. **mongodb-operator 처럼 `config/manager/manager.yaml` 의 Namespace name 을 full name 으로 수동 변경** — 재생성 시 매번 패치 필요. operator-sdk regenerate 호환성 저하. 거절.
-3. **Helm chart (`charts/`) 을 GitOps source 로 사용** — argos-platform-data 의 mongodb umbrella chart 가 이미 본 패턴 (operator chart 를 dependency 로 흡수). postgres-operator 도 동일 방식 가능. 본 ADR 은 *그것과 별개 진입점* 도입을 결정하는 것이지 helm 경로를 부정하지 않는다. 두 진입점 (helm wrapper / kustomize overlay) 은 동일 cluster state 를 산출하도록 향후 parity invariant (valkey ADR-0028 격) 가 도입돼야 한다. 후속 ADR 에서 다룬다.
+1. **Use `config/default` directly as the ArgoCD source** — hard to forcibly change the namespace, and the auto-generated Namespace resource issue remains. Rejected.
+2. **Manually change the Namespace name in `config/manager/manager.yaml` to the full name, like mongodb-operator** — requires a patch on every regeneration. Degraded operator-sdk regenerate compatibility. Rejected.
+3. **Use a Helm chart (`charts/`) as the GitOps source** — the mongodb umbrella chart in argos-platform-data already follows this pattern (absorbing the operator chart as a dependency). postgres-operator could do the same. This ADR is about introducing a *separate entry point*, not negating the helm path. The two entry points (helm wrapper / kustomize overlay) must yield the same cluster state — a parity invariant (analogous to valkey ADR-0028) must be introduced in the future. Covered in a follow-up ADR.

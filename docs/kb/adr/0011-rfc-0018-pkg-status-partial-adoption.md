@@ -1,89 +1,95 @@
-# ADR-0011: RFC-0018 부분 채택 — pkg/status (Ready type only), pkg/finalizer 비대칭 보존
+# ADR-0011: Partial adoption of RFC-0018 — pkg/status (Ready type only), preserve asymmetry on pkg/finalizer
 
 - Date: 2026-05-09
-- Status: Accepted (PR-A7 first cut — Ready type 만, 도메인 type + Progressing/Degraded/Available 후속)
+- Status: Accepted (PR-A7 first cut — Ready type only; domain types + Progressing/Degraded/Available are follow-up)
 - Authors: @eightynine01
-- Refs: RFC-0018 (operator-commons/docs/kb/rfc/0018-status-finalizer-standard.md), ADR-0003 (commons), v0.x ADR-0008 (Finalizer 회피), Plan §2 D11
+- Refs: RFC-0018 (operator-commons/docs/kb/rfc/0018-status-finalizer-standard.md), ADR-0003 (commons), v0.x ADR-0008 (Finalizer avoidance), Plan §2 D11
 
 ## Context
 
-operator-commons v0.6.0 의 `pkg/status` 채택. RFC-0018 §3.1 의 generic
-4종 ConditionType (Ready / Progressing / Degraded / Available) + 6 Reason
-카탈로그 표준화. postgres-operator 는 도메인 특이 ConditionType 보유
-(ShardsReady / RouterReady / BackupHealthy / AutoSplitEligible) — 본
-ADR 은 *부분 채택* 패턴을 결정한다.
+Adoption of operator-commons v0.6.0's `pkg/status`. RFC-0018 §3.1 standardizes
+the 4 generic ConditionTypes (Ready / Progressing / Degraded / Available) +
+a 6-Reason catalog. postgres-operator has domain-specific ConditionTypes
+(ShardsReady / RouterReady / BackupHealthy / AutoSplitEligible) — this ADR
+decides the *partial adoption* pattern.
 
-또한 *pkg/finalizer 비대칭 보존*: postgres v0.x ADR-0008 의 *Finalizer
-회피 정책 (Cascade Delete via OwnerReference)* 와 BackupCleanupJob CRD
-가 외부 자원 cleanup 분리 처리 — RFC-0018 §3.2 의 *의도된 비대칭*.
-mongodb / valkey 가 finalizer.Add 채택해도 postgres 는 미채택 보존.
+Also *preserves the asymmetry on pkg/finalizer*: per the *Finalizer avoidance
+policy (Cascade Delete via OwnerReference)* of postgres v0.x ADR-0008, and the
+BackupCleanupJob CRD's separate handling of external-resource cleanup — this
+is the *intended asymmetry* of RFC-0018 §3.2. Even though mongodb / valkey
+adopt finalizer.Add, postgres preserves non-adoption.
 
 ## Decision
 
-1. **`internal/controller/status.go` 의 `setCondition`** wrapper 가 *Ready
-   type 만* `commonsstatus.SetReady` 로 위임. 도메인 type (ShardsReady /
-   RouterReady / BackupHealthy / AutoSplitEligible) + Progressing 은 본
-   wrapper 가 직접 `meta.SetStatusCondition` 호출 (현 동작 보존).
+1. **`setCondition` wrapper in `internal/controller/status.go`** delegates
+   *only the Ready type* to `commonsstatus.SetReady`. Domain types
+   (ShardsReady / RouterReady / BackupHealthy / AutoSplitEligible) and
+   Progressing still call `meta.SetStatusCondition` directly from this
+   wrapper (preserves current behavior).
 
-2. **observedGeneration=0** 임시 — `commonsstatus.SetReady` 의 5 번째
-   인자. 호출자 시그니처 변경 (cluster.Generation 전달) 은 *별 PR*
-   (PR-A7.2). 본 PR 은 first cut.
+2. **observedGeneration=0 temporarily** — the 5th argument to
+   `commonsstatus.SetReady`. Changing the caller signature (passing
+   cluster.Generation) is a *separate PR* (PR-A7.2). This PR is the first cut.
 
-3. **Reason 카탈로그 통일**: postgres 의 `ReasonReconciling` /
-   `ReasonAvailable` / `ReasonNotApplicable` 는 commons 의 동등 string
-   literal 과 wire-level identical (각 "Reconciling" / "Available" /
-   "NotApplicable"). 명시적 const alias 는 별 PR (도메인 reason 보존
-   범위 결정 후).
+3. **Reason catalog unification**: postgres's `ReasonReconciling` /
+   `ReasonAvailable` / `ReasonNotApplicable` are wire-level identical to
+   the equivalent string literals in commons (each "Reconciling" /
+   "Available" / "NotApplicable"). Explicit const aliasing is deferred to a
+   separate PR (after deciding the preservation scope for domain reasons).
 
-4. **pkg/finalizer 미채택**: v0.x ADR-0008 의 *cascade-delete-by-
-   OwnerReference* 결정 *유지*. postgres 의 finalizer 비대칭은 RFC-0018
-   §3.2 Migration 단계 2 의 *의도된 변형*. mongodb/valkey 와 다른 길.
+4. **pkg/finalizer not adopted**: the *cascade-delete-by-OwnerReference*
+   decision in v0.x ADR-0008 is *kept*. postgres's finalizer asymmetry is
+   the *intended variant* of RFC-0018 §3.2 Migration stage 2. A different
+   path from mongodb/valkey.
 
 ## Consequences
 
 ### Positive
 
-- *Ready type* 의 4-repo 정합성 시작 — `kubectl describe postgrescluster/...`
-  출력의 `Reason="Available"` / `"Reconciling"` 등이 mongodb/valkey/commons
-  와 동일 카탈로그.
-- 도메인 ConditionType (ShardsReady 등) 보존 — postgres 운영자 학습
-  비용 0.
-- 비대칭 보존이 *명시 결정* 으로 보존 — 후속 작업자가 v0.x ADR-0008
-  의도 재해석 안 함.
+- 4-repo alignment of the *Ready type* begins — the `kubectl describe postgrescluster/...`
+  output's `Reason="Available"` / `"Reconciling"` etc. is now the same catalog
+  as mongodb/valkey/commons.
+- Domain ConditionTypes (ShardsReady, etc.) are preserved — zero learning cost
+  for postgres operators.
+- Asymmetry preservation is preserved as an *explicit decision* — follow-up
+  contributors will not reinterpret the intent of v0.x ADR-0008.
 
 ### Negative
 
-- observedGeneration=0 임시 — `kubectl get postgrescluster -o yaml` 의
-  Conditions 출력에서 `observedGeneration` 필드 항상 0. PR-A7.2 에서
-  해소.
-- Progressing / Degraded / Available type 미위임 — 4-repo 정합성 *부분*.
+- observedGeneration=0 temporary — the `observedGeneration` field in the
+  Conditions output of `kubectl get postgrescluster -o yaml` will always be 0.
+  Resolved in PR-A7.2.
+- Progressing / Degraded / Available types are not delegated — 4-repo alignment
+  is *partial*.
 
 ### Trade-offs
 
-- *Ready type 만 first cut* (본 PR) vs *4 generic type 일괄 위임* —
-  후자는 호출자 11+ 위치 시그니처 변경 + 도메인 reason 매핑. 본 PR 은
-  외과 수술적 변경 우선.
+- *Ready type only as first cut* (this PR) vs. *delegate all 4 generic types
+  at once* — the latter requires signature changes at 11+ caller sites and
+  domain reason mapping. This PR prioritizes a surgical change.
 
 ## Alternatives Considered
 
-1. **commons.setCondition wrapper 전체 위임 + observedGeneration 추가** — 거부.
-   - 호출자 11+ 위치 시그니처 변경 — 큰 review 부담.
-   - PR-A7.2 로 분리.
+1. **Delegate the entire commons.setCondition wrapper + add observedGeneration** — rejected.
+   - Caller signature changes at 11+ sites — large review burden.
+   - Split into PR-A7.2.
 
-2. **postgres reason 카탈로그를 commons const alias 로 교체** — 보류.
-   - const 가 `commonsstatus.ReasonAvailable` 같은 var 참조 불가
-     (Go const 문법 제약).
-   - 동등 string literal 은 wire 동등하므로 본 PR 은 alias 미진행.
+2. **Replace postgres reason catalog with commons const aliases** — deferred.
+   - Const cannot reference a var like `commonsstatus.ReasonAvailable` (Go
+     const grammar constraint).
+   - Equivalent string literals are wire-equivalent, so this PR does not
+     introduce aliases.
 
-3. **pkg/finalizer 채택 (v0.x ADR-0008 supersede)** — 거부.
-   - cascade-delete-by-OwnerReference 가 BackupCleanupJob CRD 와 *분리
-     설계*. finalizer 도입 시 *2개 cleanup path* 공존 → 운영 사고 위험.
-   - RFC-0018 §3.2 가 명시 비대칭 허용.
+3. **Adopt pkg/finalizer (supersede v0.x ADR-0008)** — rejected.
+   - cascade-delete-by-OwnerReference is *designed in separation* from the
+     BackupCleanupJob CRD. Introducing finalizer would let *two cleanup paths*
+     coexist → operational accident risk.
+   - RFC-0018 §3.2 explicitly permits asymmetry.
 
 ## Refs
 
-- RFC-0018 §3.1 (pkg/status 표준), §3.2 (postgres 비대칭 보존).
-- v0.x ADR-0008: Finalizer 회피 정책 (cascade delete).
-- 활성 ADR-0008: operator-commons 채택 (2026-05-07).
+- RFC-0018 §3.1 (pkg/status standard), §3.2 (postgres asymmetry preservation).
+- v0.x ADR-0008: Finalizer avoidance policy (cascade delete).
+- Active ADR-0008: operator-commons adoption (2026-05-07).
 - Plan §2 D11 (postgres status migration).
-- 후속 PR-A7.2: setCondition 호출자 시그니처 확장 + Progressing/Degraded/Available 위임.
+- Follow-up PR-A7.2: extend setCondition caller signature + delegate Progressing/Degraded/Available.

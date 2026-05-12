@@ -1,31 +1,31 @@
-# RFC-0002: ShardRange CRD — 분산 라우팅의 source of truth
+# RFC-0002: ShardRange CRD — source of truth for distributed routing
 
 - Status: Draft
 - Date: 2026-05-02
 - Authors: @phil
 - Target: Phase P2 (~v0.5.0)
-- Supersedes: 없음 (신규)
+- Supersedes: none (new)
 
 ## §1 Summary
 
-`ShardRange` CRD 를 도입한다. 이는 **keyspace + key range → shard 매핑의 단일 source of truth** 이며, pg-router 가 watch 하여 routing table 을 hot-reload 한다. 기존 0.2.0-alpha 까지는 sharding metadata 가 Citus 의 `pg_dist_partition` 시스템 카탈로그에 존재했으나, 자체 분산 SQL 채택 (RFC 0001) 후 K8s API server 가 그 역할을 대체한다. spec 은 `vindex` (해시/범위 함수 정의) + `ranges[]` (구체 분할 경계) 로 구성되고, status 의 `generation` 단조 증가가 router 의 캐시 무효화 신호로 사용된다.
+Introduce the `ShardRange` CRD. This is the **single source of truth for the keyspace + key range → shard mapping**, and pg-router watches it to hot-reload the routing table. Previously up to 0.2.0-alpha, the sharding metadata lived in Citus's `pg_dist_partition` system catalog, but after the adoption of self-built distributed SQL (RFC 0001) the K8s API server replaces that role. The spec consists of `vindex` (hash/range function definition) + `ranges[]` (concrete partition boundaries), and the monotonic increase of `generation` in status is used as the cache-invalidation signal for the router.
 
 ## §2 Motivation
 
-### §2.1 문제
+### §2.1 Problem
 
-multi-shard 라우팅에 필요한 **분할 메타데이터**는 다음 조건을 만족해야 한다:
+The **partition metadata** required for multi-shard routing must satisfy the following:
 
-- **stronglyconsistent**: 모든 router replica 가 동일 routing table 을 본다.
-- **versioned**: split / merge / rebalance 시점에 *atomic* 전환 가능.
-- **observable**: 운영자가 `kubectl get` 으로 즉시 확인.
-- **declarative**: GitOps (Argo / Flux) 와 호환.
+- **Strongly consistent**: all router replicas see the same routing table.
+- **Versioned**: enables *atomic* switchover at split / merge / rebalance time.
+- **Observable**: operators can immediately inspect it with `kubectl get`.
+- **Declarative**: compatible with GitOps (Argo / Flux).
 
-PostgreSQL extension 카탈로그 (Citus 방식) 는 위 4 조건 중 declarative 가 부재하고 다중 router 동기화에 추가 메커니즘이 필요하다. K8s API server 의 etcd-backed CRD 는 4 조건 모두 자연 충족.
+A PostgreSQL extension catalog (the Citus approach) fails the declarative condition out of these 4, and requires an additional mechanism for multi-router synchronization. An etcd-backed CRD on the K8s API server naturally meets all 4.
 
-### §2.2 사용자 시나리오
+### §2.2 User scenarios
 
-**시나리오 1: 초기 4-shard 분할**
+**Scenario 1: initial 4-shard split**
 ```yaml
 apiVersion: postgresql.tools/v1alpha1
 kind: ShardRange
@@ -40,23 +40,23 @@ spec:
     - { lo: "0x80000000", hi: "0xBFFFFFFF", shard: shard-2 }
     - { lo: "0xC0000000", hi: "0xFFFFFFFF", shard: shard-3 }
 ```
-operator reconciler 가 ranges overlap / gap 검증 후 `status.generation: 1` 부여. 모든 router pod 가 watch event 받아 in-memory routing table 갱신.
+The operator reconciler validates ranges for overlap / gap and then assigns `status.generation: 1`. All router pods receive the watch event and refresh their in-memory routing table.
 
-**시나리오 2: split 후 메타데이터 갱신**
-ShardSplitJob (RFC 0003) 의 Cleanup 단계에서 reconciler 가 ShardRange 를 atomic update:
+**Scenario 2: metadata update after a split**
+In the Cleanup phase of ShardSplitJob (RFC 0003), the reconciler atomically updates the ShardRange:
 ```yaml
 ranges:
-  - { lo: "0x00000000", hi: "0x1FFFFFFF", shard: shard-0 }     # 기존 shard 절반
-  - { lo: "0x20000000", hi: "0x3FFFFFFF", shard: shard-0-1 }   # 신규 split shard
+  - { lo: "0x00000000", hi: "0x1FFFFFFF", shard: shard-0 }     # half of the existing shard
+  - { lo: "0x20000000", hi: "0x3FFFFFFF", shard: shard-0-1 }   # newly split shard
   - { lo: "0x40000000", hi: "0x7FFFFFFF", shard: shard-1 }
   ...
 status: { generation: 2 }
 ```
 
-### §2.3 비목표
+### §2.3 Non-goals
 
-- 동일 keyspace 에 다중 vindex (composite key) — P3+ 별도 RFC.
-- 행 단위 lookup vindex (per-row mapping table) — P3 vindex 확장에서 구현 시 메타데이터는 별도 PG table.
+- Multiple vindexes on the same keyspace (composite key) — separate RFC in P3+.
+- Row-level lookup vindex (per-row mapping table) — when implemented in the P3 vindex extension, the metadata lives in a separate PG table.
 
 ## §3 Design / Specification
 
@@ -74,24 +74,24 @@ metadata:
       name: foo
       controller: true
 spec:
-  cluster: foo                    # required, PostgresCluster 이름
-  keyspace: tenants                # required, 논리 분할 단위 (= 분산 테이블 group)
+  cluster: foo                    # required, PostgresCluster name
+  keyspace: tenants                # required, logical partition unit (= distributed table group)
   vindex:
     type: hash                    # enum [hash, range, consistent-hash, lookup]
-    column: tenant_id              # required (lookup 타입 제외)
-    function: murmur3              # enum [murmur3, fnv, crc32]; type=hash 일 때만
-    # range 타입: column 값 자체가 정렬 가능
-    # consistent-hash: virtualNodes 추가 필드
-    virtualNodes: 1024             # consistent-hash 전용
-    # lookup 타입: 별도 ShardLookup CRD 참조 (P3+)
+    column: tenant_id              # required (except for lookup type)
+    function: murmur3              # enum [murmur3, fnv, crc32]; only when type=hash
+    # range type: the column values themselves must be orderable
+    # consistent-hash: requires the additional virtualNodes field
+    virtualNodes: 1024             # consistent-hash only
+    # lookup type: references a separate ShardLookup CRD (P3+)
     lookupRef: { name: tenants-lookup }
   ranges:
-    - lo: "0x00000000"             # 16진수 문자열 (hash) 또는 임의 (range)
+    - lo: "0x00000000"             # hex string (hash) or arbitrary (range)
       hi: "0x3FFFFFFF"
-      shard: shard-0               # PostgresCluster.status.shards[].name 와 매칭
+      shard: shard-0               # matches PostgresCluster.status.shards[].name
     - { lo: "0x40000000", hi: "0x7FFFFFFF", shard: shard-1 }
 status:
-  generation: 7                    # spec 변경 시마다 +1, router watch 갱신 신호
+  generation: 7                    # +1 every time spec changes; the refresh signal for router watches
   observedGeneration: 7
   totalRanges: 4
   rangesByShard: { shard-0: 1, shard-1: 1, shard-2: 1, shard-3: 1 }
@@ -104,14 +104,14 @@ status:
       reason: AllShardsResolved
 ```
 
-### §3.2 vindex 타입 spec
+### §3.2 vindex type spec
 
-| type | column | function | 추가 필드 | 설명 |
+| type | column | function | additional fields | description |
 |---|---|---|---|---|
-| `hash` | required | required | — | `function(column) % 2^32` 결과를 range 와 매칭 |
-| `range` | required | — | — | column 값 (정렬 가능 타입) 자체를 range 와 매칭 |
-| `consistent-hash` | required | required | `virtualNodes` | hash ring 위 virtual node → physical shard |
-| `lookup` | — | — | `lookupRef` | row 단위 mapping (외부 PG table). P3+ |
+| `hash` | required | required | — | match the result of `function(column) % 2^32` against ranges |
+| `range` | required | — | — | match the column value (orderable type) itself against ranges |
+| `consistent-hash` | required | required | `virtualNodes` | a virtual node on the hash ring → physical shard |
+| `lookup` | — | — | `lookupRef` | row-level mapping (external PG table). P3+ |
 
 ### §3.3 Validation rules
 
@@ -170,28 +170,28 @@ CEL:
 // +kubebuilder:validation:XValidation:rule="self.vindex.type != 'lookup' || has(self.vindex.lookupRef)",message="lookup vindex requires lookupRef"
 ```
 
-복잡한 제약 (overlap / gap) 은 CEL 한계 → admission webhook + reconciler 에서 검증.
+Complex constraints (overlap / gap) exceed CEL → validate via admission webhook + reconciler.
 
-### §3.4 Reconciler 책임
+### §3.4 Reconciler responsibilities
 
 ```go
 func (r *ShardRangeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     var sr v1alpha1.ShardRange
     if err := r.Get(ctx, req.NamespacedName, &sr); err != nil { ... }
 
-    // 1. ranges overlap / gap 검증
+    // 1. validate ranges for overlap / gap
     if err := validateRangesNoOverlapNoGap(sr.Spec.Ranges, sr.Spec.Vindex); err != nil {
         return r.setCondition(ctx, &sr, "Valid", "False", "RangeError", err.Error())
     }
 
-    // 2. shard 존재 검증 (PostgresCluster.status.shards 와 cross-ref)
+    // 2. validate shard existence (cross-ref with PostgresCluster.status.shards)
     var pc v1alpha1.PostgresCluster
     if err := r.Get(ctx, types.NamespacedName{Name: sr.Spec.Cluster, Namespace: sr.Namespace}, &pc); err != nil { ... }
     if missing := findMissingShards(sr.Spec.Ranges, pc.Status.Shards); len(missing) > 0 {
         return r.setCondition(ctx, &sr, "ShardsExist", "False", "ShardMissing", fmt.Sprintf("%v", missing))
     }
 
-    // 3. spec 변경 감지 → status.generation++
+    // 3. detect spec change → status.generation++
     if sr.Generation != sr.Status.ObservedGeneration {
         sr.Status.Generation++
         sr.Status.ObservedGeneration = sr.Generation
@@ -202,9 +202,9 @@ func (r *ShardRangeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 ```
 
-### §3.5 Router 의 watch 패턴
+### §3.5 Router watch pattern
 
-router 는 `informers.NewSharedInformerFactory()` 로 ShardRange 를 watch:
+The router watches ShardRange via `informers.NewSharedInformerFactory()`:
 
 ```go
 type RoutingTable struct {
@@ -224,18 +224,18 @@ func (rt *RoutingTable) OnUpdate(old, new *v1alpha1.ShardRange) {
 }
 ```
 
-`compileVindex` 는 ranges 를 정렬된 binary search tree (또는 hash 의 경우 array + binary search) 로 컴파일. lookup latency 목표: **P99 < 10μs**.
+`compileVindex` compiles ranges into a sorted binary search tree (or, for hash, an array + binary search). Lookup latency target: **P99 < 10μs**.
 
-### §3.6 Atomic 업데이트 (split 시점)
+### §3.6 Atomic update (at split time)
 
-ShardSplitJob 의 Cleanup 단계가 ShardRange 를 update 할 때 *반드시* server-side apply 또는 optimistic concurrency (resourceVersion) 사용. 두 split 이 동시에 같은 ShardRange 를 갱신하려는 경우 K8s API conflict → reconciler retry.
+When the Cleanup phase of ShardSplitJob updates a ShardRange, it must use server-side apply or optimistic concurrency (resourceVersion). If two splits try to update the same ShardRange simultaneously, the K8s API conflict triggers a reconciler retry.
 
 ```go
 patch := client.MergeFromWithOptions(old, client.MergeFromWithOptimisticLock{})
 sr.Spec.Ranges = newRanges
 if err := r.Patch(ctx, &sr, patch); err != nil {
     if apierrors.IsConflict(err) {
-        return ctrl.Result{Requeue: true}, nil   // operator 가 자동 재시도
+        return ctrl.Result{Requeue: true}, nil   // the operator retries automatically
     }
     return ctrl.Result{}, err
 }
@@ -243,65 +243,65 @@ if err := r.Patch(ctx, &sr, patch); err != nil {
 
 ## §4 Drawbacks / Trade-offs
 
-- **etcd 부하**: ranges 가 1024 개 + 빈번한 split 시 ShardRange object 가 ~수십 KB 빈번 update. etcd write QPS 한계 고려 필요. 완화: split 빈도가 시간당 1~2 회 수준 (운영 현실), object 단일 → 부하 미미.
-- **K8s API 의존성 SPOF**: API server 다운 시 router 는 stale routing table 로 동작 (read-only fallback). write 는 거부 → 가용성 저하. 완화: router 의 LRU 캐시 + `--rejectWritesIfStale=300s` 옵션.
-- **CRD 진화 비용**: vindex 타입 추가 (P3 의 range / consistent-hash / lookup) 마다 CRD spec 변경. v1alpha1 채널이라 허용.
+- **etcd load**: with 1024 ranges + frequent splits, the ShardRange object becomes ~tens of KB with frequent updates. Need to consider the etcd write QPS limit. Mitigation: split frequency in practice is 1~2 per hour (operational reality), and the object is single → load is negligible.
+- **K8s API dependency SPOF**: when the API server is down, the router operates on a stale routing table (read-only fallback). Writes are rejected → availability degrades. Mitigation: router LRU cache + the `--rejectWritesIfStale=300s` option.
+- **CRD evolution cost**: each new vindex type addition (P3's range / consistent-hash / lookup) requires a CRD spec change. Allowed because of the v1alpha1 channel.
 
 ## §5 Alternatives Considered
 
-| 대안 | 거절 사유 |
+| Alternative | Reason for rejection |
 |---|---|
-| **PG system catalog** (Citus 방식) | declarative 부재, multi-router 동기화 추가 메커니즘 필요, GitOps 비호환 |
-| **별도 metadata service** (e.g. etcd 직접 사용) | K8s 가 이미 etcd 제공, 추가 서비스 운영 부담 |
-| **PostgresCluster.spec 안에 inline** | spec 비대화, split 마다 PostgresCluster 자체 update → 부수효과 (router/HPA reconcile) |
-| **ConfigMap** | versioning 부재, validation 부재, ownerRef 표현 어색 |
+| **PG system catalog** (Citus approach) | not declarative, requires an additional mechanism for multi-router sync, incompatible with GitOps |
+| **Separate metadata service** (e.g., direct etcd) | K8s already provides etcd; running an additional service is operational burden |
+| **Inline within PostgresCluster.spec** | spec bloat, every split updates PostgresCluster itself → side effects (router/HPA reconcile) |
+| **ConfigMap** | no versioning, no validation, awkward to express ownerRef |
 
 ## §6 Open Questions
 
-1. lookup vindex 의 mapping table 자체는 어디에 저장? (별도 ShardLookup CRD vs PG 내 dedicated table) → P3 결정.
-2. range vindex 의 `lo`/`hi` 타입 표현 (현재 string). int / time / uuid 등 multi-type 지원 → CEL 검증 한계, P3 webhook 으로 위임.
-3. cross-keyspace 의 colocated table (JOIN 가능) 표현 — `colocationGroup: foo` annotation? 별도 CRD? → P6 분산 JOIN RFC 에서 결정.
+1. Where to store the mapping table itself for a lookup vindex? (Separate ShardLookup CRD vs. a dedicated table inside PG) → decide in P3.
+2. The type representation of `lo`/`hi` for a range vindex (currently string). Supporting int / time / uuid etc. multi-type → CEL validation has limits, delegate to a P3 webhook.
+3. How to express colocated tables (joinable) across keyspaces — `colocationGroup: foo` annotation? A separate CRD? → decide in the P6 distributed JOIN RFC.
 
 ## §7 Implementation Plan
 
 ### P2 (~v0.5.0)
 
-- [ ] `api/v1alpha1/shardrange_types.go` 작성 (kubebuilder marker).
+- [ ] Write `api/v1alpha1/shardrange_types.go` (with kubebuilder markers).
 - [ ] `internal/controller/shardrange/controller.go` reconciler:
-  - ranges overlap / gap 검증
-  - shard 존재 cross-ref
-  - generation 단조 증가
-- [ ] `internal/vindex/` 모듈:
+  - ranges overlap / gap validation
+  - shard existence cross-ref
+  - monotonic generation increase
+- [ ] `internal/vindex/` module:
   - `hash.go` (murmur3 / fnv / crc32)
-  - `compile.go` (ranges → binary search 인덱스)
-- [ ] router 의 `internal/router/routing_table.go` watch 통합 (P2 router 와 동시 작업).
-- [ ] e2e: 4-shard 수동 ShardRange 생성 → router 통한 INSERT → 각 shard 1 row 정확.
+  - `compile.go` (ranges → binary-search index)
+- [ ] Watch integration in the router's `internal/router/routing_table.go` (concurrent work with the P2 router).
+- [ ] e2e: manually create a 4-shard ShardRange → INSERT through the router → exactly 1 row per shard.
 
 ### P3 (~v0.6.0)
 
-- [ ] vindex 타입 확장 (range, consistent-hash).
-- [ ] admission webhook 으로 multi-type lo/hi 검증.
+- [ ] Extend vindex types (range, consistent-hash).
+- [ ] Multi-type lo/hi validation via admission webhook.
 
-### 검증 명령
+### Verification commands
 
 ```bash
-go test ./internal/vindex/...                      # vindex 단위 (golden test)
-go test ./internal/controller/shardrange/...       # reconciler 단위
+go test ./internal/vindex/...                      # vindex unit (golden test)
+go test ./internal/controller/shardrange/...       # reconciler unit
 make manifests
 kubectl apply -f config/samples/shardrange-4shard.yaml
 kubectl wait --for=condition=Valid shardrange/foo-tenants
 make test-e2e PILLAR=p2 -- --focus="ShardRange routing"
 ```
 
-성능 목표:
-- vindex lookup P99 < 10μs (단위 벤치마크).
-- ShardRange watch → router routing table reload < 100ms (e2e).
+Performance targets:
+- vindex lookup P99 < 10μs (unit benchmark).
+- ShardRange watch → router routing-table reload < 100ms (e2e).
 
 ## §8 References
 
 - Plan: `~/.claude/plans/eager-wobbling-torvalds.md` §3.2, §3.3
-- Vitess VSchema (참조 only, 코드 차용 없음): https://vitess.io/docs/reference/features/vschema/
-- Citus shard metadata (참조 only): https://docs.citusdata.com/en/stable/develop/api_metadata.html
+- Vitess VSchema (for reference only, no code reuse): https://vitess.io/docs/reference/features/vschema/
+- Citus shard metadata (for reference only): https://docs.citusdata.com/en/stable/develop/api_metadata.html
 - Murmur3: https://github.com/spaolacci/murmur3
 - RFC 0001: PostgresCluster CRD v2
 - RFC 0003: ShardSplitJob 7-step

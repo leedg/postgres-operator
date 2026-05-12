@@ -1,135 +1,135 @@
-# RFC 0006: 더 높은 수준의 Postgres Operator — 5R 리팩토링 청사진
+# RFC 0006: A higher-level Postgres Operator — 5R refactoring blueprint
 
 - **Status**: Proposed → Accepted (R1 + R2 Implemented 2026-05-03)
 - **Authors**: phil
 - **Date**: 2026-05-03
-- **Refs**: RFC 0001 (CRD v2), RFC 0003 (election + fencing), RFC 0005 (sharding plugin), ADR 0002 (PID 1 모델), `docs/operator-guide/cross-validation-cnpg.md`
+- **Refs**: RFC 0001 (CRD v2), RFC 0003 (election + fencing), RFC 0005 (sharding plugin), ADR 0002 (PID 1 model), `docs/operator-guide/cross-validation-cnpg.md`
 
-## §1 Context — 왜 "더 높은 수준" 이 필요한가
+## §1 Context — why do we need a "higher level"
 
-cross-validation (CNPG 1.27 vs ours 0.3.0-alpha, kind v0.31, 동일 노드) 가 두 가지 진실을 드러냈다:
+Cross-validation (CNPG 1.27 vs. ours 0.3.0-alpha, kind v0.31, same node) revealed two truths:
 
-1. **자원 footprint 는 우리가 작다**: Pod RSS −23%, manager image −37%, LoC −94%. 그러나 이는 *기능이 결정적으로 부재* 한 표상.
-2. **alpha-deployable 의 vaporware 부분**: 같은 측정이 우리 측에서만 3 개 production bug 를 드러냄 (RBAC escalation / plugin auto-register 강제 / Promote race + already-primary). unit + envtest 가 catch 하지 못한 *실 K8s 환경에서만 드러나는 클래스*.
+1. **We are smaller on resource footprint**: Pod RSS −23%, manager image −37%, LoC −94%. But this is the surface of *decisively missing functionality*.
+2. **Vaporware portion of "alpha-deployable"**: the same measurement only on our side exposed 3 production bugs (RBAC escalation / forced plugin auto-register / Promote race + already-primary). This is a class that *only surfaces in a real K8s environment*, which unit + envtest could not catch.
 
-두 진실을 동시에 봤을 때 결론: 단순 *기능 catch-up* 으로 CNPG 와 경쟁하면 *작은 게 미덕* 이라는 차별화를 잃고, 우리는 그저 *불완전한 CNPG 클론* 이 된다. **차별화 = 기존 OSS PG operator 가 구조적으로 못 하는 것** 을 식별하고 그것에 *코드 영역을 우리 LoC 의 형태로* 채워야 한다.
+Looking at both truths simultaneously, the conclusion is: if we compete with CNPG by simple *feature catch-up*, we lose the differentiation that *small is a virtue*, and we just become an *incomplete CNPG clone*. **Differentiation = identify what existing OSS PG operators structurally cannot do**, and fill that with code volume *in our LoC shape*.
 
-본 RFC 가 그 청사진 — 5 개의 atomic refactor (R1~R5) 가 단계별로 *unlock* 하는 capabilities 를 정의한다.
+This RFC is that blueprint — defining capabilities that 5 atomic refactors (R1~R5) *unlock* stage by stage.
 
-## §2 5R 청사진
+## §2 5R blueprint
 
 ### R1 — Plugin Registry per-cluster + spec.extensions opt-in (Implemented 2026-05-03 commit f7db838)
 
 **Status**: ✅ Implemented.
 
-**문제**: cross-validation bug 2 — 모든 cluster 에 6 종 extension 강제 → vanilla PG image FATAL.
+**Problem**: cross-validation bug 2 — all 6 extensions forced on every cluster → vanilla PG image FATAL.
 
-**해결**: 
-- `Registry.EnabledExtensions(names)` — 명시적 opt-in 으로 filter.
-- `PostgresClusterSpec.Extensions []string` — 사용자가 cluster 별 결정.
-- webhook 이 미등록 이름 admission 단계 차단.
-- `cmd/main.go` 의 Register 호출 = *카탈로그 등록* (활성화 아님). spec.extensions = *활성화*.
+**Solution**:
+- `Registry.EnabledExtensions(names)` — explicit opt-in filter.
+- `PostgresClusterSpec.Extensions []string` — the user decides per cluster.
+- Webhook blocks unregistered names at the admission stage.
+- The Register call in `cmd/main.go` = *catalog registration* (not activation). spec.extensions = *activation*.
 
-**Unlock**: per-tenant 차별화 (한 operator 가 여러 cluster 에 다른 extension 집합).
+**Unlock**: per-tenant differentiation (one operator runs different extension sets across multiple clusters).
 
 ### R2 — InstanceStatus Feedback Channel (Implemented 2026-05-03)
 
 **Status**: ✅ Implemented.
 
-**문제**: `PostgresCluster.status.shards[]` 가 reconcile-time 근사값. Endpoint 항상 ord-0 Pod, LagBytes=0 (placeholder), Ready=ReadyReplicas (election 무관).
+**Problem**: `PostgresCluster.status.shards[]` is a reconcile-time approximation. Endpoint is always the ord-0 Pod, LagBytes=0 (placeholder), Ready=ReadyReplicas (unrelated to election).
 
-**해결**:
-- 새 `internal/instance/statusapi` 패키지 — `Status{Role, Ready, Endpoint, LagBytes, LastUpdate}` 데이터 모델.
-- instance manager 가 5s 주기로 자기 Pod annotation `postgres.keiailab.io/instance-status` 에 patch.
-- controller `aggregateShardStatus` — Pod label selector 로 list → annotation parse → primary/replicas 합성.
-- split-brain 검출 (≥2 primary annotation) + stale heartbeat (>30s) 처리.
-
-**Unlock**:
-- 실시간 topology view — 실제 leader Pod 가 status.Primary.
-- failover RTO 측정 가능 (annotation timestamp).
-- 향후 R3 (standby.signal aware boot) 의 의사결정 신호.
-
-### R3 — standby.signal-aware Boot + 자동 failover (Proposed)
-
-**Status**: 🚧 Proposed (다음 cycle).
-
-**문제**: 현재 instance manager 는 부팅 시 항상 *primary 진입 가정*. replicas≥1 시 ord!=0 Pod 가 primary 가 되어버림 (election 합의로 한 명만 leader 지만 supervise 측은 모두 primary 로 동작).
-
-**해결 설계**:
-1. **Init container 가 standby.signal 결정** — ord==0 (또는 첫 부팅) 이면 init container 가 `pg_basebackup --pgdata $PGDATA --host=primary-endpoint` 로 데이터 복제 후 `touch $PGDATA/standby.signal`. ord==0 (첫 cluster) 은 initdb.
-2. **instance manager 가 standby.signal 인식** — boot 시 PGDATA/standby.signal 존재 검사 → standby mode (pg_promote 호출 안 함).
-3. **OnStartedLeading 가 Promote 시 standby.signal 제거** — `os.Remove(PGDATA/standby.signal)` 후 `pg_promote()`.
-4. **OnStoppedLeading 가 standby.signal 재생성 + sup.Stop fast** — 자기 PVC fence 후 standby.signal 다시 만들고 instance exit. K8s Pod 재시작 → instance 가 standby mode 부팅.
+**Solution**:
+- New `internal/instance/statusapi` package — `Status{Role, Ready, Endpoint, LagBytes, LastUpdate}` data model.
+- Every 5s the instance manager patches its own Pod annotation `postgres.keiailab.io/instance-status`.
+- Controller `aggregateShardStatus` — list via Pod label selector → parse annotations → compose primary/replicas.
+- Detect split-brain (≥2 primary annotations) + handle stale heartbeats (>30s).
 
 **Unlock**:
-- 자동 failover (replicas≥1 시) — primary kill → election 새 leader → 옛 primary Pod 가 새 standby 로 재진입.
-- streaming replication 자동 부트스트랩.
-- F03 active 측 완성.
+- Real-time topology view — the actual leader Pod becomes status.Primary.
+- Failover RTO is measurable (annotation timestamp).
+- Decision signal for the future R3 (standby.signal aware boot).
+
+### R3 — standby.signal-aware Boot + auto failover (Proposed)
+
+**Status**: 🚧 Proposed (next cycle).
+
+**Problem**: today the instance manager always *assumes primary entry* at boot. When replicas≥1, a Pod with ord!=0 becomes primary (the election agrees on one leader but the supervise side acts as primary on all).
+
+**Solution design**:
+1. **Init container decides standby.signal** — if ord==0 (or first boot), the init container runs `pg_basebackup --pgdata $PGDATA --host=primary-endpoint` to replicate data, then `touch $PGDATA/standby.signal`. ord==0 (first cluster) does initdb.
+2. **Instance manager honors standby.signal** — at boot, check for PGDATA/standby.signal → standby mode (do not call pg_promote).
+3. **On Promote, OnStartedLeading removes standby.signal** — `os.Remove(PGDATA/standby.signal)` then `pg_promote()`.
+4. **OnStoppedLeading re-creates standby.signal + sup.Stop fast** — after fencing its own PVC, re-create standby.signal and instance exit. K8s restarts the Pod → instance boots in standby mode.
+
+**Unlock**:
+- Auto failover (when replicas≥1) — primary kill → election picks a new leader → the old primary Pod rejoins as a new standby.
+- Auto-bootstrap of streaming replication.
+- Completes the F03 active side.
 
 **Open**:
-- pg_basebackup 의 primary endpoint 결정 — R2 의 status feedback 으로 *현재 primary* 알 수 있음 (init container 가 controller status 읽기?). 또는 controller 가 init container env 로 주입.
-- replication slot 관리 (primary 가 standby 별 slot 만들고 standby 가 사용). RFC 0003 부록 B.
-- secret 기반 replication user 인증 (현재 trust → scram-sha-256).
+- pg_basebackup's primary endpoint discovery — R2's status feedback can tell us the *current primary* (have the init container read controller status?). Or the controller injects it as an init container env.
+- Replication slot management (primary creates a slot per standby; the standby uses it). RFC 0003 Appendix B.
+- secret-backed replication user authentication (currently trust → scram-sha-256).
 
 ### R4 — Multi-controller Split (Proposed)
 
-**Status**: 🚧 Proposed (R3 이후).
+**Status**: 🚧 Proposed (after R3).
 
-**문제**: 단일 `PostgresClusterReconciler` 가 모든 sub-resource (RBAC + ConfigMap + STS + Service + Status aggregation + Router Deployment) 를 한 reconcile 에서 처리. Backup 추가 시 더 무거워짐. F04 (BackupController), F03-active (FailoverController) 가 별도 lifecycle 이 필요.
+**Problem**: a single `PostgresClusterReconciler` handles every sub-resource (RBAC + ConfigMap + STS + Service + Status aggregation + Router Deployment) in one reconcile. It will get heavier when Backup is added. F04 (BackupController) and F03-active (FailoverController) need separate lifecycles.
 
-**해결 설계**:
-- `PostgresClusterReconciler` — 토폴로지 (RBAC, ConfigMap, Service, STS, Router) + status 종합만.
-- `ShardController` (신규) — 단일 shard 의 lifecycle (STS 부트스트랩, replication slot, standby join).
-- `BackupController` (F04) — `BackupJob` CR 위주 + `PostgresCluster.spec.backup` cron schedule 평가.
-- `FailoverController` (F03-active) — Pod annotation watch → primary stale → demote 트리거.
+**Solution design**:
+- `PostgresClusterReconciler` — handles only topology (RBAC, ConfigMap, Service, STS, Router) + status aggregation.
+- `ShardController` (new) — lifecycle of a single shard (STS bootstrap, replication slot, standby join).
+- `BackupController` (F04) — focused on `BackupJob` CR + evaluates `PostgresCluster.spec.backup` cron schedules.
+- `FailoverController` (F03-active) — watches Pod annotations → triggers demote when primary is stale.
 
-각 controller 는 독립 reconcile + own goroutine + 자기 watcher.
+Each controller reconciles independently + has its own goroutine + its own watcher.
 
 **Unlock**:
-- 독립 fail isolation — backup reconcile 실패가 cluster reconcile 차단 안 함.
-- 코드 리뷰 단위 분리 — 한 PR 이 한 controller 만 변경.
-- 테스트 격리 — envtest 시나리오가 작아짐.
+- Independent fail isolation — a backup reconcile failure does not block cluster reconcile.
+- Code-review unit split — one PR changes one controller.
+- Test isolation — envtest scenarios shrink.
 
 **Open**:
-- inter-controller communication — Status subresource 만 사용? 또는 Pod annotation event?
-- watcher 중복 — 여러 controller 가 같은 Pod 를 watch 하면 K8s API 부하.
+- Inter-controller communication — use only the Status subresource? Or Pod annotation events?
+- Watcher duplication — multiple controllers watching the same Pod adds K8s API load.
 
-### R5 — Native Distributed SQL Active (Proposed — 우리만의 차별화)
+### R5 — Native Distributed SQL Active (Proposed — our unique differentiation)
 
-**Status**: 🚧 Proposed (장기 — P2+, 별도 RFC 분할 가능).
+**Status**: 🚧 Proposed (long term — P2+, can be split into a separate RFC).
 
-**문제**: `shardingMode: native` 가 schema + RFC 0005 plugin SDK 만 존재. 실 분산 SQL (cross-shard query, distributed catalog, range-based shard key, ShardSplitJob) 부재. CNPG / Zalando / CrunchyData 모두 single-shard primary + replicas 만 지원 — *multi-shard PG operator 는 OSS 에 없음* (Citus 는 AGPL extension, 우리는 vanilla PG 위에서 자체 layer).
+**Problem**: `shardingMode: native` only has a schema + the RFC 0005 plugin SDK. Actual distributed SQL (cross-shard query, distributed catalog, range-based shard key, ShardSplitJob) is absent. CNPG / Zalando / CrunchyData all support only single-shard primary + replicas — *no multi-shard PG operator exists in OSS* (Citus is an AGPL extension; ours is a self-built layer on top of vanilla PG).
 
-**해결 설계** (RFC 0005 ShardingPlugin Active 측):
+**Solution design** (RFC 0005 ShardingPlugin Active side):
 
 #### R5a — Distributed Catalog
-- 신규 CRD `ShardCatalog` — cluster 별 shard key → shard ordinal 매핑.
-- catalog 는 router 가 query 라우팅에 사용. shard 별 range (예: `user_id 0~999 → shard-0`) 보유.
-- catalog 변경 (split, merge, rebalance) 은 ShardSplitJob (RFC 0003) 으로 atomic.
+- New CRD `ShardCatalog` — per-cluster shard key → shard ordinal mapping.
+- The catalog is what the router uses for query routing. It holds ranges per shard (e.g., `user_id 0~999 → shard-0`).
+- Catalog changes (split, merge, rebalance) are atomic via ShardSplitJob (RFC 0003).
 
 #### R5b — Router Active Logic
-- 현재 router Deployment 는 placeholder (PG image 그대로). cmd/router 신규 binary.
-- router = libpq protocol parser + query rewriter. 클라이언트 query 의 shard key 추출 → catalog lookup → shard 의 backend 로 forward.
-- 단일-shard query: zero hop (router 가 shard 결정 후 직접 forward).
-- Multi-shard query: router 가 fan-out + scatter-gather (집계 query).
-- cross-shard transaction: 2PC (XA-like) — RFC 0005 Phase 3.
+- The current router Deployment is a placeholder (PG image as-is). New cmd/router binary.
+- router = libpq protocol parser + query rewriter. Extracts the client query's shard key → catalog lookup → forwards to the shard's backend.
+- Single-shard query: zero hop (router decides the shard and forwards directly).
+- Multi-shard query: router fans out + scatter-gathers (aggregate queries).
+- Cross-shard transaction: 2PC (XA-like) — RFC 0005 Phase 3.
 
-#### R5c — Auto-split 의 active 측
-- `AutoSplit.Triggers` (sizeThresholdGB 등) 만족 시 controller 가 ShardSplitJob 생성.
-- ShardSplitJob 은 RFC 0003 7-step (initdb, pg_basebackup, range copy, catalog update, primary cutover, drain, cleanup) 진행.
-- requireApproval=true 시 운영자 annotation 이후만 진행.
+#### R5c — Auto-split active side
+- When `AutoSplit.Triggers` (e.g., sizeThresholdGB) are satisfied, the controller creates a ShardSplitJob.
+- ShardSplitJob runs the RFC 0003 7-step (initdb, pg_basebackup, range copy, catalog update, primary cutover, drain, cleanup).
+- When requireApproval=true, proceeds only after the operator annotates approval.
 
 **Unlock**:
-- *유일한 OSS multi-shard PostgreSQL operator* (vanilla PG 기반).
-- TB 단위 데이터셋 의 horizontal scale.
-- 단일 cluster 가 multi-region (각 shard 가 다른 region) 도 가능.
+- *The only OSS multi-shard PostgreSQL operator* (vanilla-PG based).
+- Horizontal scale of TB-class datasets.
+- Even a single cluster can be multi-region (each shard in a different region).
 
 **Open**:
-- query rewriter 의 SQL parsing — 자체 구현 vs pgproto3 기반 wrapper.
-- cross-shard 2PC 의 prepared transaction 안전성 — postgres prepared_transactions 설정 + recovery 시나리오.
-- catalog consistency — etcd 같은 별도 DCS 사용 vs PostgresCluster.status 안 임베드.
+- SQL parsing for the query rewriter — own implementation vs. a wrapper based on pgproto3.
+- Safety of prepared transactions for cross-shard 2PC — postgres prepared_transactions setting + recovery scenarios.
+- Catalog consistency — using a separate DCS like etcd vs. embedded in PostgresCluster.status.
 
-## §3 우선순위 + Dependencies
+## §3 Priority + dependencies
 
 ```
 R1 (extensions opt-in) ──┐
@@ -139,67 +139,67 @@ R2 (status feedback)  ───┼──→ R3 (standby boot)  ───→  R4 
                          └──────────────────────→  R5 (native sharding active)
 ```
 
-- R1 + R2 = 본 commit chain (df7a0ca + f7db838 + 후속) 에서 완료. *production-grade single-shard* 의 마지막 빠진 조각.
-- R3 = production HA 의 마지막 조각 (replicas≥1 자동 failover).
-- R4 = R3 이후의 자연스러운 결과.
-- R5 = 차별화 — 별도 multi-cycle 진행 (P2 본체).
+- R1 + R2 = finished in the current commit chain (df7a0ca + f7db838 + follow-ups). The last missing piece of *production-grade single-shard*.
+- R3 = the last piece of production HA (auto failover with replicas≥1).
+- R4 = a natural consequence after R3.
+- R5 = differentiation — done in a separate multi-cycle effort (the P2 body).
 
-## §4 Phase 정의
+## §4 Phase definitions
 
-| Phase | 버전 | R1 | R2 | R3 | R4 | R5 | CNPG 비교 |
+| Phase | Version | R1 | R2 | R3 | R4 | R5 | CNPG comparison |
 |---|---|---|---|---|---|---|---|
-| **alpha** (현재) | 0.3.0 | ✅ | ✅ | ❌ | ❌ | schema only | single-shard primary only |
+| **alpha** (current) | 0.3.0 | ✅ | ✅ | ❌ | ❌ | schema only | single-shard primary only |
 | **beta** | 0.4.0 | ✅ | ✅ | ✅ | ❌ | schema only | parity (single-shard HA) |
-| **GA-single** | 1.0.0 | ✅ | ✅ | ✅ | ✅ | schema only | parity + 차별화 (lighter footprint) |
-| **GA-distributed** | 2.0.0 | ✅ | ✅ | ✅ | ✅ | ✅ | *유일* multi-shard OSS |
+| **GA-single** | 1.0.0 | ✅ | ✅ | ✅ | ✅ | schema only | parity + differentiation (lighter footprint) |
+| **GA-distributed** | 2.0.0 | ✅ | ✅ | ✅ | ✅ | ✅ | *only* multi-shard OSS |
 
-본 RFC 의 acceptance 시점 (2026-05-03): **alpha 진입 — R1/R2 까지 마침**. 다음 cycle 가 R3 (beta).
+Acceptance moment of this RFC (2026-05-03): **enter alpha — R1/R2 complete**. The next cycle is R3 (beta).
 
-## §5 Failure Modes (각 R 의 가설을 무너뜨리는 시나리오)
+## §5 Failure Modes (scenarios that break each R's hypothesis)
 
-### R1 실패 가능성
-- 사용자가 `extensions=[]` 둠 → vanilla 그대로 (의도된 default). 실패 아님.
-- 사용자가 image 에 없는 extension 명시 → admission webhook 차단. 실패 아님.
-- *Image catalog 문제*: webhook 은 plugin 등록 여부 검증, image 가 .so 보유 여부는 검증 X → 사용자 책임. **R1 Phase 2: per-extension image catalog + auto-image-selection**.
+### R1 failure possibilities
+- User leaves `extensions=[]` → vanilla as-is (intended default). Not a failure.
+- User specifies an extension not in the image → admission webhook blocks. Not a failure.
+- *Image catalog problem*: the webhook validates plugin registration but does not validate the image's .so contents → user responsibility. **R1 Phase 2: per-extension image catalog + auto-image-selection**.
 
-### R2 실패 가능성
-- instance manager 의 patch 실패 (RBAC 부재, API 부하) → annotation stale → controller 가 stale heartbeat 검출 + Ready=false 강제. 실패 = degraded mode 로 graceful.
-- annotation race (controller 읽는 동안 instance 가 patch) → strategic merge patch 가 atomic. 실패 아님.
-- *2 primary annotation 동시*: split-brain 검출 + log warning + 첫 후보 유지. **이는 R5 + RFC 0003 fence 의 검증 책임이고, R2 자체는 graceful 보고만 한다**.
+### R2 failure possibilities
+- Instance manager's patch fails (RBAC absent, API load) → stale annotation → controller detects stale heartbeat + forces Ready=false. Failure = graceful degraded mode.
+- Annotation race (controller reading while instance patches) → strategic merge patch is atomic. Not a failure.
+- *Two simultaneous primary annotations*: detect split-brain + log warning + keep the first candidate. **This is the verification responsibility of R5 + RFC 0003 fence; R2 itself only reports gracefully**.
 
-### R3 실패 가능성
-- pg_basebackup 실패 (네트워크 / 권한) → init container retry → Pod CrashLoopBackOff. controller 가 status.condition 으로 노출. 사용자 개입 필요.
-- 옛 primary 가 fence 안 됨 (clock skew, lease 만료 race) → 양쪽 promote 시도. *PVC label fence (RFC 0003 부록 A) 가 fail-fast — primary 가 자기 PVC 의 fenced=true label 검사 후 거부*. 정상 동작.
-- standby.signal 부재 race (Pod 재시작 직후 instance 가 먼저 부팅 → primary 진입) → init container 가 *반드시 먼저* 실행되어야. K8s 가 init container ordering 보장.
+### R3 failure possibilities
+- pg_basebackup failure (network / permission) → init container retries → Pod CrashLoopBackOff. Controller exposes via status.condition. Manual user intervention needed.
+- Old primary not fenced (clock skew, lease expiry race) → both try to promote. *PVC label fence (RFC 0003 Appendix A) fail-fasts — a primary inspects its own PVC's fenced=true label and rejects*. Correct behavior.
+- standby.signal absent race (right after Pod restart, instance boots first → enters primary mode) → the init container *must run first*. K8s guarantees init container ordering.
 
-### R4 실패 가능성
-- 여러 controller 가 같은 status.subresource 에 write → race. **단일 writer principle**: 각 controller 가 *자기 영역의 conditions 만* update (e.g. BackupController = backup-only conditions).
-- watcher event flood — RBAC 광범위 + Pod 변경 빈번 시 reconcile loop 폭주. controller-runtime predicates 로 필터 + workqueue rate limit.
+### R4 failure possibilities
+- Multiple controllers writing to the same status.subresource → race. **Single-writer principle**: each controller updates *only its own area's conditions* (e.g., BackupController = backup-only conditions).
+- Watcher event flood — broad RBAC + frequent Pod changes can cause reconcile loops to runaway. Filter with controller-runtime predicates + workqueue rate limit.
 
-### R5 실패 가능성
-- query rewriter 의 SQL 파싱 한계 — 모든 PG query 를 안전히 파싱 못함. *fallback to broadcast* — 의심스러우면 모든 shard 로 fan-out (slower but correct).
-- cross-shard 2PC — coordinator 실패 시 prepared transaction 잔존. *2PC recovery daemon* 필요 (별도 RFC 0007).
-- catalog consistency — operator 재시작 시 catalog state 일관성. K8s status subresource 가 단일 진실, etcd 의 RAFT 가 일관성 보장.
+### R5 failure possibilities
+- Limits of the query rewriter's SQL parsing — not all PG queries can be parsed safely. *fallback to broadcast* — when in doubt, fan out to all shards (slower but correct).
+- Cross-shard 2PC — coordinator failure leaves prepared transactions behind. A *2PC recovery daemon* is needed (separate RFC 0007).
+- Catalog consistency — catalog state consistency across operator restart. The K8s status subresource is the single truth, and etcd's RAFT guarantees consistency.
 
-## §6 Open Questions (acceptance 후 결정)
+## §6 Open Questions (decide after acceptance)
 
-1. **R3 의 replication user 인증** — 현재 trust (alpha). secret-backed scram-sha-256 으로 어느 시점에 강제? (제안: 0.4.0 beta).
-2. **R5 의 router image** — cmd/router 가 별도 binary (Go) vs PgBouncer fork. (제안: Go native — protocol-level rewriter 자유도).
-3. **R5 의 catalog 저장소** — PostgresCluster status 안 vs 별도 ShardCatalog CRD. (제안: 별도 CRD — RFC 0005 의 ShardSplitJob 과 정합).
-4. **R4 의 controller binary 분리** — 단일 manager binary 안 다중 controller (현재 controller-runtime 패턴) vs 별도 deployment. (제안: 단일 binary — operational overhead 회피).
-5. **alpha → beta 의 backwards compat** — R3 도입 시 spec/status schema 변화. (제안: in-place v1alpha1 갱신 + CRD storage migration 부재 — alpha 단계라 외부 사용자 0).
+1. **R3 replication user authentication** — currently trust (alpha). At what point should secret-backed scram-sha-256 be enforced? (Proposal: 0.4.0 beta).
+2. **R5 router image** — cmd/router as a separate binary (Go) vs. a PgBouncer fork. (Proposal: Go native — freedom of a protocol-level rewriter).
+3. **R5 catalog storage** — inside PostgresCluster status vs. a separate ShardCatalog CRD. (Proposal: separate CRD — aligns with RFC 0005's ShardSplitJob).
+4. **R4 controller binary split** — multiple controllers inside a single manager binary (current controller-runtime pattern) vs. separate deployments. (Proposal: single binary — avoid operational overhead).
+5. **alpha → beta backwards compat** — spec/status schema changes with R3. (Proposal: in-place v1alpha1 update + no CRD storage migration — alpha stage means 0 external users).
 
-## §7 측정 가능한 성공 기준
+## §7 Measurable success criteria
 
-| Phase | 측정 지표 | 목표값 |
+| Phase | Metric | Target |
 |---|---|---|
-| alpha (R1+R2) | cross-validation 재실측 시 alpha-deployable 통과 (smoke.sh) | Pod Ready < 60s |
-| beta (R3) | replicas=2 cluster 의 primary kill → new primary 까지 RTO | < 30s |
-| GA-single (R4) | Backup CR 적용 → backup 완료 동안 cluster reconcile 차단 0회 | independent reconcile |
-| GA-distributed (R5) | shardCount=4 cluster 의 cross-shard query 정확도 | 100% 일치 (single-shard reference) |
+| alpha (R1+R2) | Cross-validation re-run passes alpha-deployable (smoke.sh) | Pod Ready < 60s |
+| beta (R3) | RTO until new primary after killing primary in a replicas=2 cluster | < 30s |
+| GA-single (R4) | Number of times cluster reconcile is blocked while a Backup CR is applied | 0 (independent reconcile) |
+| GA-distributed (R5) | Cross-shard query accuracy on a shardCount=4 cluster | 100% match (single-shard reference) |
 
-## §8 본 RFC 의 cycle 5R 의 본질
+## §8 The essence of this RFC's cycle 5R
 
-cross-validation 이 우리에게 가르친 것: *기능이 적은 게 가벼운 게 아니라, 검증되지 않은 기능이 vaporware*. 5R 은 **각 R 이 자기만의 unit test + envtest + cross-validation 재측정** 으로 검증된다. R 1 개 = 1 atomic commit + 1 deployable cycle. RFC 가 *큰 그림* 을 그리되, 각 cycle 은 *작고 검증 가능한* 단위로 진행.
+What cross-validation taught us: *few features is not lightweight — unverified features are vaporware*. 5R is verified by *each R having its own unit test + envtest + cross-validation remeasurement*. 1 R = 1 atomic commit + 1 deployable cycle. The RFC draws the *big picture* but each cycle proceeds in *small, verifiable* units.
 
-이것이 5,220 LoC 가 94,130 LoC (CNPG) 와 *경쟁* 하는 방법 — **모든 줄이 검증되어 있음**.
+This is how 5,220 LoC *competes* with 94,130 LoC (CNPG) — **every single line is verified**.

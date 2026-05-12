@@ -23,6 +23,7 @@
 
 - *(security)* `github.com/moby/spdystream` v0.5.0 → v0.5.1 (CVE-2026-35469 HIGH, Kubelet/CRI-O/kube-apiserver DoS via SPDY streaming). trivy fs `--severity HIGH,CRITICAL --exit-code 1` 게이트 회복.
 - *(ci,kustomize)* manager Deployment 가 8081 health port 를 containerPorts 에 누락한 drift 해소 — config/manager/manager.yaml `ports: []` → `ports: [{name: health, containerPort: 8081, protocol: TCP}]`. helm chart 와 dist/install.yaml 의 manager Deployment 가 동일 표면이 되도록 정렬 (kube-linter liveness-port/readiness-port check).
+- *(docs,license)* NOTICE 의 Citus AGPL-3.0 stale entry 제거 — ADR-0003 라이선스 정책 (AGPLv3 영구 금지) + ADR-0001 (self-built distributed SQL) 정합. 실제 go.mod direct dependencies 만 명시 (Prometheus / Ginkgo / robfig/cron / moby/spdystream 등).
 
 ## [0.3.0-alpha.18] - 2026-05-12
 

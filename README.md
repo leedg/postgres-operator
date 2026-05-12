@@ -78,29 +78,50 @@ operator manager
 
 자동 검증: `scripts/check-license-policy.sh` (lefthook L2 pre-push hook 으로 강제, P0 후속 작업).
 
-## 빠른 시작 (P1 도달 후)
+## 빠른 시작
 
 ```bash
-helm install pgo charts/postgres-operator \
-  --set router.enabled=false \
-  --set autoscale.keda.enabled=false
+# 1. operator + 8 CRD 설치 (helm chart 또는 OperatorHub bundle)
+helm install pgo charts/postgres-operator
 
-kubectl apply -f - <<'YAML'
-apiVersion: postgres.keiailab.io/v1alpha1
-kind: PostgresCluster
-metadata:
-  name: demo
-spec:
-  postgresVersion: "18"
-  shardingMode: none      # P1: single-shard
-  shards:
-    initialCount: 1
-    storage: { size: 10Gi }
-    replicas: 1
-YAML
+# 2. quickstart PostgresCluster
+kubectl apply -f config/samples/postgres_v1alpha1_postgrescluster_dev.yaml
+
+# 3. Ready 까지 polling
+kubectl wait postgrescluster/quickstart --for=condition=Ready --timeout=5m
+
+# 4. (선택) declarative database/user 적용
+kubectl apply -f config/samples/postgres_v1alpha1_postgresdatabase.yaml
+kubectl apply -f config/samples/postgres_v1alpha1_postgresuser.yaml
+
+# 5. (선택) PgBouncer Pooler + cron 백업
+kubectl apply -f config/samples/postgres_v1alpha1_pooler.yaml
+kubectl apply -f config/samples/postgres_v1alpha1_scheduledbackup.yaml
+
+# 6. monitoring 활성화 (prometheus-operator 가 있을 때)
+helm upgrade pgo charts/postgres-operator \
+  --reuse-values \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.prometheusRule.enabled=true \
+  --set metrics.grafanaDashboards.enabled=true
 ```
 
-**현재 (0.3.0-alpha.4, 2026-05-08)**: argos 실제 Kubernetes 클러스터에서 ArgoCD Application `platform-data-postgres-operator` 가 `Synced/Healthy` 이고, `data` namespace 의 `platform-data-postgres-operator-controller-manager` Deployment 가 `1/1` 로 실행 중이다. live image 는 `ghcr.io/keiailab/postgres-operator:0.3.0-alpha.4` (`sha256:394ec5eb4aa09d316d957a3c751bb7283f21bfa71f19a9d2871ccbc7ec974f2f`) 이며 `PostgresCluster/argos-postgres` 는 `Ready=True` 로 확인됐다. 단, 이는 Day-0 alpha-deployable single-shard 배포 완료를 뜻하며 0.4.0 production-ready 로 쓰려면 HA replica, backup/restore drill, PITR, 장기 안정성 검증이 추가로 필요하다.
+운영 가이드는 [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md) 와 [`docs/operator-guide/pooler-monitoring.md`](docs/operator-guide/pooler-monitoring.md) 참조.
+
+**현재 (0.3.0-alpha.18, 2026-05-12)**: argos 실제 Kubernetes 클러스터에서 ArgoCD Application `platform-data-postgres-operator` 가 `Synced/Healthy` 이고 `PostgresCluster/argos-postgres` 는 `Ready=True` 로 확인됐다. helm chart 와 OperatorHub bundle 은 **8 개 owned CRD** 를 제공한다:
+
+| CRD | 역할 | 상태 |
+|---|---|---|
+| `PostgresCluster` | shard-aware topology (primary + standby + native sharding 로드맵) | ✅ deployable |
+| `BackupJob` | atomic backup/restore Job (pgBackRest plugin) | ⚠️ controller partial |
+| `ScheduledBackup` | 6-field cron → BackupJob 자동 생성 | ⚠️ controller partial |
+| `Pooler` | PgBouncer connection pool 계층 (CNPG 호환 표면) | ⚠️ controller partial |
+| `PostgresDatabase` | declarative database/schema/extension/FDW (ready primary psql) | ⚠️ controller partial |
+| `PostgresUser` | declarative role + password + membership (ready primary psql) | ⚠️ controller partial |
+| `ImageCatalog` | namespace 단위 PG runtime image catalog (CNPG 호환) | ⚠️ rollout path |
+| `ClusterImageCatalog` | cluster-wide 공유 PG runtime image catalog | ⚠️ rollout path |
+
+GA 거리: 0.4.0 production-ready (HA replica, backup/restore drill, PITR, chaos-mesh failover) 와 P2 multi-shard 는 후속 phase. CNPG 와의 표면 차이는 [`docs/operator-guide/cross-validation-cnpg.md`](docs/operator-guide/cross-validation-cnpg.md) feature matrix 참조.
 
 ## 개발 (Contributing)
 

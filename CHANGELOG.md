@@ -87,7 +87,22 @@ This project follows SemVer.
   (ii) re-fetches and retries once on conflict before giving up.
   Observed during the PG18 kind smoke iter#3; covered by the updated
   `TestPostgresDatabaseReconcileDeletePolicyAddsFinalizerBeforeApply`
-  test which now asserts single-pass `status.applied=true`.
+  test which now asserts single-pass `status.applied=true`. The same
+  conflict-retry pattern was retrofitted onto BackupJob,
+  ScheduledBackup, and Pooler `statusUpdate` helpers for consistency.
+- *(controller)* Pooler — when the upstream PostgresCluster's
+  `status.shards[0].primary.ready` flipped to true *after* the Pooler's
+  first reconcile, the Pooler was stuck in `phase=Failed,
+  reason=TargetNotFound` forever because the PoolerReconciler had no
+  `Watches` on PostgresCluster (PG18 kind smoke iter#4 observation:
+  Pooler reconciled at 14:29:38Z, cluster Ready=True at 14:29:42Z,
+  Deployment never created). PoolerReconciler now
+  `Watches(&PostgresCluster{}, EnqueueRequestsFromMapFunc(...))` to
+  re-enqueue every Pooler in the namespace whose
+  `spec.cluster.name` matches a status change, and the missing-target
+  branch now marks `phase=Pending` + `RequeueAfter` instead of `Failed`.
+  Regression test
+  `TestPoolerReconcileTargetNotFoundIsPendingWithRequeue` added.
 - *(security)* `github.com/moby/spdystream` v0.5.0 → v0.5.1
   (CVE-2026-35469 HIGH; Kubelet / CRI-O / kube-apiserver DoS via SPDY
   streaming). `trivy fs --severity HIGH,CRITICAL --exit-code 1` is green

@@ -137,10 +137,13 @@ fi
 log "  PASS: Secret smoke-rw-autotls-client-tls is present"
 
 log "[6/6] Verifying Pooler Deployment mounts the issued Secret"
+# The Pooler controller emits a Deployment with the conventional
+# `<pooler>-pooler` suffix (see internal/controller/builders.go::PoolerDeploymentName).
+POOLER_DEP="smoke-rw-autotls-pooler"
 mount_ok=""
 end=$(( $(date +%s) + 60 ))
 while [[ $(date +%s) -lt $end ]]; do
-    mount_ok=$(kubectl -n "$NS" get deployment smoke-rw-autotls \
+    mount_ok=$(kubectl -n "$NS" get deployment "$POOLER_DEP" \
         -o jsonpath='{.spec.template.spec.volumes[?(@.secret.secretName=="smoke-rw-autotls-client-tls")].name}' 2>/dev/null || echo "")
     if [[ -n "$mount_ok" ]]; then
         break
@@ -148,11 +151,11 @@ while [[ $(date +%s) -lt $end ]]; do
     sleep 3
 done
 if [[ -z "$mount_ok" ]]; then
-    log "ERROR: Pooler Deployment is not mounting the issued Secret"
-    kubectl -n "$NS" get deployment smoke-rw-autotls -o yaml | tail -40 || true
+    log "ERROR: Pooler Deployment ${POOLER_DEP} is not mounting the issued Secret"
+    kubectl -n "$NS" get deployment "$POOLER_DEP" -o yaml | tail -40 || true
     exit 1
 fi
-log "  PASS: Deployment volume \`${mount_ok}\` references smoke-rw-autotls-client-tls"
+log "  PASS: Deployment ${POOLER_DEP} volume \`${mount_ok}\` references smoke-rw-autotls-client-tls"
 
 log "All cert-manager autoTLS drill steps passed."
 

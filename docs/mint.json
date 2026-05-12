@@ -56,7 +56,8 @@
         "operator-guide/deployment",
         "operator-guide/ha-election",
         "operator-guide/pooler-monitoring",
-        "operator-guide/cross-validation-cnpg"
+        "operator-guide/cross-validation-cnpg",
+        "operator-guide/community-operators-onboarding"
       ]
     },
     {

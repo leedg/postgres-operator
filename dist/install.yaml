@@ -9705,8 +9705,9 @@ spec:
                           type: string
                         type: array
                       issuerRef:
-                        description: IssuerRef is a reference to a cert-manager Issuer
-                          or ClusterIssuer.
+                        description: |-
+                          IssuerRef references a cert-manager Issuer or ClusterIssuer.
+                          Mutually exclusive with SelfSigned.
                         properties:
                           kind:
                             default: Issuer
@@ -9724,14 +9725,24 @@ spec:
                         required:
                         - name
                         type: object
+                      selfSigned:
+                        description: |-
+                          SelfSigned, when true, makes the operator generate an in-process
+                          RSA-2048 self-signed CA + leaf certificate (1-year validity, auto
+                          rotation triggered when the existing cert's NotAfter is within 30
+                          days). Mutually exclusive with IssuerRef.
+                        type: boolean
                       serverEnabled:
                         default: false
                         description: ServerEnabled=true auto-issues a server TLS Secret
                           (for connecting to the PostgreSQL backend).
                         type: boolean
-                    required:
-                    - issuerRef
                     type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of spec.pgbouncer.autoTLS.issuerRef or
+                        spec.pgbouncer.autoTLS.selfSigned must be set
+                      rule: '(has(self.issuerRef) ? 1 : 0) + (has(self.selfSigned)
+                        && self.selfSigned ? 1 : 0) == 1'
                   clientCASecret:
                     description: ClientCASecret is the ca.crt Secret used to verify
                       client certificates.

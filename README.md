@@ -12,6 +12,8 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/keiailab/postgres-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/keiailab/postgres-operator)
 [![GitHub Discussions](https://img.shields.io/github/discussions/keiailab/postgres-operator?label=discussions&logo=github)](https://github.com/keiailab/postgres-operator/discussions)
 
+> 한국어 README: [README.ko.md](README.ko.md) *(P3 follow-up)*
+
 ---
 
 ## Identity
@@ -51,22 +53,41 @@ operator manager
   KEDA + Prometheus  (auto-split trigger: size + p99 + cpu)
 ```
 
-Details: `docs/architecture/overview.md` (to be added in P0).
+Details: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-## Phase roadmap
+## Features
 
-| Phase | Version | Key deliverable | Estimated duration |
-|---|---|---|---|
-| **P0** | 0.3.0 | Redesign reset (ADR/RFC 0001–0005, README, code removal) | 2 months |
-| **P1** | 0.4.0 | Single-shard production-ready (HA / backup / PITR) | 6 months |
-| **P2** | 0.5.0 | pg-router + `ShardRange` CRD (manual multi-shard ops) | 10 months |
-| **P3** | 0.6.0 | vindex extension + scatter-gather + read replica autoscale | 8 months |
-| **P4** | 0.7.0 | `ShardSplitJob` 7-step (manual online split trigger) | 12 months |
-| **P5** | 0.8.0 | KEDA auto-split + rebalancer (auto-sharding reached) | 8 months |
-| **P6** | 0.9.0 | Distributed transactions (2PC + saga) + cross-shard JOIN | 12 months |
-| **P7** | **1.0.0** | Stabilization + chaos / benchmark + Artifact Hub verified | 6 months |
+### Currently shipping (v0.3.0-alpha.18)
 
-**Total ≈ 64 months (5.3 years)** assuming one engineer at 50% capacity. Each phase ends with a *production-deployable* artifact.
+The helm chart and OperatorHub bundle ship **8 owned CRDs**. CRD status reflects what is reconciled today on the argos production cluster:
+
+| CRD | Role | Status |
+|---|---|---|
+| `PostgresCluster` | Shard-aware topology (primary + standby + native-sharding roadmap) | ✅ deployable |
+| `BackupJob` | Atomic backup/restore Job (pgBackRest plugin) | ⚠️ controller partial |
+| `ScheduledBackup` | Cron-driven BackupJob generation (6-field schedule) | ⚠️ controller partial |
+| `Pooler` | PgBouncer connection pool layer (CNPG-compatible surface) | ⚠️ controller partial |
+| `PostgresDatabase` | Declarative database/schema/extension/FDW (ready-primary psql) | ⚠️ controller partial |
+| `PostgresUser` | Declarative role + password + membership (ready-primary psql) | ⚠️ controller partial |
+| `ImageCatalog` | Namespace-scoped PostgreSQL runtime image catalog (CNPG-compatible) | ⚠️ rollout path |
+| `ClusterImageCatalog` | Cluster-wide shared PostgreSQL runtime image catalog | ⚠️ rollout path |
+
+Helm chart adds: PrometheusRule + Grafana dashboards (Pooler overview + Cluster overview), restricted PSA SecurityContext, deny-by-default NetworkPolicy, cert-manager TLS integration, OpenTelemetry-ready hooks.
+
+### Roadmap (phase plan)
+
+| Phase | Version | Key deliverable |
+|---|---|---|
+| **P0** | 0.3.0 | Redesign reset (ADR/RFC 0001–0014, ARCHITECTURE.md, runbook scaffolding) |
+| **P1** | 0.4.0 | Single-shard production-ready (HA / backup / PITR drill / Lease election) |
+| **P2** | 0.5.0 | pg-router + `ShardRange` CRD (manual multi-shard ops) |
+| **P3** | 0.6.0 | vindex extension + scatter-gather + read replica autoscale |
+| **P4** | 0.7.0 | `ShardSplitJob` 7-step (manual online split trigger) |
+| **P5** | 0.8.0 | KEDA auto-split + rebalancer (auto-sharding reached) |
+| **P6** | 0.9.0 | Distributed transactions (2PC + saga) + cross-shard JOIN |
+| **P7** | **1.0.0** | Stabilization + chaos / benchmark + Artifact Hub verified |
+
+Full phase detail (sub-tasks, SLO, ADR/RFC references): [`docs/roadmap.md`](docs/roadmap.md) and [`ROADMAP.md`](ROADMAP.md).
 
 ## License policy (ADR 0003)
 
@@ -76,7 +97,7 @@ External OSS dependencies are permitted only when *all* of the following hold:
 
 **Permanently forbidden**: AGPLv3 / BUSL / CSL / SSPL.
 
-Automated enforcement: `scripts/check-license-policy.sh` (P0 follow-up; will be wired as a lefthook L2 pre-push hook).
+Automated enforcement: `scripts/check-license-policy.sh` (P0 follow-up; wired as a lefthook L2 pre-push hook and as the `go-licenses.yml` GitHub Actions check).
 
 ## Quickstart
 
@@ -108,20 +129,43 @@ helm upgrade pgo charts/postgres-operator \
 
 See [`docs/operator-guide/deployment.md`](docs/operator-guide/deployment.md) and [`docs/operator-guide/pooler-monitoring.md`](docs/operator-guide/pooler-monitoring.md) for the operations playbook.
 
-**Current state (0.3.0-alpha.18, 2026-05-12)**: on the argos Kubernetes cluster, the ArgoCD Application `platform-data-postgres-operator` is `Synced/Healthy` and `PostgresCluster/argos-postgres` reports `Ready=True`. The helm chart and OperatorHub bundle ship **8 owned CRDs**:
+## Production readiness
 
-| CRD | Role | Status |
-|---|---|---|
-| `PostgresCluster` | Shard-aware topology (primary + standby + native-sharding roadmap) | ✅ deployable |
-| `BackupJob` | Atomic backup/restore Job (pgBackRest plugin) | ⚠️ controller partial |
-| `ScheduledBackup` | Cron-driven BackupJob generation (6-field schedule) | ⚠️ controller partial |
-| `Pooler` | PgBouncer connection pool layer (CNPG-compatible surface) | ⚠️ controller partial |
-| `PostgresDatabase` | Declarative database/schema/extension/FDW (ready-primary psql) | ⚠️ controller partial |
-| `PostgresUser` | Declarative role + password + membership (ready-primary psql) | ⚠️ controller partial |
-| `ImageCatalog` | Namespace-scoped PostgreSQL runtime image catalog (CNPG-compatible) | ⚠️ rollout path |
-| `ClusterImageCatalog` | Cluster-wide shared PostgreSQL runtime image catalog | ⚠️ rollout path |
+**Current state (0.3.0-alpha.18, 2026-05-12)**: on the argos Kubernetes cluster, the ArgoCD Application `platform-data-postgres-operator` is `Synced/Healthy` and `PostgresCluster/argos-postgres` reports `Ready=True`. Cross-validation against CloudNativePG is documented in [`docs/operator-guide/cross-validation-cnpg.md`](docs/operator-guide/cross-validation-cnpg.md).
 
-GA distance: 0.4.0 production-ready (HA replicas, backup/restore drill, PITR, chaos-mesh failover) and P2 multi-shard remain in subsequent phases. See [`docs/operator-guide/cross-validation-cnpg.md`](docs/operator-guide/cross-validation-cnpg.md) for the feature matrix against CloudNativePG.
+GA distance:
+- **P1** — production-ready single-shard requires the HA Lease distributed-lock controller, the BackupJob/ScheduledBackup live drill, the PITR checksum drill, and the chaos-mesh failover suite. Tracking sub-tasks in `~/.claude/plans/2026-05-14-4-operators-100pct/P-D.md`.
+- **P2** — multi-shard requires `ShardRange` CRD + pg-router PoC ([`docs/sharding/SHARDING.md`](docs/sharding/SHARDING.md)).
+- The current alpha is **not** recommended for production data without your own backup/restore verification.
+
+## Known limitations
+
+- BackupJob / ScheduledBackup / Pooler / PostgresDatabase / PostgresUser controllers are *partial* — the CRD surface ships and reconciles the core path, but live drill verification (rotation / PITR / retain-policy) is still pending and tracked per phase.
+- ImageCatalog / ClusterImageCatalog rollout-drift measurement is implemented at the StatefulSet annotation layer; production rollout SLA is not yet certified.
+- The Sharding subsystem (`ShardRange`, `pg-router`, `ShardSplitJob`) is **design-only** — see [`docs/sharding/SHARDING.md`](docs/sharding/SHARDING.md) for spec; no runtime code yet.
+- The Phase roadmap above implies a multi-year horizon — operational scope today is single-shard HA only.
+
+## Uninstall
+
+```bash
+# 1. Drop CR instances first (otherwise finalizers block CRD removal)
+kubectl delete postgrescluster --all -A
+kubectl delete pooler --all -A
+kubectl delete scheduledbackup --all -A
+
+# 2. Uninstall the chart
+helm uninstall pgo
+
+# 3. Remove CRDs (optional; helm keeps CRDs by default to preserve cluster state)
+kubectl delete crd postgresclusters.postgres.keiailab.com \
+                  backupjobs.postgres.keiailab.com \
+                  scheduledbackups.postgres.keiailab.com \
+                  poolers.postgres.keiailab.com \
+                  postgresdatabases.postgres.keiailab.com \
+                  postgresusers.postgres.keiailab.com \
+                  imagecatalogs.postgres.keiailab.com \
+                  clusterimagecatalogs.postgres.keiailab.com
+```
 
 ## Contributing
 
@@ -131,30 +175,36 @@ make sync-crds              # Verify config/crd/bases ↔ chart synchronization
 make test-e2e PILLAR=p1     # Kind-cluster e2e
 ```
 
-GitHub Actions is permanently forbidden (RFC 0002 archive); all gates run locally (pre-commit / pre-push / Makefile / PR review).
+GitHub Actions runs the OSS standard suite (CI / scorecard / CodeQL / DCO / dependency-review / go-licenses / kube-linter / helm-install-test / stale). Local pre-commit / pre-push hooks remain the primary developer gate; CI is the convergence check.
 
-See `CONTRIBUTING.md` for the contributor guide, `GOVERNANCE.md` for the governance model, and `CODE_OF_CONDUCT.md` for the code of conduct.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contributor guide, [`GOVERNANCE.md`](GOVERNANCE.md) for the governance model (lazy consensus / 2/3 supermajority), and [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for the code of conduct.
 
 ## Documentation
 
-- `docs/architecture/` — Distributed-system design (overview / routing-layer / sharding-model / consistency / ha-and-fencing) — *to be added in P0*
-- `docs/kb/adr/` — Architecture Decision Records (current: 0001–0005; archive in `_archive/v0.x/`)
-- `docs/rfcs/` — RFC drafts (current: 0001–0005)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — Single-page architecture description (8 CRD surface + self-built distributed SQL + G0-G6 status + ADR cross-link)
+- `docs/kb/adr/` — Architecture Decision Records (current: 0001–0014; archive in `_archive/v0.x/`)
+- `docs/rfcs/` — RFC drafts (current: 0001–0007)
+- `docs/operator-guide/` — Deployment / pooler-monitoring / cross-validation-cnpg / community-operators-onboarding / HA
+- `docs/runbooks/` — Operations procedures: ha / backup / restore / upgrade / security / migration (each with SLO targets + verify commands)
+- `docs/sharding/` — Sharding architecture spec (G3-G5)
 - `docs/api-reference/` — CRD reference (auto-generated, planned)
-- `docs/runbooks/` — Operations procedures (split / failover / backup, planned for P4+)
 - `docs/tutorials/` — Step-by-step user guides (planned for P1+)
+
+## Reporting vulnerabilities
+
+Please **do not** open a public issue for security reports. Use the private GitHub Security Advisory channel per [`SECURITY.md`](SECURITY.md). We respond within 5 business days and coordinate disclosure timelines for high-severity findings.
 
 ## Community
 
 - **Discussions**: [GitHub Discussions](https://github.com/keiailab/postgres-operator/discussions) — usage questions, feature ideas, operational war stories.
-- **Issues**: [GitHub Issues](https://github.com/keiailab/postgres-operator/issues) — bugs and feature requests (please file reproducible cases).
-- **Security reports**: [SECURITY.md](SECURITY.md) — vulnerabilities are reported via a *private* channel (GitHub Security Advisory).
-- **Governance**: [GOVERNANCE.md](GOVERNANCE.md) — decision process (lazy consensus / 2/3 supermajority).
+- **Issues**: [GitHub Issues](https://github.com/keiailab/postgres-operator/issues) — bugs and feature requests (please file reproducible cases; the `question.yml` template guides Q&A).
+- **Governance**: [`GOVERNANCE.md`](GOVERNANCE.md) — decision process (lazy consensus / 2/3 supermajority).
+- **Sponsorship**: see [`.github/FUNDING.yml`](.github/FUNDING.yml) for the GitHub Sponsors button.
 
 ## License
 
-Apache-2.0. See the `LICENSE` file.
+Apache-2.0. See the [`LICENSE`](LICENSE) file.
 
 ## Maintainer
 
-[@phil](https://github.com/phil) — `eightynine01@gmail.com`
+[@phil](https://github.com/phil) — `eightynine01@gmail.com`. Maintainer roster: [`MAINTAINERS.md`](MAINTAINERS.md).

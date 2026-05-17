@@ -37,6 +37,17 @@ SHARD_REPLICAS=2 SMOKE_SYNC=1 SMOKE_SYNC_KILL=1 ./hack/smoke.sh
 
 각 단계는 PASS 시 exit 0 + `PASS:` 행 출력. FAIL 시 즉시 exit 1.
 
+### 라이브 측정 evidence (2026-05-17, T31 commits 09abbb5/dca3fa0)
+
+`SMOKE_SYNC=1` (drill_sync) PG18 SHARD_REPLICAS=1:
+- B.1: `synchronous_standby_names='ANY 1 ("quickstart-shard-0-1","quickstart-shard-0-0")'`
+- B.2: `sync/quorum replica count=1`
+- B.3: `commit_lsn=0/3DA43A0 / flush_lsn=0/3DA43A0` → `pg_wal_lsn_diff=0` → **RPO=0 직접 증명**
+
+`SMOKE_REJOIN=1` A.1 basebackup (수동 시연으로 path verify): standby PVC delete → in-pod PGDATA wipe → Pod kill → reconciler init container 가 fresh `pg_basebackup` 진입 → `pg_stat_replication{application_name=quickstart-shard-0-1, state=streaming, sync_state=async, lag=0}` 회복. STS PVC retention `Retain` 회피 path 까지 evidence.
+
+A.2 pg_rewind + SMOKE_FAILOVER 자동 trigger 의 라이브 PASS 는 별 task (`docs/g1-ha-election-fact-fix` 영역).
+
 ## References
 
 - ADR-0001 (self-built distributed SQL)

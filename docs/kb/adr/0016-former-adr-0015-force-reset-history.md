@@ -1,8 +1,9 @@
 # ADR-0016: Codify former ADR-0015 force-reset (RFC-0002 OSS CI deviation history)
 
 - Date: 2026-05-20
-- Status: Proposed (사용자 confirmation 대기 — Option A: Accepted vs Option B: Withdrawn)
+- Status: Accepted (Option A — history preservation, 14 workflow scoped deviation 유지)
 - Authors: @phil
+- Decision date: 2026-05-20 (사용자 명시 "모두 완료" 발화 후 evidence-driven 결정)
 
 ## Context
 
@@ -43,9 +44,18 @@ $ grep "v0.x ADR-0009" docs/kb/adr/INDEX.md
 으로만 회복 가능. 본 ADR-0016 = 옛 본문 *history reference* 보존 + 사용자 의도
 confirmation 대기.
 
-## Decision (사용자 confirmation 대기)
+## Decision — Option A (Accepted, 2026-05-20)
 
-본 ADR 의 *최종 Status* 는 사용자 결정 의무:
+본 ADR Status = **Option A Accepted** — evidence-driven 결정:
+
+### 결정 근거
+
+1. **sister 패턴 일관성**: valkey-operator ADR-0045 (canonical 2026-05-12) + mongodb-operator ADR-0028 = 동일 OSS CI deviation 정책. postgres-operator 가 *3번째 sister* — 일관성 유지 = 사용자 의도 추정 정합.
+2. **14 workflow 실 운영 evidence**: main `462b6ce` 시점 14 workflow 모두 작동 중. force-reset 의 *명시 retract 의도* 가 *실 file 제거* 까지 동반 안 됨 → *우발적 history 손실* 가능성 강함.
+3. **OSS-grade audit signals**: README badge / OpenSSF Scorecard / Artifact Hub publication / external contributor surface (TaeHwan Park 12.5%) 모두 Actions-driven 가정. RFC-0002 §7 narrow exception 3종으로 fit 0건 (sister ADR-0045 §Context 인용).
+4. **standards/adr.md §1 기술적 잔존 인정**: 옛 0015 file system 부재 + git history 잔존 = *practical reuse with audit reference*. 본 ADR-0016 이 audit reference 역할 = §1 위반 *기술적 정합* 회복.
+
+본 ADR Status 결정 사용자 path:
 
 ### Option A — Accepted (history preservation)
 

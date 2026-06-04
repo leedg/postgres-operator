@@ -798,8 +798,18 @@ if [ -f "$DATA/PG_VERSION" ]; then
     printf "primary_conninfo = '%s'\n" "$PRIMARY_CONNINFO" >> "$DATA/postgresql.auto.conf"
     echo "existing PGDATA marked for standalone replica continuous recovery"
   elif [ "$MEMBER_COUNT" -gt 1 ] && [ -n "$PRIMARY_HOST" ] && [ "$PRIMARY_IS_SELF" = "0" ] && [ ! -f "$DATA/standby.signal" ]; then
+    # split-brain fix (fix/ha-replica-standby-signal-restore): an HA replica whose
+    # PGDATA is already initialized but has no standby.signal must boot as a *standby*,
+    # not race the election as a Real elector. Restore standby.signal + primary_conninfo
+    # *before* postgres starts so the T30 guard (cmd/instance: IsStandby → Follower)
+    # observes a standby and never acquires the primary lease. The marker is still
+    # emitted so the instance manager can pg_rewind on timeline divergence. Without
+    # this both pods boot primary → split-brain (live RCA 2026-06-04, pg-e2e).
+    prepare_primary_conninfo
+    touch "$DATA/standby.signal"
+    printf "primary_conninfo = '%s'\n" "$PRIMARY_CONNINFO" >> "$DATA/postgresql.auto.conf"
     touch "$DATA/` + restartPrimaryAsStandbyMarker + `"
-    echo "existing PGDATA in HA cluster has a different primary endpoint; marking for standby restart"
+    echo "existing PGDATA in HA cluster has a different primary endpoint; standby.signal restored + marked for standby restart"
   fi
   echo "PGDATA already initialized at $DATA; permissions normalized; skipping bootstrap"
   exit 0

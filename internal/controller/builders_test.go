@@ -445,6 +445,11 @@ func TestBuildBootstrapContainer_ExistingPGDATAMarksAnyOldPrimaryAsStandby(t *te
 		`"$POD_NAME"|"$POD_NAME".*) PRIMARY_IS_SELF=1 ;;`,
 		`[ "$MEMBER_COUNT" -gt 1 ] && [ -n "$PRIMARY_HOST" ] && [ "$PRIMARY_IS_SELF" = "0" ] && [ ! -f "$DATA/standby.signal" ]`,
 		restartPrimaryAsStandbyMarker,
+		// split-brain fix: the HA-replica-restart branch must restore standby.signal
+		// + primary_conninfo before PG starts, not just drop a marker. Otherwise the
+		// pod boots as a Real elector and can win the lease → two primaries.
+		`touch "$DATA/standby.signal"`,
+		`standby.signal restored + marked for standby restart`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("existing PGDATA rejoin script missing %q", want)

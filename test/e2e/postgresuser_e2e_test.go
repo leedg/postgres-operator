@@ -4,11 +4,7 @@
 /*
 Copyright 2026 keiailab.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
+Licensed under the MIT License. See the LICENSE file for details.
 */
 
 // PostgresUser live smoke + password rotation SQL round-trip e2e (D.5.7).

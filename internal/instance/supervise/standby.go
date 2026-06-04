@@ -1,11 +1,7 @@
 /*
 Copyright 2026 keiailab.
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
+Licensed under the MIT License. See the LICENSE file for details.
 */
 
 // Package supervise 의 본 파일 (standby.go) 은 RFC 0006 R3 — PostgreSQL 표준

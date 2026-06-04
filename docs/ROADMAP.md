@@ -45,11 +45,11 @@ file.
 |---|---|---|
 | Project / chart name | `postgres-operator` | GitHub repo, Helm chart, and GitOps path are aligned |
 | License | Apache-2.0 | `LICENSE`, ADR-0003 |
-| Latest release | `0.4.0-beta.1` | GHCR image + Helm chart publish + OLM bundle — Level 4 Deep Insights |
+| Latest *published* release | `0.3.0-alpha.16` (Helm) / `0.3.0-alpha.17` (live deploy) | Helm index `keiailab.github.io/postgres-operator` tops out at `0.3.0-alpha.16`; `0.4.0-beta.1` is the source chart `appVersion`, **not published to GHCR/Helm/OLM** as of 2026-06-04. "Level 4 Deep Insights" is a code capability, not a release claim. <!-- live-verified: 2026-06-04 --> |
 | OLM bundle | `bundle/manifests/` aligned with 8 CRDs + alm-examples + CSV descriptions | `operator-sdk bundle validate --select-optional suite=operatorframework` is clean (T26) |
 | Declarative DB surface | Pooler / PostgresDatabase / PostgresUser / ScheduledBackup / ImageCatalog / ClusterImageCatalog / externalClusters / replica cluster | T22 / T24 / T25 cycles completed; live kind smoke automation (T27) in progress |
 | Local 4-layer gate | L1 lefthook pre-commit + L2 pre-push + L3 make validate/audit + L4 PR evidence | ADR-0009 / RFC-0002; version-drift assertion and bundle validate are automated (T26) |
-| Production deployment | Day-0 single-shard | `PostgresCluster/postgres` Ready |
+| Production deployment | operator-only (Flux `0.3.0-alpha.17`) | **0 live `PostgresCluster` instances** as of 2026-06-04 — the operator manager runs but manages no workload. Day-0 single-shard Ready (`PostgreSQL 18.3`) was demonstrated on a throwaway namespace, not in production. <!-- live-verified: 2026-06-04 --> |
 | GHCR runtime image | Publicly pullable | `ghcr.io/keiailab/pg:18` restarts with no pull secret |
 | HA replicas | Partial (`Replicas` field only) | `api/v1alpha1/postgrescluster_types.go` |
 | Backup / restore | Partially implemented | `BackupJob` phase transitions + `ScheduledBackup` CRD/controller + `RestorePIT` call path + pgBackRest command-runner plugin + K8s sidecar exec path. Actual restore drill is still pending. |

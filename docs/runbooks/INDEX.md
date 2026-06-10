@@ -14,6 +14,7 @@ commands, and rollback procedure.
 | [pvc-fence.md](pvc-fence.md) | StatefulSet PVC fencing on Pod loss | Fence apply ≤ 30 s |
 | [upgrade.md](upgrade.md) | Operator + PostgreSQL minor / major version upgrade | Rolling upgrade ≤ 10 min per shard |
 | [security.md](security.md) | Restricted PSA, NetworkPolicy, TLS rotation | Daily audit, no privilege escalation findings |
+| [credential-sourcing.md](credential-sourcing.md) | ExternalSecret / Infisical materialization for user, pooler, and replica credentials | Secret readiness before reconcile |
 | [migration.md](migration.md) | Data migration into / out of `PostgresCluster` | Cutover SLA target p99 < 500 ms (multi-shard goal) |
 
 ## Conventions

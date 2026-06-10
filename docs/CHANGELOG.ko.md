@@ -15,6 +15,9 @@
 
 ### Added (추가됨)
 
+- *(helm,security)* External Secrets Operator / Infisical 기반
+  PostgresUser password Secret, PgBouncer `userlist.txt`, external replica
+  source password 의 opt-in `externalSecrets` chart 렌더링 추가.
 - *(olm,docs)* `docs/operator-guide/community-operators-onboarding.md` —
   k8s-operatorhub/community-operators 채널 온보딩 절차 (사전 요구 체크리스트,
   bundle 이미지 build / push, `gh pr create`, upgrade-graph 운영,

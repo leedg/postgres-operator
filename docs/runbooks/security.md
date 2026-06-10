@@ -14,6 +14,19 @@ kubectl annotate postgrescluster <name> \
 # operator reconcile → new Secret → rolling restart
 ```
 
+### ExternalSecret readiness
+
+```bash
+kubectl get externalsecret -n <ns>
+kubectl describe externalsecret quickstart-app-password -n <ns>
+kubectl get secret quickstart-app-password -n <ns>
+```
+
+Check `ExternalSecret` readiness before decoding Secret data or rerunning
+PostgresUser / Pooler reconciliation. See
+[credential-sourcing.md](credential-sourcing.md) for the standard Infisical
+mapping.
+
 ### NetworkPolicy audit
 
 ```bash

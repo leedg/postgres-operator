@@ -90,6 +90,35 @@ extraEnvVarsCM: []
 # -- Operator container additional env vars from Secrets (raw EnvFromSource list)
 extraEnvVarsSecret: []
 
+# External Secrets Operator integration.
+# 기본값은 false: CRD 는 기존 Kubernetes SecretRef 이름을 그대로 사용한다.
+# enabled=true 시 chart 가 Infisical/ESO 기반 ExternalSecret 을 선택적으로 생성한다.
+externalSecrets:
+  enabled: false
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: infisical
+  refreshInterval: 1h
+  postgresUser:
+    enabled: false
+    name: quickstart-app-password
+    targetName: quickstart-app-password
+    usernameKey: username
+    passwordKey: password
+    usernameRemoteKey: /data/postgres/users/app/username
+    passwordRemoteKey: /data/postgres/users/app/password
+  poolerAuth:
+    enabled: false
+    name: quickstart-pooler-auth
+    targetName: quickstart-pooler-auth
+    userlistKey: userlist.txt
+    userlistRemoteKey: /data/postgres/pooler/userlist.txt
+  replicaSourcePassword:
+    enabled: false
+    name: primary-eu-password
+    targetName: primary-eu-password
+    passwordKey: password
+    passwordRemoteKey: /data/postgres/replica/source/password
+
 # -- Additional volumes mounted into the operator pod (raw Volume list)
 extraVolumes: []
 

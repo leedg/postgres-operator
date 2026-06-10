@@ -14,7 +14,7 @@ kubeVersion: ">=1.26.0-0"
 
 # Chart 자체 버전 — beta 단계, Level 4 Deep Insights. SemVer 준수.
 # beta.N iterative pre-release 표기.
-version: 0.4.0-beta.2
+version: 0.4.0-beta.3
 
 # 본 chart가 packaging하는 operator 버전. cmd/main.go binary 버전과 일치.
 appVersion: "0.4.0-beta.1"
@@ -29,6 +29,7 @@ keywords:
   - operator
   - kubernetes
   - keiailab
+  - external-secrets
   - self-built-distributed-sql
   - mit
 maintainers:
@@ -240,4 +241,4 @@ annotations:
       image: ghcr.io/keiailab/postgres-operator:0.4.0-beta.1
   artifacthub.io/changes: |
     - kind: changed
-      description: "서명 메타데이터 전용 chart refresh. operator appVersion/image는 0.4.0-beta.1로 유지하고 Artifact Hub 신규 인덱싱용 signed chart version만 발행한다."
+      description: "Add opt-in ExternalSecret rendering for PostgresUser, Pooler, and external replica-source credentials while keeping operator appVersion/image at 0.4.0-beta.1."

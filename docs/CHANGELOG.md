@@ -6,6 +6,9 @@ This project follows SemVer.
 
 ### Added
 
+- *(helm,security)* Added opt-in `externalSecrets` chart rendering for
+  PostgresUser password Secrets, PgBouncer `userlist.txt`, and external
+  replica-source passwords backed by External Secrets Operator / Infisical.
 - *(olm,docs)* `docs/operator-guide/community-operators-onboarding.md` —
   k8s-operatorhub/community-operators channel onboarding procedure
   (prerequisite checklist, bundle image build / push, `gh pr create`,

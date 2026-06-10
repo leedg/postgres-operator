@@ -108,8 +108,10 @@ From another Pod in the cluster (scram-sha-256):
 psql "host=quickstart-shard-0-headless.default.svc.cluster.local user=postgres dbname=postgres"
 ```
 
-(In alpha, passwords are injected via a separate Secret — to be wired up
-later.)
+Passwords are supplied through Kubernetes Secrets. For production, materialize
+those Secrets from Infisical with External Secrets Operator and reference the
+resulting names from `PostgresUser.spec.passwordSecretRef`,
+`Pooler.spec.pgbouncer.authSecretRef`, or `externalClusters[].password`.
 
 ## 4. Production topology (example)
 

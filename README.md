@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://keiailab.com">
+    <img src="docs/branding/symbol.png" alt="keiailab" width="96"/>
+  </a>
+</p>
+
 # postgres-operator
 
 A Kubernetes operator for running vanilla PostgreSQL 18+, written in Go with Kubebuilder. It manages the full lifecycle of a PostgreSQL cluster — provisioning, high availability, backups, connection pooling, and declarative databases/roles — through plain Kubernetes resources.
@@ -6,6 +12,16 @@ A Kubernetes operator for running vanilla PostgreSQL 18+, written in Go with Kub
 [![Go](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](go.mod)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18%2B-336791?logo=postgresql)](https://www.postgresql.org/)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.26%2B-326CE5?logo=kubernetes)](https://kubernetes.io/)
+
+## Design assets
+
+| Asset | Path | Usage |
+|---|---|---|
+| Centered service symbol | [`docs/branding/symbol.png`](docs/branding/symbol.png) | GitHub README, Artifact Hub icon/screenshot |
+| Keiailab base symbol | [`docs/branding/base-symbol.png`](docs/branding/base-symbol.png) | Source reference for the outer rotating-arrow mark |
+| Light wordmark | [`docs/branding/light.png`](docs/branding/light.png) | Light backgrounds and docs cards |
+| Dark wordmark | [`docs/branding/dark.png`](docs/branding/dark.png) | Dark backgrounds and social cards |
+| Branding guide | [`docs/BRANDING.md`](docs/BRANDING.md) | Public visual usage rules |
 
 The operator runs **unmodified upstream PostgreSQL** — no forked engine, no embedded fork of another operator. Your applications keep using standard PostgreSQL extensions, types, and the libpq/JDBC/asyncpg drivers they already use.
 

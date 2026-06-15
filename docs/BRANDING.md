@@ -21,11 +21,14 @@ This document is the canonical reference for `postgres-operator` branding decisi
 
 | Asset | URL | Usage |
 |---|---|---|
-| Primary logo (SVG) | `https://keiailab.com/assets/logo.svg` | README header, slides |
-| Mono mark | `https://keiailab.com/assets/mark.svg` | Favicon, social cards |
-| Wordmark | `https://keiailab.com/assets/wordmark.svg` | Footer, dark backgrounds |
+| Current primary logo | `docs/branding/symbol.png` | README header, slides |
+| Keiailab base symbol | `docs/branding/base-symbol.png` | Source reference for the outer rotating-arrow mark |
+| Light wordmark | `docs/branding/light.png` | Light backgrounds and docs cards |
+| Dark wordmark | `docs/branding/dark.png` | Dark backgrounds and social cards |
+| Current favicon | `https://keiailab.com/favicon.ico` | Favicon, social cards |
+| Planned SVG kit | `https://keiailab.com/assets/{logo,mark,wordmark}.svg` | Future replacement after URLs return 200 |
 
-**Logo placement**: Top-center of README, width 120px. Always link to https://keiailab.com.
+**Logo placement**: Top-center of README, width 96px. Always link to https://keiailab.com.
 
 **Clear space**: Minimum padding around logo = 25% of logo width.
 
@@ -77,7 +80,7 @@ GitHub README 의 shield.io badge 는 위 hex 사용 권장.
 
 ```markdown
 <p align="center">
-  <img src="https://keiailab.com/assets/logo.svg" alt="keiailab" width="120"/>
+  <img src="docs/branding/symbol.png" alt="keiailab" width="96"/>
 </p>
 
 # postgres-operator

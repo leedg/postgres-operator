@@ -5,7 +5,7 @@ name: Helm chart publish
 #   2. ghcr.io OCI → oci://ghcr.io/keiailab/charts/postgres-operator  ← ArtifactHub 추적 소스
 #
 # 트리거 4종 — 어느 릴리스 방식이든 작동:
-#   - push:    main        → Chart.yaml version SSOT 기준 자동 publish
+#   - push:    stable      → Chart.yaml version SSOT 기준 자동 publish (RFC-0069: main 폐기 → stable)
 #   - release: published   → `gh release create vX.Y.Z` (GitHub UI/API/CLI)
 #   - push:    tags ['v*'] → `git push origin vX.Y.Z`
 #   - workflow_dispatch    → 수동 재실행 / 백필
@@ -13,7 +13,7 @@ on:
   release:
     types: [published]
   push:
-    branches: [main]
+    branches: [stable]
     tags: ['v*']
     paths:
       - 'charts/**'
@@ -55,7 +55,7 @@ jobs:
           CHART_VER=$(grep '^version:' charts/postgres-operator/Chart.yaml | awk '{print $2}' | tr -d '"')
           if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "branch" ]; then
             VERSION="$CHART_VER"
-            echo "✓ main push uses Chart.yaml version ($VERSION)"
+            echo "✓ stable push uses Chart.yaml version ($VERSION)"
           else
             VERSION="${TAG#v}"
             if [ "$CHART_VER" != "$VERSION" ]; then

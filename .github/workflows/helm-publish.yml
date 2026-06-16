@@ -33,7 +33,7 @@ permissions:
   pages: read
 
 concurrency:
-  group: helm-publish-${{ github.event.release.tag_name || github.event.inputs.tag || github.ref_name }}
+  group: helm-publish-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:

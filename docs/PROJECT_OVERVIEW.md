@@ -1,6 +1,8 @@
 # postgres-operator 프로젝트 개요
 
 > 버전: v0.4.0-beta.1 | 라이선스: MIT | 언어: Go 1.26 | 프레임워크: Kubebuilder / controller-runtime
+>
+> 🔖 진행 중 작업을 이어받거나 재검증하려면 먼저 [WORK_HANDOFF.ko.md](WORK_HANDOFF.ko.md)를 보라 — 브랜치 `chore/ha-pitr-e2e-consolidation`의 커밋 구성·검증 결과·남은 라이브 E2E·재현 방법 정리.
 
 ## 1. 프로젝트 목적
 

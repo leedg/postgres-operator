@@ -16,6 +16,9 @@
 | [FEATURE_DEEP_DIVE.md](FEATURE_DEEP_DIVE.md) | 기능별 **심층 동작 분석** — 각 CRD/컨트롤러의 reconcile·내부 동작 | 기능 동작의 상세 레퍼런스 (failover/PITR/pooler/DB·User 내부 흐름) |
 | [TEST_ANALYSIS.md](TEST_ANALYSIS.md) | **단위·통합 테스트** 분석 — 패키지별 커버리지·TC 상세 | 단위/통합 테스트 결과·커버리지 수치, CRLF/`.gitattributes` 조치 |
 | [E2E_TEST_REPORT.ko.md](E2E_TEST_REPORT.ko.md) | **E2E 라이브 드릴 RCA** 누적 로그 — 시간순 검증/원인분석 | E2E(라이브 K8s) 드릴 결과·RCA·PENDING 이력 |
+| [sharding/ROUTER-GAP-ANALYSIS.ko.md](sharding/ROUTER-GAP-ANALYSIS.ko.md) | **라우터 갭 분석** — 현황·능력 사다리·향후 대작업 백로그 | 분산 SQL 라우터 설계/진행/백로그(§6) |
+| [sharding/ROUTER-TESTS.ko.md](sharding/ROUTER-TESTS.ko.md) | **라우터/샤딩 테스트 카탈로그** — 테스트케이스 색인·실행법·라이브 검증 | 라우터/pg-router 테스트케이스 목록 |
+| [perf/baseline.md](perf/baseline.md) | **성능 baseline** — 측정 schema + 실측 결과 | 성능 수치(single-shard 실측 §3.0) |
 | [WORK_HANDOFF.ko.md](WORK_HANDOFF.ko.md) | 현재 **작업 인수인계** — 브랜치 커밋 구성·검증 요약·남은 일·재현법 | 진행 중 작업 스냅샷(브랜치 `chore/ha-pitr-e2e-consolidation`) |
 | [dev-setup-devcontainer.md](dev-setup-devcontainer.md) | **Dev Container** 개발 환경 구성 (현재 권장) | Windows에서 컨테이너로 빌드/테스트하는 절차 |
 | [dev-setup-wsl.md](dev-setup-wsl.md) | **WSL2** 개발 환경 구성 (대안) | WSL2 네이티브로 빌드/테스트하는 절차 |

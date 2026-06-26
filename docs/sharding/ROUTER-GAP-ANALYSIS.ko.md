@@ -147,6 +147,19 @@ parameterized/`t.col`/주석·문자열 내부 오인 방지까지 검증. **기
 
 ---
 
+**로직 보강 / 견고성** (2026-06-27 코드 검토). 일부는 (E)/planner 결선 후 가치:
+- [x] 라우팅 키 *모호성 bail* — 같은 샤딩 컬럼에 다른 리터럴(서브쿼리/OR) 시 추측 거부 (커밋 f50cedd). **틀린 샤드 쓰기 방지(P0)**.
+- [x] *dollar-quote 토큰화* — `$$...$$` 본문 가짜 predicate 누출 차단 (f50cedd). **P0**.
+- [x] *ResolveRead lag 임계* — bounded staleness (8f51a0a).
+- [ ] **consistent-hash 링 캐시** — 현재 `ResolveShard` 가 매 호출 링 재구성(핫패스 낭비). 프록시 결선 시 spec generation 키로 캐시(`NewConsistentHashRing` 이미 노출).
+- [ ] **scatter ORDER BY 다중컬럼/방향** — 현재 첫 컬럼 오름차순만. planner 가 컬럼 index + DESC 전달.
+- [ ] **LIMIT per-shard pushdown** — 현재 전량 gather 후 자름. 각 샤드 쿼리에 `LIMIT n` 주입.
+- [ ] **circuit-breaker half-open 단일 probe** — cooldown 직후 동시 flood 방지(현재 모두 통과).
+- [ ] **SQLShardExecutor ConnMaxLifetime** — 재시작된 backend 로의 stale 연결 방지(현재 IdleTime 만).
+- [ ] **CRDTopologyProvider stale 캐시 정책** — keyspace 삭제 시 캐시 영구 유지 vs 전이 안전 trade-off 재검토.
+
+---
+
 ## 7. 용어집
 
 > 정의는 [GLOSSARY.ko.md](../GLOSSARY.ko.md)에서 발췌해 동일하게 유지한다. 전체 용어는 해당 문서 참고.

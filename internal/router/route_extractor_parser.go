@@ -135,6 +135,16 @@ func tokenize(s string) []token {
 				i++
 			}
 			toks = append(toks, token{tokIdent, b.String()})
+		case c == '$': // dollar-quote ($$...$$ / $tag$...$tag$) 또는 $1 파라미터
+			if inner, end, ok := dollarQuoted(s, i); ok {
+				// dollar-quote 본문은 하나의 문자열 리터럴 — 내부 텍스트가 식별자/predicate
+				// 로 새어나와 false-match 되는 것을 막는다.
+				toks = append(toks, token{tokStr, inner})
+				i = end
+			} else {
+				toks = append(toks, token{tokSym, "$"}) // $1 등 파라미터/stray.
+				i++
+			}
 		case isIdentStart(c):
 			j := i + 1
 			for j < n && isIdentPart(s[j]) {
@@ -175,6 +185,29 @@ func isIdentPart(c byte) bool {
 	return isIdentStart(c) || c >= '0' && c <= '9' || c == '$'
 }
 
+// dollarQuoted 는 s[i]=='$' 에서 PostgreSQL dollar-quote 를 파싱한다. 여는 구분자는
+// `$<tag>$`(tag = [A-Za-z0-9_]*). 성공 시 내부 본문 + 닫는 구분자 다음 인덱스를 반환.
+// `$1`(파라미터)이나 단독 `$` 는 (,,false).
+func dollarQuoted(s string, i int) (inner string, end int, ok bool) {
+	j := i + 1
+	for j < len(s) && isTagChar(s[j]) {
+		j++
+	}
+	if j >= len(s) || s[j] != '$' {
+		return "", 0, false // $1 / stray $.
+	}
+	open := s[i : j+1] // "$<tag>$"
+	rest := s[j+1:]
+	if idx := strings.Index(rest, open); idx >= 0 {
+		return rest[:idx], j + 1 + idx + len(open), true
+	}
+	return rest, len(s), true // 미종료 → 나머지를 본문으로 소비.
+}
+
+func isTagChar(c byte) bool {
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
 func isOpChar(c byte) bool {
 	switch c {
 	case '=', '<', '>', '!', '+', '-', '*', '/', '%', '~', '&', '|', '^':
@@ -184,19 +217,30 @@ func isOpChar(c byte) bool {
 }
 
 // whereEqTok 는 토큰열에서 `<col> = '리터럴'` 패턴을 찾는다 (복합 predicate 에서 지정
-// 컬럼만). 첫 매치를 반환. 우변이 문자열 리터럴이 아니면(파라미터/숫자/범위) 무시.
+// 컬럼만). 우변이 문자열 리터럴이 아니면(파라미터/숫자/범위) 무시.
+//
+// *모호성 안전*: 같은 샤딩 컬럼에 서로 다른 리터럴이 둘 이상 보이면(예: 서브쿼리의
+// `tenant_id='a'` 와 외부 `tenant_id='b'`, 또는 `OR`) 어느 샤드인지 모호하다. 잘못된
+// 샤드로 라우팅(특히 쓰기)하는 것보다, 추출 실패로 두어 호출자가 scatter/거부하게 하는
+// 편이 안전하다. 동일 리터럴만 반복되면 그 값을 쓴다.
 func whereEqTok(toks []token, col string) (string, bool) {
+	found := ""
+	got := false
 	for i := 0; i+2 < len(toks); i++ {
 		if toks[i].kind == tokIdent && strings.EqualFold(toks[i].text, col) &&
 			toks[i+1].kind == tokSym && toks[i+1].text == "=" &&
 			toks[i+2].kind == tokStr {
-			if toks[i+2].text == "" {
-				return "", false
+			v := toks[i+2].text
+			if v == "" {
+				continue
 			}
-			return toks[i+2].text, true
+			if got && v != found {
+				return "", false // 모호 → 추측 거부.
+			}
+			found, got = v, true
 		}
 	}
-	return "", false
+	return found, got
 }
 
 // insertValueTok 는 INSERT 의 컬럼 목록에서 col 위치를 찾아 같은 위치의 VALUES 리터럴을

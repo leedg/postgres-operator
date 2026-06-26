@@ -65,6 +65,43 @@ func TestParserBeatsRegex(t *testing.T) {
 	}
 }
 
+// TestParser_AmbiguousKeyBails 는 같은 샤딩 컬럼에 서로 다른 리터럴(서브쿼리/OR)이
+// 보이면 추측하지 않고 추출 실패(→ scatter)함을 검증한다. 잘못된 샤드로 쓰기가 가는
+// 것을 막는 안전장치.
+func TestParser_AmbiguousKeyBails(t *testing.T) {
+	ex := parserExtractor{}
+	// 서브쿼리 tenant_id='a' + 외부 tenant_id='b' → 모호 → false.
+	q := "SELECT * FROM t WHERE x IN (SELECT id FROM u WHERE tenant_id = 'a') AND tenant_id = 'b'"
+	if k, ok := ex.ExtractRoutingKey(q, "tenant_id"); ok {
+		t.Fatalf("ambiguous key should bail, got (%q,%v)", k, ok)
+	}
+	// 동일 리터럴 반복은 안전 → 그 값 사용.
+	q2 := "DELETE FROM t WHERE tenant_id = 'x' AND (a = 1 OR tenant_id = 'x')"
+	if k, ok := ex.ExtractRoutingKey(q2, "tenant_id"); !ok || k != "x" {
+		t.Fatalf("consistent key = (%q,%v), want (x,true)", k, ok)
+	}
+}
+
+// TestParser_DollarQuoted 는 dollar-quote($$...$$) 본문 속 가짜 predicate 를 오인하지
+// 않고, dollar-quote 리터럴 자체는 라우팅 키로 인식함을 검증한다.
+func TestParser_DollarQuoted(t *testing.T) {
+	ex := parserExtractor{}
+	// $$...$$ 본문의 tenant_id='evil' 은 무시, 실제 WHERE 의 'real' 만.
+	q := "SELECT fn($$ tenant_id = 'evil' $$) FROM t WHERE tenant_id = 'real'"
+	if k, ok := ex.ExtractRoutingKey(q, "tenant_id"); !ok || k != "real" {
+		t.Fatalf("dollar-body leak = (%q,%v), want (real,true)", k, ok)
+	}
+	// tagged dollar-quote 리터럴은 정상 키로.
+	q2 := "SELECT * FROM t WHERE tenant_id = $tag$acme$tag$"
+	if k, ok := ex.ExtractRoutingKey(q2, "tenant_id"); !ok || k != "acme" {
+		t.Fatalf("dollar literal = (%q,%v), want (acme,true)", k, ok)
+	}
+	// $1 파라미터는 여전히 키 아님(리터럴 없음).
+	if _, ok := ex.ExtractRoutingKey("SELECT * FROM t WHERE tenant_id = $1", "tenant_id"); ok {
+		t.Fatal("$1 parameter should not be a routing key")
+	}
+}
+
 // TestIsReadOnlyQuery 는 읽기/쓰기 분류가 보수적(확실한 읽기만 true)임을 검증한다.
 func TestIsReadOnlyQuery(t *testing.T) {
 	cases := []struct {

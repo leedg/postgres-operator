@@ -164,3 +164,27 @@ func TestStatusBackendResolver_ResolveRead(t *testing.T) {
 		t.Fatal("ResolveRead shard-2 (none): expected error")
 	}
 }
+
+// TestStatusBackendResolver_LagBound 는 MaxReplicaLagBytes 초과 replica 가 읽기에서
+// 제외됨을 검증한다 (bounded staleness).
+func TestStatusBackendResolver_LagBound(t *testing.T) {
+	r := NewStatusBackendResolver()
+	r.MaxReplicaLagBytes = 1000
+	rep := func(ep string, lag int64) v1alpha1.ShardEndpoint {
+		return v1alpha1.ShardEndpoint{Pod: ep, Endpoint: ep, Ready: true, LagBytes: lag}
+	}
+	prim := v1alpha1.ShardEndpoint{Pod: "p", Endpoint: "p:5432", Ready: true}
+	r.Update([]v1alpha1.ShardStatus{
+		{Name: "shard-0", Primary: &prim, Replicas: []v1alpha1.ShardEndpoint{
+			rep("fresh:5432", 500),  // 임계 이하 → 허용
+			rep("stale:5432", 5000), // 임계 초과 → 제외
+		}},
+	})
+	// 읽기는 fresh 만 (round-robin 해도 항상 fresh).
+	for i := 0; i < 4; i++ {
+		got, err := r.ResolveRead("shard-0")
+		if err != nil || got != "fresh:5432" {
+			t.Fatalf("ResolveRead = (%q,%v), want only fresh:5432 (stale 제외)", got, err)
+		}
+	}
+}

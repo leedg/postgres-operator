@@ -124,9 +124,13 @@ type ClusterStatusReader interface {
 // Ready 대상이 없는 shard(down / failover 중)는 error 를 내어 라우터가 클라이언트를
 // 우아하게 실패시키게 한다.
 type StatusBackendResolver struct {
+	// MaxReplicaLagBytes 가 >0 이면 lag 가 그를 초과하는 replica 는 읽기 대상에서 제외한다
+	// (bounded staleness). 0 = 무제한(모든 Ready replica 허용).
+	MaxReplicaLagBytes int64
+
 	mu        sync.Mutex
 	primaries map[string]string   // shard → primary endpoint (Ready 만)
-	replicas  map[string][]string // shard → Ready replica endpoints
+	replicas  map[string][]string // shard → Ready replica endpoints (lag 임계 통과)
 	rr        map[string]int      // shard → round-robin 커서 (읽기 분산)
 }
 
@@ -152,9 +156,13 @@ func (r *StatusBackendResolver) Update(shards []v1alpha1.ShardStatus) {
 		}
 		for j := range s.Replicas {
 			rep := s.Replicas[j]
-			if rep.Ready && rep.Endpoint != "" {
-				rm[s.Name] = append(rm[s.Name], rep.Endpoint)
+			if !rep.Ready || rep.Endpoint == "" {
+				continue
 			}
+			if r.MaxReplicaLagBytes > 0 && rep.LagBytes > r.MaxReplicaLagBytes {
+				continue // 너무 stale → 읽기 대상 제외 (bounded staleness).
+			}
+			rm[s.Name] = append(rm[s.Name], rep.Endpoint)
 		}
 	}
 	r.mu.Lock()

@@ -100,6 +100,11 @@ type ShardRangeSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=1024
 	Ranges []ShardRangeEntry `json:"ranges"`
+
+	// ReferenceTables은 이 키스페이스에서 *모든 샤드에 복제*되는 reference 테이블 목록이다.
+	// 이 테이블만 참조하는 쿼리는 샤딩 키 없이 임의 샤드로 라우팅된다 (분산 조인 우회).
+	// +optional
+	ReferenceTables []string `json:"referenceTables,omitempty"`
 }
 
 // ShardRangeStatus은 reconciler 가 관찰한 ShardRange 상태이다.

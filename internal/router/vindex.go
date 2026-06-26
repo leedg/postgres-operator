@@ -38,7 +38,8 @@ var ErrVindexNoMatch = errors.New("router: key did not match any range")
 //
 //   - hash: function(key) % 2^32 → uint32, ranges 의 [Lo, Hi] hex 와 비교 (포함 비교)
 //   - range: key 자체를 ranges 의 [Lo, Hi] 와 사전식 비교
-//   - consistent-hash: ErrVindexUnsupported (D.8.2 scope 외, P3+)
+//   - consistent-hash: function(shard:vnode) 로 만든 해시 링 위에서 key 를 시계방향
+//     으로 가장 가까운 virtual node 의 shard 로 (vindex_consistent.go)
 //   - lookup: ErrVindexUnsupported (ShardLookup CRD P3+)
 //
 // 본 함수는 결정적 (deterministic) — 동일 spec + 동일 key 에서 동일 shard 반환.
@@ -49,7 +50,7 @@ func ResolveShard(spec v1alpha1.ShardRangeSpec, key string) (string, error) {
 	case v1alpha1.VindexTypeRange:
 		return resolveRange(spec, key)
 	case v1alpha1.VindexTypeConsistentHash:
-		return "", fmt.Errorf("%w: consistent-hash (deferred to P3+)", ErrVindexUnsupported)
+		return resolveConsistentHash(spec, key)
 	case v1alpha1.VindexTypeLookup:
 		return "", fmt.Errorf("%w: lookup (ShardLookup CRD P3+)", ErrVindexUnsupported)
 	default:

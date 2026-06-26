@@ -42,6 +42,29 @@ func (parserExtractor) ExtractRoutingKey(query, col string) (string, bool) {
 	return "", false
 }
 
+// IsReadOnlyQuery 는 query 가 *읽기 전용*인지 토큰 단위로 보수적으로 판정한다 — 읽기를
+// replica 로 보내기 위한 분류. 안전 기본은 *false(쓰기→primary)*: 확실히 읽기인
+// 문장만 true. SELECT 의 `FOR UPDATE/SHARE`(잠금)나 DML 을 포함한 WITH(CTE)는 쓰기로
+// 본다. 오분류 비용이 비대칭이기 때문 — 쓰기를 replica 로 보내면 치명적, 읽기를
+// primary 로 보내면 성능만 손해.
+func IsReadOnlyQuery(query string) bool {
+	toks := tokenize(query)
+	if len(toks) == 0 {
+		return false
+	}
+	switch strings.ToLower(toks[0].text) {
+	case "select", "show", "values", "table":
+		// SELECT ... FOR UPDATE/SHARE 는 잠금 획득 → 쓰기로 취급.
+		for _, t := range toks {
+			if t.kind == tokIdent && strings.EqualFold(t.text, "for") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 type tokKind int
 
 const (

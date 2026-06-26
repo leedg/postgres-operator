@@ -125,3 +125,42 @@ func TestStatusBackendResolver(t *testing.T) {
 		t.Fatal("shard-0 absent after update: expected error")
 	}
 }
+
+func TestStatusBackendResolver_ResolveRead(t *testing.T) {
+	r := NewStatusBackendResolver()
+	ep := func(pod, e string, rdy bool) v1alpha1.ShardEndpoint {
+		return v1alpha1.ShardEndpoint{Pod: pod, Endpoint: e, Ready: rdy}
+	}
+	p := func(e string) *v1alpha1.ShardEndpoint { x := ep("p", e, true); return &x }
+	r.Update([]v1alpha1.ShardStatus{
+		{Name: "shard-0", Primary: p("p0:5432"), Replicas: []v1alpha1.ShardEndpoint{
+			ep("r0a", "r0a:5432", true), ep("r0b", "r0b:5432", true), ep("r0c", "r0c:5432", false), // not ready 제외
+		}},
+		{Name: "shard-1", Primary: p("p1:5432")}, // replica 없음 → primary 폴백
+		{Name: "shard-2"},                        // 아무것도 없음 → 에러
+	})
+
+	// 읽기: 두 Ready replica 를 round-robin (primary 아님).
+	seen := map[string]int{}
+	for i := 0; i < 4; i++ {
+		got, err := r.ResolveRead("shard-0")
+		if err != nil {
+			t.Fatalf("ResolveRead shard-0: %v", err)
+		}
+		if got == "p0:5432" {
+			t.Fatalf("read routed to primary, want a replica: %s", got)
+		}
+		seen[got]++
+	}
+	if len(seen) != 2 || seen["r0a:5432"] != 2 || seen["r0b:5432"] != 2 {
+		t.Fatalf("round-robin distribution = %v, want 2x each replica", seen)
+	}
+	// replica 없으면 primary 폴백.
+	if got, err := r.ResolveRead("shard-1"); err != nil || got != "p1:5432" {
+		t.Fatalf("ResolveRead shard-1 = (%q,%v), want primary fallback p1:5432", got, err)
+	}
+	// 아무것도 없으면 에러.
+	if _, err := r.ResolveRead("shard-2"); err == nil {
+		t.Fatal("ResolveRead shard-2 (none): expected error")
+	}
+}

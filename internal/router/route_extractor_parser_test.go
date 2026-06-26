@@ -65,6 +65,32 @@ func TestParserBeatsRegex(t *testing.T) {
 	}
 }
 
+// TestIsReadOnlyQuery 는 읽기/쓰기 분류가 보수적(확실한 읽기만 true)임을 검증한다.
+func TestIsReadOnlyQuery(t *testing.T) {
+	cases := []struct {
+		query string
+		read  bool
+	}{
+		{"SELECT v FROM t WHERE id = 'a'", true},
+		{"  select 1", true},
+		{"SHOW search_path", true},
+		{"VALUES (1),(2)", true},
+		{"TABLE t", true},
+		{"SELECT * FROM t FOR UPDATE", false}, // 잠금 → 쓰기 취급
+		{"select * from t for share", false},  // 잠금
+		{"INSERT INTO t (id) VALUES ('a')", false},
+		{"UPDATE t SET v=1", false},
+		{"DELETE FROM t", false},
+		{"WITH x AS (INSERT INTO t VALUES (1) RETURNING *) SELECT * FROM x", false}, // WITH 보수적=쓰기
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := IsReadOnlyQuery(c.query); got != c.read {
+			t.Errorf("IsReadOnlyQuery(%q) = %v, want %v", c.query, got, c.read)
+		}
+	}
+}
+
 // TestParserSelectableViaFactory 는 "parser"/"auto" 선택이 토크나이저를 쓰는지 확인.
 func TestParserSelectableViaFactory(t *testing.T) {
 	ex, err := NewRouteKeyExtractor(ExtractorParser)

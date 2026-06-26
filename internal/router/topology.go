@@ -118,50 +118,81 @@ type ClusterStatusReader interface {
 	ClusterShardStatus(ctx context.Context, namespace, cluster string) ([]v1alpha1.ShardStatus, error)
 }
 
-// StatusBackendResolver 는 shard 를 그 *현재 Ready primary* endpoint 로 매핑한다 —
-// PostgresCluster.status 의 캐시 스냅샷 기반(failover-aware). Update 는 refresh 루프가,
-// Resolve 는 연결마다 호출한다. Ready primary 가 없는 shard(down / failover 중)는
-// error 를 내어 라우터가 클라이언트를 우아하게 실패시키게 한다.
+// StatusBackendResolver 는 shard 를 그 *현재 Ready primary* endpoint(쓰기) 또는 Ready
+// replica(읽기 분산)로 매핑한다 — PostgresCluster.status 의 캐시 스냅샷 기반
+// (failover-aware). Update 는 refresh 루프가, Resolve/ResolveRead 는 연결마다 호출한다.
+// Ready 대상이 없는 shard(down / failover 중)는 error 를 내어 라우터가 클라이언트를
+// 우아하게 실패시키게 한다.
 type StatusBackendResolver struct {
-	mu        sync.RWMutex
-	primaries map[string]string // shard 이름 → primary endpoint (Ready 만)
+	mu        sync.Mutex
+	primaries map[string]string   // shard → primary endpoint (Ready 만)
+	replicas  map[string][]string // shard → Ready replica endpoints
+	rr        map[string]int      // shard → round-robin 커서 (읽기 분산)
 }
 
 // NewStatusBackendResolver 는 빈 resolver 를 만든다. Update 전에는 모든 Resolve 가
 // 에러(아직 status 미수신).
 func NewStatusBackendResolver() *StatusBackendResolver {
-	return &StatusBackendResolver{primaries: map[string]string{}}
+	return &StatusBackendResolver{
+		primaries: map[string]string{},
+		replicas:  map[string][]string{},
+		rr:        map[string]int{},
+	}
 }
 
-// Update 는 샤드 status 목록으로 primary 매핑을 통째로 교체한다 (Ready primary 만
-// 포함). failover 후 새 status 가 들어오면 자동으로 새 primary 를 가리키게 된다.
+// Update 는 샤드 status 목록으로 primary/replica 매핑을 통째로 교체한다 (Ready 만 포함).
+// failover 후 새 status 가 들어오면 자동으로 새 primary/replica 를 가리키게 된다.
 func (r *StatusBackendResolver) Update(shards []v1alpha1.ShardStatus) {
-	m := make(map[string]string, len(shards))
+	pm := make(map[string]string, len(shards))
+	rm := make(map[string][]string, len(shards))
 	for i := range shards {
 		s := shards[i]
 		if s.Primary != nil && s.Primary.Ready && s.Primary.Endpoint != "" {
-			m[s.Name] = s.Primary.Endpoint
+			pm[s.Name] = s.Primary.Endpoint
+		}
+		for j := range s.Replicas {
+			rep := s.Replicas[j]
+			if rep.Ready && rep.Endpoint != "" {
+				rm[s.Name] = append(rm[s.Name], rep.Endpoint)
+			}
 		}
 	}
 	r.mu.Lock()
-	r.primaries = m
+	r.primaries, r.replicas = pm, rm
 	r.mu.Unlock()
 }
 
-// Resolve 는 shard 의 현재 Ready primary endpoint 를 반환한다. 없으면 error
-// (down / failover 중 / 아직 status 미수신).
+// Resolve 는 shard 의 현재 Ready primary endpoint(쓰기 경로)를 반환한다. 없으면 error.
 func (r *StatusBackendResolver) Resolve(shardID string) (string, error) {
-	r.mu.RLock()
-	ep, ok := r.primaries[shardID]
-	r.mu.RUnlock()
-	if !ok || ep == "" {
+	r.mu.Lock()
+	ep := r.primaries[shardID]
+	r.mu.Unlock()
+	if ep == "" {
 		return "", fmt.Errorf("router: shard %q has no Ready primary (down or mid-failover)", shardID)
 	}
 	return ep, nil
+}
+
+// ResolveRead 는 읽기 쿼리용으로 Ready replica 를 round-robin 선택한다(읽기 확장 +
+// primary 부하 경감). replica 가 없으면 primary 로, 그것도 없으면 error 로 폴백한다.
+// BackendResolver 시그니처와 호환 — (E) 쿼리 라우팅에서 읽기/쓰기로 분기 사용.
+func (r *StatusBackendResolver) ResolveRead(shardID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reps := r.replicas[shardID]; len(reps) > 0 {
+		i := r.rr[shardID] % len(reps)
+		r.rr[shardID] = (r.rr[shardID] + 1) % (1 << 30)
+		return reps[i], nil
+	}
+	if ep := r.primaries[shardID]; ep != "" {
+		return ep, nil // replica 부재 → primary 읽기 폴백 (안전).
+	}
+	return "", fmt.Errorf("router: shard %q has no Ready replica or primary", shardID)
 }
 
 var (
 	_ TopologyProvider = StaticTopologyProvider{}
 	_ TopologyProvider = (*CRDTopologyProvider)(nil)
 	_ BackendResolver  = (*StatusBackendResolver)(nil).Resolve
+	_ BackendResolver  = (*StatusBackendResolver)(nil).ResolveRead
 )

@@ -151,12 +151,16 @@ parameterized/`t.col`/주석·문자열 내부 오인 방지까지 검증. **기
 - [x] 라우팅 키 *모호성 bail* — 같은 샤딩 컬럼에 다른 리터럴(서브쿼리/OR) 시 추측 거부 (커밋 f50cedd). **틀린 샤드 쓰기 방지(P0)**.
 - [x] *dollar-quote 토큰화* — `$$...$$` 본문 가짜 predicate 누출 차단 (f50cedd). **P0**.
 - [x] *ResolveRead lag 임계* — bounded staleness (8f51a0a).
-- [ ] **consistent-hash 링 캐시** — 현재 `ResolveShard` 가 매 호출 링 재구성(핫패스 낭비). 프록시 결선 시 spec generation 키로 캐시(`NewConsistentHashRing` 이미 노출).
-- [ ] **scatter ORDER BY 다중컬럼/방향** — 현재 첫 컬럼 오름차순만. planner 가 컬럼 index + DESC 전달.
-- [ ] **LIMIT per-shard pushdown** — 현재 전량 gather 후 자름. 각 샤드 쿼리에 `LIMIT n` 주입.
-- [ ] **circuit-breaker half-open 단일 probe** — cooldown 직후 동시 flood 방지(현재 모두 통과).
-- [ ] **SQLShardExecutor ConnMaxLifetime** — 재시작된 backend 로의 stale 연결 방지(현재 IdleTime 만).
-- [ ] **CRDTopologyProvider stale 캐시 정책** — keyspace 삭제 시 캐시 영구 유지 vs 전이 안전 trade-off 재검토.
+- [x] **consistent-hash 링 캐시** — fingerprint 캐시(cec61bb).
+- [x] **scatter ORDER BY 다중컬럼/방향** — OrderByCol/OrderByDesc(59c310a).
+- [x] **LIMIT per-shard pushdown** — PushDownLimit 보수적 주입(59c310a).
+- [x] **circuit-breaker half-open 단일 probe** — allow gate(0dca370).
+- [x] **SQLShardExecutor ConnMaxLifetime** — 기본 30m(0dca370).
+- [x] **CRDTopologyProvider stale 캐시 정책** — ClearCacheOnMissing(0dca370).
+
+> ⚠️ **위 보강 6건은 구현·커밋됐으나 이번 라운드 *테스트 미실행*(자원 절약). 테스트 코드는
+> 작성돼 있으며, 다음 Docker 배치에서 `go build ./... && go test ./internal/router/...
+> ./cmd/pg-router/...` 로 일괄 검증 필요.**
 
 ---
 

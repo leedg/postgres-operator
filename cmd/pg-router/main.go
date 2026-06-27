@@ -69,6 +69,7 @@ func main() {
 	mode := strings.ToLower(env("PGROUTER_MODE", "connection"))
 	qr := newQueryRouter(provider, resolve, nil)
 	serverVersion := env("PGROUTER_SERVER_VERSION", "18.0")
+	backendPassword := env("PGROUTER_BACKEND_PASSWORD", "") // 백엔드 인증 대행(scram/cleartext)용. ""=trust.
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -83,7 +84,7 @@ func main() {
 			continue
 		}
 		if mode == "query" {
-			go handleQueryMode(conn, qr, dialer, serverVersion)
+			go handleQueryMode(conn, qr, dialer, serverVersion, backendPassword)
 		} else {
 			go handleConn(conn, provider, resolve, dialer)
 		}

@@ -82,8 +82,9 @@ func (qr queryRouter) shardColumn() string {
 	return topo.Spec.Vindex.Column
 }
 
-// handleQueryMode 는 쿼리 인지 라우팅으로 한 연결을 처리한다.
-func handleQueryMode(client net.Conn, qr queryRouter, dialer *backendDialer, serverVersion string) {
+// handleQueryMode 는 쿼리 인지 라우팅으로 한 연결을 처리한다. backendPassword 는
+// 백엔드 인증 대행(scram/cleartext)용 — "" 면 trust 백엔드만 동작.
+func handleQueryMode(client net.Conn, qr queryRouter, dialer *backendDialer, serverVersion, backendPassword string) {
 	defer func() { _ = client.Close() }()
 
 	raw, _, err := readStartup(client)
@@ -107,9 +108,9 @@ func handleQueryMode(client net.Conn, qr queryRouter, dialer *backendDialer, ser
 			writePgError(client, "08P01", "could not parse query")
 			return
 		}
-		routeAndProxy(client, qr, sql, raw, []pgMessage{m}, dialer)
+		routeAndProxy(client, qr, sql, raw, []pgMessage{m}, dialer, backendPassword)
 	case 'P': // extended Parse
-		handleParse(client, qr, m, raw, dialer)
+		handleParse(client, qr, m, raw, dialer, backendPassword)
 	default:
 		writePgError(client, "0A000", fmt.Sprintf("message type %q not supported in query-routing PoC", m.Type))
 	}
@@ -117,7 +118,7 @@ func handleQueryMode(client net.Conn, qr queryRouter, dialer *backendDialer, ser
 
 // handleParse 는 Parse('P') 를 처리한다: 인라인 리터럴이면 즉시, parameterized 면 Bind
 // 까지 버퍼링해 파라미터 값으로 라우팅한다.
-func handleParse(client net.Conn, qr queryRouter, parse pgMessage, raw []byte, dialer *backendDialer) {
+func handleParse(client net.Conn, qr queryRouter, parse pgMessage, raw []byte, dialer *backendDialer, backendPassword string) {
 	sql, ok := parseSQL(parse)
 	if !ok {
 		writePgError(client, "08P01", "could not parse query")
@@ -126,7 +127,7 @@ func handleParse(client net.Conn, qr queryRouter, parse pgMessage, raw []byte, d
 	// 1) 인라인 리터럴이면 SQL 만으로 라우팅.
 	if d, err := qr.routeSQL(sql); err == nil && !d.Scatter {
 		logRoute('P', d)
-		proxyToShard(client, raw, []pgMessage{parse}, d, dialer)
+		proxyToShard(client, raw, []pgMessage{parse}, d, dialer, backendPassword)
 		return
 	}
 	// 2) parameterized(`col = $N`): Bind 까지 버퍼링해 N번째 파라미터로 라우팅.
@@ -155,7 +156,7 @@ func handleParse(client net.Conn, qr queryRouter, parse pgMessage, raw []byte, d
 				return
 			}
 			logRoute('B', d)
-			proxyToShard(client, raw, buffered, d, dialer)
+			proxyToShard(client, raw, buffered, d, dialer, backendPassword)
 			return
 		case 'S': // Sync 가 Bind 보다 먼저 — 라우팅 불가.
 			writePgError(client, "08006", "no Bind before Sync; cannot route parameterized query")
@@ -169,7 +170,7 @@ func logRoute(typ byte, d router.RouteDecision) {
 }
 
 // routeAndProxy 는 simple Query 경로의 라우팅 + proxy.
-func routeAndProxy(client net.Conn, qr queryRouter, sql string, raw []byte, msgs []pgMessage, dialer *backendDialer) {
+func routeAndProxy(client net.Conn, qr queryRouter, sql string, raw []byte, msgs []pgMessage, dialer *backendDialer, backendPassword string) {
 	d, err := qr.routeSQL(sql)
 	if err != nil {
 		writePgError(client, "08006", "routing failed: "+err.Error())
@@ -180,12 +181,12 @@ func routeAndProxy(client net.Conn, qr queryRouter, sql string, raw []byte, msgs
 		return
 	}
 	logRoute('Q', d)
-	proxyToShard(client, raw, msgs, d, dialer)
+	proxyToShard(client, raw, msgs, d, dialer, backendPassword)
 }
 
 // proxyToShard 는 결정된 샤드 backend 에 연결해 startup + 버퍼링된 메시지(들)를 전달하고
-// 양방향 proxy 한다.
-func proxyToShard(client net.Conn, raw []byte, msgs []pgMessage, d router.RouteDecision, dialer *backendDialer) {
+// 양방향 proxy 한다. 백엔드 인증(trust/cleartext/scram)은 라우터가 대행한다.
+func proxyToShard(client net.Conn, raw []byte, msgs []pgMessage, d router.RouteDecision, dialer *backendDialer, backendPassword string) {
 	server, err := dialer.Dial(d.Backend)
 	if err != nil {
 		writePgError(client, "08006", fmt.Sprintf("cannot reach shard %s (%s): %v", d.Shard, d.Backend, err))
@@ -193,12 +194,12 @@ func proxyToShard(client net.Conn, raw []byte, msgs []pgMessage, d router.RouteD
 	}
 	defer func() { _ = server.Close() }()
 
-	if _, err := server.Write(raw); err != nil { // backend startup (trust 전제)
+	if _, err := server.Write(raw); err != nil { // backend startup
 		return
 	}
-	// 백엔드 핸드셰이크를 ReadyForQuery 까지 소비 (클라이언트는 우리 trust 핸드셰이크를
-	// 이미 받음 — 중복 방지). 비-trust 백엔드는 여기서 실패한다.
-	if err := drainUntilReady(server); err != nil {
+	// 백엔드 인증 대행 + 핸드셰이크를 ReadyForQuery 까지 소비 (클라이언트는 우리 trust
+	// 핸드셰이크를 이미 받음 — 중복 방지).
+	if err := authenticateAndDrain(server, backendPassword); err != nil {
 		writePgError(client, "08006", "backend startup: "+err.Error())
 		return
 	}
@@ -208,26 +209,6 @@ func proxyToShard(client net.Conn, raw []byte, msgs []pgMessage, d router.RouteD
 		}
 	}
 	proxyBidi(client, server)
-}
-
-// drainUntilReady 는 백엔드 startup 응답을 ReadyForQuery('Z')까지 읽어 버린다.
-func drainUntilReady(server net.Conn) error {
-	for {
-		m, err := readMessage(server)
-		if err != nil {
-			return err
-		}
-		switch m.Type {
-		case 'Z': // ReadyForQuery
-			return nil
-		case 'E': // ErrorResponse
-			return fmt.Errorf("backend error: %s", string(m.Payload))
-		case 'R': // AuthenticationRequest — type 0 = Ok(trust), >0 = 비번 필요
-			if len(m.Payload) >= 4 && (m.Payload[0]|m.Payload[1]|m.Payload[2]|m.Payload[3]) != 0 {
-				return fmt.Errorf("backend requires non-trust auth (not supported in query-mode PoC)")
-			}
-		}
-	}
 }
 
 // proxyBidi 는 두 연결을 양방향으로 복사하고 한쪽이 끝나면 반환한다.

@@ -217,14 +217,16 @@ SSOT는 [ROUTER-GAP-ANALYSIS §4 능력 사다리 + §6 백로그](sharding/ROUT
 | ~~·~~ ✅ | ~~scram 인증 대행~~ | **완료** — 프로덕션 PG(scram) 동작 |
 | ~~·~~ ✅ | ~~describe-round 대행~~ | **완료** — lib/pq 파라미터 쿼리 → **실 DB 드라이버와 동작** |
 | ~~·~~ ✅ | ~~멀티샤드 scatter forwarding~~ | **완료(2026-06-28)** — 병렬 fan-out + UNION ALL 병합, 라이브 검증 |
-| ~~·~~ ✅ | ~~per-query 라우팅 (연결 종단 + 백엔드 풀)~~ | **완료(2026-06-28)** — `persession.go` 세션 루프가 *매* simple Query를 키의 샤드로 독립 라우팅(vtgate 모델) + 샤드별 백엔드 lazy 풀. 라이브 검증: 한 연결에서 alice→shard-0/bob→shard-1/carol→shard-0. scatter·단일샤드 tx pin 포함. (남음: cross-shard 2PC, per-query extended) |
-| **1** | **분산 성능 수치** | per-query/scatter 기준 N-shard throughput (워커 수 × TPS, "분산처리능력") |
+| ~~·~~ ✅ | ~~per-query 라우팅 (연결 종단 + 백엔드 풀)~~ | **완료(2026-06-28)** — `persession.go` 세션 루프가 *매* simple Query를 키의 샤드로 독립 라우팅(vtgate 모델) + 샤드별 백엔드 lazy 풀. 라이브 검증: 한 연결에서 alice→shard-0/bob→shard-1/carol→shard-0. scatter·단일샤드 tx pin 포함. |
+| ~~·~~ ✅ | ~~per-query extended protocol~~ | **완료(2026-06-28)** — `extsession.go`. extended(Parse/Bind/…)도 Sync까지 버퍼링→배치 per-query 라우팅, ParseComplete 합성+**샤드별 prepare-on-first-use**+주입분 필터. 라이브: lib/pq 한 연결+prepared `WHERE id=$1` 5회 다른키→키별 정확 라우팅. 구 pin-on-first 제거. |
+| ~~·~~ ✅ | ~~분산 성능 수치 1차~~ | **완료(2026-06-28)** — `cmd/router-bench` + baseline.md §3.0b. 라우터 점읽기 워커수×TPS 1761(w1)→9437(w32), 오버헤드 ~2.2~4×. **2샤드≈1샤드(point read)=라우터가 병목, 수평스케일은 멀티호스트 필요**. |
+| **1** | **멀티호스트 수평 스케일 실증** | 단일 호스트에선 라우터·샤드 코어공유라 분산 이득 미관측. 멀티노드 kind(또는 분리 호스트)로 샤드를 별 코어에 두고 N-shard 처리량 스케일 측정 — "분산처리능력" 진짜 수치 |
+| **2** | **라우터 오버헤드 개선 정량화** | prepared-stmt 재사용 벤치(키당 Parse 제거)로 라우터 처리량 상향 측정 + 코드 최적화 여지 |
 | **4** | **B: resharding 실데이터 이동** | ShardSplitJob의 CopyTable DSN 결선 + CDC + write-block cutover (현재 골격) |
 | **5** | reference table·read-replica **프록시 결선** | 부품은 완성, query-mode에 연결만 |
 | **6** | 보류 #5/#7/#9 | per-shard primary Service·watch·failover lease P2-T3 — 라이브 failover 필요 |
-| **7** | 분산 성능 수치 + percentile·sysbench | scatter 동작 후 |
 
-> 제약 현황(query-mode 라이브): ✅ simple/inline-literal query · ⚠️ 단일라운드 파라미터만(lib/pq 미지원) · ❌ scram·scatter.
+> 제약 현황(query-mode 라이브): ✅ simple+extended per-query(prepared 포함)·scatter·단일샤드 tx·scram 백엔드. ❌ extended scatter·cross-shard 2PC·Flush 파이프라이닝.
 
 ---
 

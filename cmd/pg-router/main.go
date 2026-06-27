@@ -65,19 +65,28 @@ func main() {
 		envInt("PGROUTER_DIAL_RETRIES", 1),
 		envInt("PGROUTER_BREAKER_THRESHOLD", 3),
 	)
+	// 라우팅 모드: connection(기본, startup param) | query(첫 쿼리 인지 라우팅, PoC).
+	mode := strings.ToLower(env("PGROUTER_MODE", "connection"))
+	route := buildQueryRouterFunc(provider, resolve, nil)
+	serverVersion := env("PGROUTER_SERVER_VERSION", "18.0")
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Fatalf("pg-router: listen %s: %v", addr, err)
 	}
-	log.Printf("pg-router PoC listening on %s (topology=%s backend=%s)",
-		addr, env("PGROUTER_TOPOLOGY", "static"), env("PGROUTER_BACKEND", "env"))
+	log.Printf("pg-router PoC listening on %s (mode=%s topology=%s backend=%s)",
+		addr, mode, env("PGROUTER_TOPOLOGY", "static"), env("PGROUTER_BACKEND", "env"))
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			log.Printf("pg-router: accept: %v", err)
 			continue
 		}
-		go handleConn(conn, provider, resolve, dialer)
+		if mode == "query" {
+			go handleQueryMode(conn, route, dialer, serverVersion)
+		} else {
+			go handleConn(conn, provider, resolve, dialer)
+		}
 	}
 }
 

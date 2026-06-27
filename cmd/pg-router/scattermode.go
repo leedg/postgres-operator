@@ -19,9 +19,19 @@ package main
 import (
 	"fmt"
 	"net"
+	"sync"
 )
 
-// scatterQuery 는 simple Query('Q')를 모든 샤드에 fan-out 하고 병합 결과를 보낸다.
+// shardResult 는 한 샤드의 scatter 응답이다.
+type shardResult struct {
+	rowDesc *pgMessage
+	rows    []pgMessage
+	errMsg  *pgMessage // 백엔드 ErrorResponse
+	err     error      // 전송/연결 오류
+}
+
+// scatterQuery 는 simple Query('Q')를 모든 샤드에 *병렬* fan-out 하고 병합 결과를 보낸다.
+// 병렬이라 전체 지연이 max(샤드) 에 가깝다(순차 합산 아님) — 분산 읽기 확장의 핵심.
 func scatterQuery(client net.Conn, qr queryRouter, query pgMessage, raw []byte, dialer *backendDialer, password string) {
 	shards, err := qr.allShards()
 	if err != nil || len(shards) == 0 {
@@ -29,42 +39,34 @@ func scatterQuery(client net.Conn, qr queryRouter, query pgMessage, raw []byte, 
 		return
 	}
 
+	results := make([]shardResult, len(shards))
+	var wg sync.WaitGroup
+	for i := range shards {
+		wg.Add(1)
+		go func(i int, sb shardBackend) {
+			defer wg.Done()
+			results[i] = scatterOne(sb, query, raw, dialer, password)
+		}(i, shards[i])
+	}
+	wg.Wait()
+
 	var rowDesc *pgMessage
 	var dataRows []pgMessage
-	for _, sb := range shards {
-		conn, err := dialer.Dial(sb.backend)
-		if err != nil {
-			writePgError(client, "08006", fmt.Sprintf("scatter: dial shard %s: %v", sb.shard, err))
+	for i := range results {
+		r := results[i]
+		if r.err != nil {
+			writePgError(client, "08006", fmt.Sprintf("scatter: shard %s: %v", shards[i].shard, r.err))
 			return
 		}
-		if _, err := conn.Write(raw); err != nil {
-			_ = conn.Close()
-			return
-		}
-		if err := authenticateAndDrain(conn, password); err != nil {
-			_ = conn.Close()
-			writePgError(client, "08006", "scatter: backend startup: "+err.Error())
-			return
-		}
-		if err := writeMessage(conn, 'Q', query.Payload); err != nil {
-			_ = conn.Close()
-			return
-		}
-		rd, rows, errMsg, err := readQueryResult(conn)
-		_ = conn.Close()
-		if err != nil {
-			writePgError(client, "08006", fmt.Sprintf("scatter: read shard %s: %v", sb.shard, err))
-			return
-		}
-		if errMsg != nil { // 한 샤드라도 에러면 그대로 전달(fail-fast).
-			_ = writeMessage(client, 'E', errMsg.Payload)
+		if r.errMsg != nil { // 한 샤드라도 에러면 그대로 전달(fail-fast).
+			_ = writeMessage(client, 'E', r.errMsg.Payload)
 			_ = writeMessage(client, 'Z', []byte{'I'})
 			return
 		}
 		if rowDesc == nil {
-			rowDesc = rd
+			rowDesc = r.rowDesc
 		}
-		dataRows = append(dataRows, rows...)
+		dataRows = append(dataRows, r.rows...)
 	}
 
 	// 병합 결과 송신: RowDescription(1) + DataRow(전부) + CommandComplete + ReadyForQuery.
@@ -80,6 +82,26 @@ func scatterQuery(client net.Conn, qr queryRouter, query pgMessage, raw []byte, 
 	}
 	_ = writeMessage(client, 'C', cstring(fmt.Sprintf("SELECT %d", len(dataRows))))
 	_ = writeMessage(client, 'Z', []byte{'I'})
+}
+
+// scatterOne 은 한 샤드에 연결·인증·쿼리하고 결과를 수집한다 (goroutine 에서 호출).
+func scatterOne(sb shardBackend, query pgMessage, raw []byte, dialer *backendDialer, password string) shardResult {
+	conn, err := dialer.Dial(sb.backend)
+	if err != nil {
+		return shardResult{err: err}
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.Write(raw); err != nil {
+		return shardResult{err: err}
+	}
+	if err := authenticateAndDrain(conn, password); err != nil {
+		return shardResult{err: err}
+	}
+	if err := writeMessage(conn, 'Q', query.Payload); err != nil {
+		return shardResult{err: err}
+	}
+	rd, rows, errMsg, err := readQueryResult(conn)
+	return shardResult{rowDesc: rd, rows: rows, errMsg: errMsg, err: err}
 }
 
 // readQueryResult 는 한 백엔드의 simple-query 응답을 ReadyForQuery 까지 읽어 RowDescription·

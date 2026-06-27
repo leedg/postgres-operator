@@ -158,9 +158,8 @@ parameterized/`t.col`/주석·문자열 내부 오인 방지까지 검증. **기
 - [x] **SQLShardExecutor ConnMaxLifetime** — 기본 30m(0dca370).
 - [x] **CRDTopologyProvider stale 캐시 정책** — ClearCacheOnMissing(0dca370).
 
-> ⚠️ **위 보강 6건은 구현·커밋됐으나 이번 라운드 *테스트 미실행*(자원 절약). 테스트 코드는
-> 작성돼 있으며, 다음 Docker 배치에서 `go build ./... && go test ./internal/router/...
-> ./cmd/pg-router/...` 로 일괄 검증 필요.**
+> ✅ **위 보강 6건 + NULL 정렬 PG 정합(NULLS LAST asc/FIRST desc)까지 build/vet/test
+> 검증 완료 (2026-06-27).** 정적 리뷰에서 예상한 대로 compile/crash 버그 없었음.
 
 ---
 

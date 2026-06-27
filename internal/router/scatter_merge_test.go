@@ -60,6 +60,25 @@ func TestScatterGather_OrderByColAndDesc(t *testing.T) {
 	}
 }
 
+// TestScatterGather_NullsLastAsc 는 NULL 이 PG 기본(ASC=NULLS LAST)대로 정렬됨을 검증.
+func TestScatterGather_NullsLastAsc(t *testing.T) {
+	sg := &ScatterGather{
+		Merge:      MergeOrderBy,
+		OrderByCol: 0,
+		Shard: &fakeShardExecutor{responses: map[ShardID][]Row{
+			"s0": {{Values: []any{int64(2)}}, {Values: []any{nil}}},
+			"s1": {{Values: []any{int64(1)}}},
+		}},
+	}
+	rows, err := sg.Execute(context.Background(), "q", []ShardID{"s0", "s1"})
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if rows[0].Values[0] != int64(1) || rows[1].Values[0] != int64(2) || rows[2].Values[0] != nil {
+		t.Fatalf("ASC 정렬 = %v/%v/%v, want 1/2/nil (NULLS LAST)", rows[0].Values[0], rows[1].Values[0], rows[2].Values[0])
+	}
+}
+
 // TestWithLimitPushdown 는 LIMIT 주입의 보수적 규칙을 검증한다.
 func TestWithLimitPushdown(t *testing.T) {
 	cases := []struct {
@@ -68,9 +87,9 @@ func TestWithLimitPushdown(t *testing.T) {
 		want  string
 	}{
 		{"SELECT * FROM t", 3, "SELECT * FROM t LIMIT 3"},
-		{"SELECT * FROM t;", 3, "SELECT * FROM t LIMIT 3"},      // 후행 ; trim
+		{"SELECT * FROM t;", 3, "SELECT * FROM t LIMIT 3"},        // 후행 ; trim
 		{"SELECT * FROM t LIMIT 5", 3, "SELECT * FROM t LIMIT 5"}, // 기존 LIMIT 유지
-		{"SELECT 1; SELECT 2", 3, "SELECT 1; SELECT 2"},          // 다중문 → 안 건드림
+		{"SELECT 1; SELECT 2", 3, "SELECT 1; SELECT 2"},           // 다중문 → 안 건드림
 		{"SELECT * FROM t ORDER BY x", 3, "SELECT * FROM t ORDER BY x LIMIT 3"},
 	}
 	for _, c := range cases {

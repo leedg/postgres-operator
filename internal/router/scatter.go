@@ -193,16 +193,17 @@ func mergeConcat(order []ShardID, collected map[ShardID][]Row) []Row {
 	return out
 }
 
-// cmpAtCol 은 두 Row 를 col 번째 컬럼 값으로 비교한다 (nil 은 가장 작음).
+// cmpAtCol 은 두 Row 를 col 번째 컬럼 값으로 비교한다. NULL 은 *가장 큼* 으로 취급해
+// PostgreSQL 기본 정렬과 일치시킨다 — ASC 면 NULLS LAST, DESC 면 NULLS FIRST.
 func cmpAtCol(a, b Row, col int) int {
 	av, bv := valueAt(a, col), valueAt(b, col)
 	switch {
 	case av == nil && bv == nil:
 		return 0
 	case av == nil:
-		return -1
+		return 1 // nil 이 더 큼.
 	case bv == nil:
-		return 1
+		return -1
 	}
 	return compareValues(av, bv)
 }

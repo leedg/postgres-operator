@@ -189,6 +189,34 @@ BENCH_KEYS=10000 BENCH_DURATION=5s BENCH_WORKERS=1,2,4,8,16,32 BENCH_MODE=select
 
 **재현**: `BENCH_PREPARED=1 BENCH_MODE=select go run ./cmd/router-bench`
 
+### 3.0d 수평 스케일 — 단일 호스트의 물리적 한계 (2026-06-28)
+
+"샤드를 늘리면 처리량이 스케일하는가?"(분산처리능력의 핵심)를 단일 호스트에서 *여러
+워크로드로* 검증한 결과, **2샤드 ≤ 1샤드** 가 일관되게 관측됐다.
+
+| 워크로드 | router-1shard | router-2shard | 결론 |
+|---|---|---|---|
+| read point (prepared, w=32) | 17,306 | 17,090 | ≈ (라우터 천장) |
+| write hot-row (sync_commit=off, w=64) | 24,857 | **17,895** | 2샤드가 *더 느림* |
+
+**근본 원인 — 자원 공유**: 단일 16 vCPU 호스트에서 샤드 2개 + 라우터 + 클라이언트가
+**같은 CPU 코어와 같은 overlay 스토리지(fsync)를 공유**한다. 따라서:
+- CPU-bound(읽기/연산): 총 코어가 고정 → 샤드를 나눠도 합산 CPU 불변 → 스케일 없음.
+- 스토리지-bound(쓰기 fsync): 두 샤드가 같은 디스크에 commit → fsync 직렬화 → 스케일 없음.
+- 게다가 PG 인스턴스 2개의 오버헤드(2× 백그라운드 프로세스·shared_buffers·WAL)가 더해져
+  단일 호스트에선 샤딩이 throughput 을 *오히려 떨어뜨린다*.
+
+**결론**: **진짜 수평 스케일 수치는 물리적으로 분리된 노드(별도 CPU + 별도 스토리지)에서만
+측정 가능**하다. 멀티노드 kind 도 노드가 같은 호스트 커널/코어를 공유하므로 이 한계를 벗어나지
+못한다(오퍼레이터의 노드 분산 *배포* 능력 검증엔 유효하나 스케일 *수치* 는 못 냄). 단일
+호스트 측정은 **라우터 종단 처리량의 상한**(점읽기 ~17K TPS prepared, 라우터가 병목)을 주는
+데 의의가 있다.
+
+**진짜 분산 수치 측정 방법(멀티머신)**: `router-bench` 는 이미 샤드별 DSN 을 환경변수로
+받는다(`BENCH_SHARD0`/`BENCH_SHARD1`/`BENCH_ROUTER`). 서로 다른 물리 머신(또는 클라우드 VM)에
+샤드를 띄우고 라우터를 별 머신에 두면, 같은 벤치를 그대로 가리켜 N-shard 스케일을 측정할 수
+있다. (예: 샤드당 1 VM × 2 + 라우터 1 VM → 1-shard 대비 2-shard 처리량 비교.)
+
 ### 3.1 Single-shard baseline (T-1S)
 
 | date | workload | iso | clients | TPS | P50 ms | P95 ms | P99 ms | comment |

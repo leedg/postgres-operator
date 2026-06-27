@@ -129,8 +129,11 @@ docker run --rm -v <repo>:/src -w /src golang:1.26 \
 | `…TestBackendForUsesEnvMapping` / `TestTemplateResolver` / `TestEnvBackendResolver` | env/DNS 템플릿 백엔드 해소 |
 | `…TestWritePgError` | 샤드 down 시 우아한 PostgreSQL `ErrorResponse`('E') 인코딩(조용한 drop 금지) |
 | `dialer_test.go` `TestDialer_RetryThenSuccess` | dial retry/backoff(주입 dial) |
-| `…_CircuitOpensAndCooldown` | 연속 실패 시 circuit open→fast-fail, cooldown 후 재시도(주입 clock) |
-| `…_SuccessResetsBreaker` | 성공이 실패 카운트 리셋 |
+| `…_CircuitOpensAndCooldown` / `…_HalfOpenReopensOnFailure` / `…_SuccessResetsBreaker` | circuit open→fast-fail, half-open 단일 probe·재오픈, 성공 리셋(주입 clock) |
+| `pgwire_test.go` `TestPgMessageRoundTrip` / `TestQuerySQL_NonQuery` / `TestReadMessage_BadLength` | v3 메시지 read/write round-trip, 'Q' SQL 추출, 잘못된 길이 거부 |
+| `…TestParseSQL` / `TestBindParams` | extended 'P'(Parse) 쿼리 추출, 'B'(Bind) 파라미터 값 추출(NULL 포함) |
+| `…TestSendTrustHandshake` | trust 핸드셰이크 시퀀스(R-S-S-S-K-Z) |
+| `querymode_test.go` `TestQueryRouter_routeSQL` / `…_routeKey` | query-mode 라우팅 결정(SQL 인라인 / 값 직접), 같은 키 동일 샤드 |
 
 ---
 
@@ -140,8 +143,13 @@ docker run --rm -v <repo>:/src -w /src golang:1.26 \
 
 ### 3.1 완료된 라이브 검증
 - **성능 baseline (2026-06-27)**: 오퍼레이터 배포 → 단일샤드 PostgresCluster Ready → pgbench.
-  결과·환경·재현 명령은 [`docs/perf/baseline.md §3.0`](../perf/baseline.md). (배포 흐름:
-  `docker build`→`kind load`→`kubectl apply -k config/default`→`set image`→dev 샘플 적용.)
+  결과·환경·재현은 [`docs/perf/baseline.md §3.0`](../perf/baseline.md).
+- **🎉 query-mode 쿼리 라우팅 (2026-06-27)**: 2 trust postgres(shard-0/1) + `pgrouter:dev`
+  (`PGROUTER_MODE=query`) → psql `SELECT located_on FROM probe WHERE id='alice'` 이
+  **alice→shard-0 / bob→shard-1 / carol→shard-0** 결정적·올바르게 라우팅 + 실 쿼리 결과 반환.
+  재현: 2 `postgres:18`(trust) + probe 테이블 + `docker build -f Dockerfile.router` +
+  psql(simple) / lib/pq(extended, scratchpad/pqclient). 라이브에서 백엔드 핸드셰이크 미소비
+  버그(`drainUntilReady`)·lib/pq describe-first 한계 발견.
 - **referenceTables CRD**: 실 apiserver 수용 검증(server-side apply).
 
 ### 3.2 미완(라이브 failover 환경 필요 — 무검증 랜딩 금지)

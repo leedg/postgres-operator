@@ -140,42 +140,41 @@
 - [x] `ShardingMode` 필드 (`none` / `native`) — `postgrescluster_types.go`. Constants + Spec round-trip 을 `TestShardingMode` 가 guard (`api/v1alpha1/postgrescluster_types_test.go`); enum validation 은 `+kubebuilder:validation:Enum=none;native` marker 로 apiserver 에서 강제. RFC 0001 §3.1 / RFC 0002.
 - [x] `ShardsSpec` (초기 shard 수 / replica / storage) — `postgrescluster_types.go`. 필드 round-trip + `DeepCopy` 슬라이스 독립성 + `Replicas=0` (HA-off dev) 을 `TestShardsSpec` 가 guard (`api/v1alpha1/postgrescluster_types_test.go`). RFC 0001 §3.1.
 - [x] Sharding plugin interface — `internal/plugin/sharding/api.go`. 컴파일타임 interface freeze + `Registry` register/get/Names round-trip + `Capabilities` 광고 + `ErrUnsupported` sentinel 을 `TestShardingPlugin` umbrella 가 guard (`internal/plugin/sharding/api_test.go`). RFC 0001~0005 / RFC 0004 (router 아키텍처).
-- [x] **`ShardRange` CRD** — `api/v1alpha1/shardrange_types.go` + `config/crd/bases/postgres.keiailab.io_shardranges.yaml` (RFC 0002, offline yaml parse PASS, `make manifests` 통과).
-  - [~] Hash-range / list / range policy 분기 (vindex enum 정의 완료, reconciler 미구현 — 후속 sub-task).
-  - [ ] Metadata store (Postgres 시스템 카탈로그 또는 sidecar).
-- [ ] **`pg-router` service PoC** — 신규 `cmd/pg-router/`.
-  - [ ] SQL parser (libpg_query 또는 homegrown).
-  - [ ] Shard-placement lookup.
-  - [ ] Connection routing (libpq passthrough).
-- [ ] **수동 shard placement** — `ShardRange.Spec.PlacementHints`.
-- [ ] **GitOps drift guard** — sharding 메타데이터와 실제 placement 의 분기 감지.
-- Verify: 2-shard 클러스터에서 `pg-router` 를 통한 쿼리가 올바른 shard 로 라우팅된다.
+- [x] **`ShardRange` CRD** — `api/v1alpha1/shardrange_types.go` + `config/crd/bases/...shardranges.yaml` (RFC 0002). `referenceTables` 필드 추가됨.
+  - [x] **hash / range / consistent-hash vindex 구현** — `internal/router/vindex.go`·`vindex_consistent.go` (murmur3/fnv/crc32, 링 캐시). list/lookup 후속.
+  - [~] Metadata store — `pg_keiailab` 카탈로그 + 마이그레이션 구현(`metadata_store.go`), reconciler 결선은 후속(orphan).
+- [x] **`pg-router` service** — `cmd/pg-router/`. **배포 가능**(`Dockerfile.router` + `config/router/`: SA+Role[shardranges·postgresclusters]+Deployment+Service).
+  - [x] **라우팅 키 추출** — 제로 의존성 토크나이저(regex/parser/auto). 모호키 bail·dollar-quote·extended Parse 처리.
+  - [x] **Shard-placement lookup** — vindex + 교체 가능 토폴로지(static↔CRD watch) + failover-aware 백엔드(status.primary).
+  - [x] **Connection routing** — connection mode(startup param) + **query mode**(쿼리 인지, `PGROUTER_MODE=query`): 첫 쿼리에서 키 추출→QueryRouter→샤드 backend.
+- [~] **drift guard / placement** — `placement.go` drift 감지(Missing/Extra/Zone/NotReady) 순수함수 구현, reconciler 결선 후속.
+- **✅ Verify 완료 (2026-06-27 라이브)**: 2 trust postgres + pg-router query-mode → psql `SELECT located_on FROM probe WHERE id='alice'`이 **alice→shard-0 / bob→shard-1 / carol→shard-0** 결정적·올바른 라우팅. (제약: trust 백엔드 + simple/inline-literal query. scram 인증·describe-first 파라미터·scatter는 후속 — [ROUTER-GAP-ANALYSIS §6](sharding/ROUTER-GAP-ANALYSIS.ko.md).)
 
 ### Gate G4 — Online resharding (~0% buffer)
 
 **목표**: 데이터 손실 없는 split / rebalance.
 
-- [ ] **`ShardSplitJob` CRD** — 신규 `api/v1alpha1/shardsplitjob_types.go`.
-- [ ] **7-step e2e** 시나리오.
-  - [ ] 1. Snapshot + WAL 캡처.
-  - [ ] 2. 대상 shard bootstrap.
-  - [ ] 3. Initial copy.
-  - [ ] 4. CDC catch-up.
-  - [ ] 5. Cutover (최소 write-block window).
-  - [ ] 6. Routing 갱신.
+- [x] **`ShardSplitJob` CRD** — `api/v1alpha1/shardsplitjob_types.go`.
+- [~] **7-step state machine** — `shardsplitjob_controller.go` *골격* (phase 전이 + Bootstrap target 자원 생성 + RoutingUpdate). **실 데이터 이동은 미구현(별 트랙)**:
+  - [~] 1. Snapshot + WAL — phase 전이만.
+  - [x] 2. 대상 shard bootstrap — ConfigMap+Service+STS 생성(격리 식별, ADR-0027).
+  - [ ] 3. Initial copy — `router.CopyTable` DSN 결선 미완.
+  - [ ] 4. CDC catch-up — 논리복제 미결선.
+  - [ ] 5. Cutover (write-block) — 미구현.
+  - [x] 6. Routing 갱신 — ShardRange ranges 교체(가역).
   - [ ] 7. Source cleanup.
-- [ ] **Cutover rollback / forward-only** 검증.
-- Verify: split 중 데이터 무결성 (checksum) + cutover-window 측정 + rollback 실행 가능성.
+- [x] **split-plan 보존 불변식 검증** — `resharding.go` ValidateSplitPlan(gap/overlap/coverage).
+- Verify: split 중 데이터 무결성(checksum) + cutover-window 측정 — **실데이터 이동(3·4·5) 결선 후** 가능.
 
 ### Gate G5 — Distributed SQL (~0% buffer)
 
 **목표**: cross-shard 쿼리 / 트랜잭션 지원 범위를 명확히 한정.
 
-- [~] **Scatter-gather** 쿼리 path — skeleton (`internal/router/scatter.go` + `ErrNotImplemented` sentinel, Executor interface freeze). 실 wire-protocol forwarding + merge 는 P3+. Ref: RFC-0004 §2.2 Scenario 2 + ADR-0015.
-- [~] **2PC / saga** 분산 트랜잭션 선택 — ADR-0015 결정 (2PC primary + saga deferred) + `internal/tx/` skeleton. 실 구현은 D.2.2 Lease election 통합 후.
-- [x] **Isolation matrix** 문서화 — 어떤 isolation level 이 어떤 조건에서 유지되는지. Evidence: `docs/sql/isolation-matrix.md` (D.10.3).
-- [~] **벤치마크** — sysbench / pgbench 변형 (`test/bench/pgbench.sh` + `sysbench.sh` + `docs/perf/baseline.md` skeleton; live 측정은 pending).
-- Verify: isolation level 별 anomaly / no-anomaly 표 + 벤치마크 수치.
+- [~] **Scatter-gather** 쿼리 path — in-process 라이브러리 동작(`scatter.go` fan-out + 타입인지 merge + LIMIT/ORDER BY pushdown, `SQLShardExecutor` 실 lib/pq + 연결풀). **프록시 레벨 wire-protocol forwarding + 결과 재조립은 후속**(query-mode는 현재 단일샤드 fast-path만; 키 없으면 scatter 신호). Ref: RFC-0004 §2.2.
+- [~] **2PC / saga** 분산 트랜잭션 선택 — ADR-0015 결정 (2PC primary + saga deferred). 실 구현은 명시적 후순위(멀티테넌트 v1 불필요).
+- [x] **Isolation matrix** 문서화 — `docs/sql/isolation-matrix.md` (D.10.3).
+- [~] **벤치마크** — `test/bench/{pgbench,sysbench}.sh` + **single-shard baseline 실측 완료**(`docs/perf/baseline.md §3.0`, 2026-06-27). N-shard 분산 수치·percentile·sysbench·전용 PV는 후속.
+- Verify: 분산 수치(N-shard) — scatter forwarding 결선 후.
 
 ### Gate G6 — 1.0.0 GA (~15% buffer)
 

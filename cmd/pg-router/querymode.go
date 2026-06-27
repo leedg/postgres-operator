@@ -97,10 +97,40 @@ func proxyToShard(client net.Conn, raw []byte, firstQuery pgMessage, d router.Ro
 	if _, err := server.Write(raw); err != nil { // backend startup (trust 백엔드 전제)
 		return
 	}
+	// 백엔드의 인증/핸드셰이크(AuthOk·ParameterStatus·BackendKeyData·ReadyForQuery)를
+	// *소비* 한다 — 클라이언트는 이미 우리 trust 핸드셰이크를 받았으므로 백엔드 핸드셰이크를
+	// 그대로 흘려보내면 중복이 된다. 비-trust(비밀번호) 백엔드는 여기서 AuthenticationRequest
+	// (type>0)를 보내며, 본 PoC 는 비번을 대행하지 않으므로 그 경우 실패한다(trust 한정).
+	if err := drainUntilReady(server); err != nil {
+		writePgError(client, "08006", "backend startup: "+err.Error())
+		return
+	}
 	if err := writeMessage(server, 'Q', firstQuery.Payload); err != nil { // 첫 Query 재생
 		return
 	}
 	proxyBidi(client, server)
+}
+
+// drainUntilReady 는 백엔드의 startup 응답을 ReadyForQuery('Z')까지 읽어 버린다.
+// ErrorResponse('E')면 에러 반환. AuthenticationRequest(R, Int32>0)는 비번 백엔드
+// 신호 — 본 PoC 는 대행하지 않으므로 에러로 처리한다.
+func drainUntilReady(server net.Conn) error {
+	for {
+		m, err := readMessage(server)
+		if err != nil {
+			return err
+		}
+		switch m.Type {
+		case 'Z': // ReadyForQuery
+			return nil
+		case 'E': // ErrorResponse
+			return fmt.Errorf("backend error: %s", string(m.Payload))
+		case 'R': // AuthenticationRequest — type 0 = Ok (trust), >0 = 비번 필요
+			if len(m.Payload) >= 4 && (m.Payload[0]|m.Payload[1]|m.Payload[2]|m.Payload[3]) != 0 {
+				return fmt.Errorf("backend requires non-trust auth (not supported in query-mode PoC)")
+			}
+		}
+	}
 }
 
 // proxyBidi 는 두 연결을 양방향으로 복사하고 한쪽이 끝나면 반환한다.

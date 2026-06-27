@@ -21,6 +21,7 @@ Licensed under the MIT License. See the LICENSE file for details.
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -60,11 +61,12 @@ func main() {
 		dur       = envDur("BENCH_DURATION", 5*time.Second)
 		workers   = envInts("BENCH_WORKERS", []int{1, 2, 4, 8, 16, 32})
 		mode      = env("BENCH_MODE", "select")
+		prepared  = env("BENCH_PREPARED", "") != ""
 	)
 
 	spec := benchSpec()
 	keysOnShard0 := seed(shard0DSN, shard1DSN, spec, keys)
-	log.Printf("seeded %d keys: shard-0=%d shard-1=%d (mode=%s dur=%s)", keys, len(keysOnShard0), keys-len(keysOnShard0), mode, dur)
+	log.Printf("seeded %d keys: shard-0=%d shard-1=%d (mode=%s dur=%s prepared=%v)", keys, len(keysOnShard0), keys-len(keysOnShard0), mode, dur, prepared)
 
 	allKeys := make([]int, keys)
 	for i := range allKeys {
@@ -85,7 +87,7 @@ func main() {
 	fmt.Println(strings.Repeat("-", 62))
 	for _, sc := range scenarios {
 		for _, w := range workers {
-			ops, avgMs := run(sc.dsn, sc.keys, w, dur, mode)
+			ops, avgMs := run(sc.dsn, sc.keys, w, dur, mode, prepared)
 			tps := float64(ops) / dur.Seconds()
 			fmt.Printf("%-16s %8d %12d %12.0f %10.3f\n", sc.name, w, ops, tps, avgMs)
 		}
@@ -127,7 +129,9 @@ func seed(shard0DSN, shard1DSN string, spec v1alpha1.ShardRangeSpec, keys int) [
 }
 
 // run 은 db 에 w 개 워커로 dur 동안 점 쿼리를 던지고 (총 ops, 평균 지연ms)를 반환한다.
-func run(dsn string, keys []int, w int, dur time.Duration, mode string) (int64, float64) {
+// prepared 면 워커마다 연결을 고정하고 stmt 를 *한 번만* Parse 한 뒤 Bind/Execute 를 반복
+// 한다(키당 Parse 제거 — 라우터는 샤드별 prepare-on-first-use 로 lazy prepare).
+func run(dsn string, keys []int, w int, dur time.Duration, mode string, prepared bool) (int64, float64) {
 	db := mustOpen(dsn)
 	defer db.Close()
 	db.SetMaxOpenConns(w)
@@ -138,8 +142,7 @@ func run(dsn string, keys []int, w int, dur time.Duration, mode string) (int64, 
 		query = `UPDATE kv SET val=val+1 WHERE id=$1`
 	}
 
-	var ops int64
-	var totalNs int64
+	var ops, totalNs int64
 	deadline := time.Now().Add(dur)
 	var wg sync.WaitGroup
 	for i := 0; i < w; i++ {
@@ -147,17 +150,28 @@ func run(dsn string, keys []int, w int, dur time.Duration, mode string) (int64, 
 		go func(seed int64) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(seed))
+			ctx := context.Background()
+
+			// 워커별 연결 고정(라우터 세션 1개). prepared 면 stmt 를 한 번만 준비.
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				log.Printf("conn: %v", err)
+				return
+			}
+			defer conn.Close()
+			var stmt *sql.Stmt
+			if prepared {
+				if stmt, err = conn.PrepareContext(ctx, query); err != nil {
+					log.Printf("prepare: %v", err)
+					return
+				}
+				defer stmt.Close()
+			}
+
 			for time.Now().Before(deadline) {
 				id := keys[rng.Intn(len(keys))]
 				t0 := time.Now()
-				var err error
-				if mode == "update" {
-					_, err = db.Exec(query, id)
-				} else {
-					var val int
-					err = db.QueryRow(query, id).Scan(&val)
-				}
-				if err != nil {
+				if err := exec1(ctx, conn, stmt, query, mode, prepared, id); err != nil {
 					log.Printf("query err: %v", err)
 					return
 				}
@@ -172,6 +186,23 @@ func run(dsn string, keys []int, w int, dur time.Duration, mode string) (int64, 
 		avgMs = float64(totalNs) / float64(ops) / 1e6
 	}
 	return ops, avgMs
+}
+
+// exec1 은 한 점 쿼리를 실행한다 (prepared 면 stmt 재사용, 아니면 conn 에 직접).
+func exec1(ctx context.Context, conn *sql.Conn, stmt *sql.Stmt, query, mode string, prepared bool, id int) error {
+	if mode == "update" {
+		if prepared {
+			_, err := stmt.ExecContext(ctx, id)
+			return err
+		}
+		_, err := conn.ExecContext(ctx, query, id)
+		return err
+	}
+	var val int
+	if prepared {
+		return stmt.QueryRowContext(ctx, id).Scan(&val)
+	}
+	return conn.QueryRowContext(ctx, query, id).Scan(&val)
 }
 
 func mustOpen(dsn string) *sql.DB {

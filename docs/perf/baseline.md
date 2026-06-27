@@ -155,6 +155,40 @@ BENCH_KEYS=10000 BENCH_DURATION=5s BENCH_WORKERS=1,2,4,8,16,32 BENCH_MODE=select
   go run ./cmd/router-bench
 ```
 
+### 3.0c 실측 3차 — prepared statement 재사용 효과 (2026-06-28)
+
+`BENCH_PREPARED=1`: 워커마다 연결을 고정하고 stmt 를 *한 번만* Parse 한 뒤 Bind/Execute 를
+반복(라우터는 샤드별 prepare-on-first-use 로 lazy prepare). §3.0b 와 동일 환경.
+
+**결과 (read point-query, prepared, TPS)**:
+
+| 시나리오 | w=1 | w=2 | w=4 | w=8 | w=16 | w=32 |
+|---|---|---|---|---|---|---|
+| direct-shard0 | 13,784 | 21,587 | 26,964 | 35,551 | 50,246 | 81,596 |
+| router-1shard | 3,816 | 6,857 | 8,058 | 9,500 | 12,887 | 17,306 |
+| router-2shard | 3,044 | 5,620 | 6,360 | 9,313 | 12,618 | 17,090 |
+
+**prepared vs unprepared (router-2shard, TPS)**:
+
+| w | unprepared(§3.0b) | prepared | 개선 |
+|---|---|---|---|
+| 1 | 1,570 | 3,044 | 1.9× |
+| 8 | 5,044 | 9,313 | 1.85× |
+| 32 | 8,955 | 17,090 | 1.9× |
+
+**해석**:
+- **prepared statement 재사용이 라우터 처리량을 ~1.9× 로 끌어올린다** (9K→17K TPS @ w=32).
+  키당 Parse(+describe 대행) 비용이 라우터 오버헤드의 *약 절반* 이었음을 정량 확인. ⇒ 제품
+  권고: 드라이버 prepared statement / connection pool 사용 시 라우터 처리량 대폭 향상.
+- 그래도 direct(81K) 대비 router(17K)는 ~4.7× — 남은 오버헤드는 라우터의 **동기 per-query
+  proxy 루프**(메시지마다 read→route→relay, 미버퍼 syscall). **식별된 코드 최적화**: 연결당
+  `bufio` 버퍼링(헤더+payload 2 syscall/메시지 → 배치)으로 syscall 수 감소 — 별도 집중
+  변경으로 회귀 테스트 후 적용 예정(WORK_HANDOFF #2).
+- 2샤드 ≈ 1샤드는 prepared 에서도 동일 — 라우터가 여전히 천장(단일 호스트). 수평 스케일은
+  멀티호스트 측정으로(§3.0d 예정).
+
+**재현**: `BENCH_PREPARED=1 BENCH_MODE=select go run ./cmd/router-bench`
+
 ### 3.1 Single-shard baseline (T-1S)
 
 | date | workload | iso | clients | TPS | P50 ms | P95 ms | P99 ms | comment |

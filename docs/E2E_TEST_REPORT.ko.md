@@ -1,5 +1,28 @@
 # E2E 테스트 종합 분석 보고서
 
+## 2026-06-27 라이브 검증: 분산 SQL 라우터 query-mode (호스트 kind / Docker)
+
+분산 SQL 라우터(`pg-router`)를 실 PostgreSQL에 대해 라이브 검증. **호스트 직접 Docker/kind**
+(과거 "kind 불가"는 *컨테이너 안* 2중 중첩 한정 — 호스트 직접은 정상).
+
+### 결과
+| 항목 | 결과 |
+|------|------|
+| 구성 | 2× `postgres:18`(shard-0/1) + `pgrouter:dev`(`PGROUTER_MODE=query`), `probe(id,located_on)` 샤드 마커 |
+| **단일샤드 성능 baseline** | ✅ 오퍼레이터 배포 → PostgresCluster Ready → pgbench (tpcb 496/646/889 TPS, select 9k~10.5k). `docs/perf/baseline.md §3.0` |
+| **query-mode 쿼리 라우팅** | ✅ `SELECT located_on FROM probe WHERE id='alice'` → **alice→shard-0 / bob→shard-1 / carol→shard-0** 결정적·올바름 + 실 쿼리 결과 반환 |
+| **scram-sha-256 인증 대행** | ✅ `POSTGRES_PASSWORD` 백엔드(`password_encryption=scram-sha-256`) + `PGROUTER_BACKEND_PASSWORD` → 라우터가 SCRAM 핸드셰이크 대행, **실 프로덕션 PG 동작** |
+
+### RCA / 발견
+1. **백엔드 핸드셰이크 중복**: `proxyToShard`가 백엔드 startup 응답을 클라이언트로 흘려보내 핸드셰이크가 중복 → `drainUntilReady`(후에 `authenticateAndDrain`)로 소비 후 Query 재생.
+2. **Dockerfile.router 단일파일 빌드**: pg-router가 멀티파일 패키지가 되며 `go build cmd/pg-router/main.go` 실패 → `./cmd/pg-router` 패키지 빌드.
+3. **lib/pq 파라미터 라우팅 한계**: lib/pq는 `Parse→Describe→Sync→Bind` 순(타입 조회) → Bind 전 Sync에서 라우팅 불가. describe-round 대행(vtgate급)이 후속 과제.
+
+### Insight
+단위 테스트가 못 잡는 *프로토콜 상호작용*(핸드셰이크 중복, 드라이버별 메시지 순서)을 라이브가 드러냈다. SCRAM은 RFC 7677 벡터 단위검증 + 라이브 scram PG 양쪽으로 확인.
+
+---
+
 ## 2026-06-24 추가 검증: PITR restore drill 보강 완료
 
 이번 추가 작업에서는 `PITR restore + checksum drill (D.3.2)`를 `PContext` 상태에서 실제 실행 가능한 `Context`로 전환하고, live Kind 환경에서 실패 원인을 단계적으로 제거했다.

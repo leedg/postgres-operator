@@ -54,7 +54,7 @@ import (
 func main() {
 	ctx := context.Background()
 	addr := env("PGROUTER_LISTEN", ":5432")
-	provider, resolve, err := buildRouting(ctx)
+	provider, resolve, readResolve, err := buildRouting(ctx)
 	if err != nil {
 		log.Fatalf("pg-router: build routing: %v", err)
 	}
@@ -67,7 +67,7 @@ func main() {
 	)
 	// 라우팅 모드: connection(기본, startup param) | query(첫 쿼리 인지 라우팅, PoC).
 	mode := strings.ToLower(env("PGROUTER_MODE", "connection"))
-	qr := newQueryRouter(provider, resolve, nil)
+	qr := newQueryRouter(provider, resolve, readResolve)
 	serverVersion := env("PGROUTER_SERVER_VERSION", "18.0")
 	backendPassword := env("PGROUTER_BACKEND_PASSWORD", "") // 백엔드 인증 대행(scram/cleartext)용. ""=trust.
 
@@ -91,9 +91,12 @@ func main() {
 	}
 }
 
-// buildRouting wires the (pluggable) topology provider and backend resolver, and
-// starts a refresh loop for any dynamic source.
-func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendResolver, error) {
+// buildRouting wires the (pluggable) topology provider, the write (primary)
+// backend resolver, and the read (replica) backend resolver; it also starts a
+// refresh loop for any dynamic source. The read resolver routes read-only queries
+// to replicas (env: PGROUTER_BACKEND_<SHARD>_REPLICA; status: Ready replica from
+// PostgresCluster.status, failover-aware). nil read resolver ⇒ reads use primary.
+func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendResolver, router.BackendResolver, error) {
 	topoMode := strings.ToLower(env("PGROUTER_TOPOLOGY", "static"))
 	backendMode := strings.ToLower(env("PGROUTER_BACKEND", "env"))
 	ns := env("PGROUTER_NAMESPACE", "default")
@@ -104,7 +107,7 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	if topoMode == "crd" || backendMode == "status" {
 		c, err := newK8sClient()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		k8s = c
 	}
@@ -122,16 +125,17 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 		}
 		provider = crdProvider
 	default:
-		return nil, nil, fmt.Errorf("unknown PGROUTER_TOPOLOGY %q (want static|crd)", topoMode)
+		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_TOPOLOGY %q (want static|crd)", topoMode)
 	}
 
-	// Backend resolver (shard -> addr).
-	var resolve router.BackendResolver
+	// Backend resolver (shard -> addr): write=primary, read=replica.
+	var resolve, readResolve router.BackendResolver
 	var statusRes *router.StatusBackendResolver
 	var statusReader router.ClusterStatusReader
 	switch backendMode {
 	case "", "env":
 		resolve = envBackendResolver
+		readResolve = envReadBackendResolver
 	case "template":
 		resolve = templateResolver()
 	case "status":
@@ -141,14 +145,15 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 			log.Printf("pg-router: initial status read: %v (will retry)", err)
 		}
 		resolve = statusRes.Resolve
+		readResolve = statusRes.ResolveRead // Ready replica, falls back to primary.
 	default:
-		return nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|status)", backendMode)
+		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|status)", backendMode)
 	}
 
 	if crdProvider != nil || statusRes != nil {
 		go refreshLoop(ctx, crdProvider, statusReader, statusRes, ns, cluster)
 	}
-	return provider, resolve, nil
+	return provider, resolve, readResolve, nil
 }
 
 // newK8sClient builds a controller-runtime client with the operator scheme.
@@ -335,16 +340,33 @@ func readStartup(conn net.Conn) ([]byte, map[string]string, error) {
 
 // shardSpec is the PoC static routing table (a 2-shard hash vindex). With
 // PGROUTER_TOPOLOGY=crd this is replaced by the live ShardRange CRD.
+// PGROUTER_REFERENCE_TABLES (CSV) declares replicated reference tables so that
+// reference-only queries route to any shard (no key) instead of scatter.
 func shardSpec() v1alpha1.ShardRangeSpec {
 	return v1alpha1.ShardRangeSpec{
-		Cluster:  env("PGROUTER_CLUSTER", "quickstart"),
-		Keyspace: env("PGROUTER_KEYSPACE", "default"),
-		Vindex:   v1alpha1.VindexSpec{Type: v1alpha1.VindexTypeHash, Column: "id", Function: "murmur3"},
+		Cluster:         env("PGROUTER_CLUSTER", "quickstart"),
+		Keyspace:        env("PGROUTER_KEYSPACE", "default"),
+		Vindex:          v1alpha1.VindexSpec{Type: v1alpha1.VindexTypeHash, Column: "id", Function: "murmur3"},
+		ReferenceTables: csv(env("PGROUTER_REFERENCE_TABLES", "")),
 		Ranges: []v1alpha1.ShardRangeEntry{
 			{Lo: "0x00000000", Hi: "0x7fffffff", Shard: "shard-0"},
 			{Lo: "0x80000000", Hi: "0xffffffff", Shard: "shard-1"},
 		},
 	}
+}
+
+// csv splits a comma-separated env value, trimming spaces and dropping empties.
+func csv(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // templateResolver maps a shard to a backend via a DNS template
@@ -362,8 +384,20 @@ func templateResolver() router.BackendResolver {
 	}
 }
 
-// envBackendResolver maps a shard ID to its backend via PGROUTER_BACKEND_<SHARD>.
+// envBackendResolver maps a shard ID to its primary backend via
+// PGROUTER_BACKEND_<SHARD>.
 func envBackendResolver(shardID string) (string, error) {
+	return backendFor(shardID), nil
+}
+
+// envReadBackendResolver maps a shard ID to its *replica* backend via
+// PGROUTER_BACKEND_<SHARD>_REPLICA, falling back to the primary when no replica is
+// configured (so read-only queries still work without a replica deployed).
+func envReadBackendResolver(shardID string) (string, error) {
+	envKey := "PGROUTER_BACKEND_" + strings.ToUpper(strings.ReplaceAll(shardID, "-", "_")) + "_REPLICA"
+	if v := os.Getenv(envKey); v != "" {
+		return v, nil
+	}
 	return backendFor(shardID), nil
 }
 

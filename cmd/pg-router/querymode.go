@@ -137,26 +137,8 @@ func handleQueryMode(client net.Conn, qr queryRouter, dialer *backendDialer, ser
 	if err := sendTrustHandshake(client, serverVersion); err != nil {
 		return
 	}
-
-	m, err := readMessage(client)
-	if err != nil {
-		return
-	}
-	switch m.Type {
-	case 'X': // Terminate
-		return
-	case 'Q': // simple Query
-		sql, ok := querySQL(m)
-		if !ok {
-			writePgError(client, "08P01", "could not parse query")
-			return
-		}
-		routeAndProxy(client, qr, sql, raw, []pgMessage{m}, dialer, backendPassword)
-	case 'P': // extended Parse
-		handleParse(client, qr, m, raw, dialer, backendPassword)
-	default:
-		writePgError(client, "0A000", fmt.Sprintf("message type %q not supported in query-routing PoC", m.Type))
-	}
+	// per-query 라우팅 세션: 매 simple Query 를 키의 샤드로 라우팅(연결 고정 해소).
+	runPerQuerySession(client, qr, dialer, backendPassword, raw)
 }
 
 // handleParse 는 Parse('P') 를 처리한다: 인라인 리터럴이면 즉시, parameterized 면 Bind
@@ -210,22 +192,6 @@ func handleParse(client net.Conn, qr queryRouter, parse pgMessage, raw []byte, d
 
 func logRoute(typ byte, d router.RouteDecision) {
 	log.Printf("pg-router: routed (%c) shard=%s backend=%s read=%v", typ, d.Shard, d.Backend, d.Read)
-}
-
-// routeAndProxy 는 simple Query 경로의 라우팅 + proxy. 라우팅 키가 없으면(Scatter) 모든
-// 샤드에 fan-out 한다.
-func routeAndProxy(client net.Conn, qr queryRouter, sql string, raw []byte, msgs []pgMessage, dialer *backendDialer, backendPassword string) {
-	d, err := qr.routeSQL(sql)
-	if d.Scatter { // 키 없음 → 멀티샤드 scatter-gather.
-		scatterQuery(client, qr, msgs[0], raw, dialer, backendPassword)
-		return
-	}
-	if err != nil {
-		writePgError(client, "08006", "routing failed: "+err.Error())
-		return
-	}
-	logRoute('Q', d)
-	proxyToShard(client, raw, msgs, d, dialer, backendPassword)
 }
 
 // proxyToShard 는 결정된 샤드 backend 에 연결해 startup + 버퍼링된 메시지(들)를 전달하고

@@ -57,7 +57,9 @@ func EnsureSchema(ctx context.Context, sourceDSN, targetDSN string, tables []str
 }
 
 // CreatePublication 은 source 에 지정 테이블(빈 목록이면 전 테이블)의 publication 을 멱등
-// 생성한다(DROP IF EXISTS 후 CREATE).
+// 생성한다. *이미 있으면 skip* — Job 재시도 시 DROP 하면 활성 subscription 이 의존하는
+// publication 을 떨어뜨려 스트림이 깨지므로 drop 하지 않는다(CREATE PUBLICATION 은 IF NOT
+// EXISTS 미지원이라 명시 확인).
 func CreatePublication(ctx context.Context, sourceDSN, pubName string, tables []string) error {
 	if !pubSubNamePattern.MatchString(pubName) {
 		return fmt.Errorf("%w: publication %q", ErrInvalidTable, pubName)
@@ -73,8 +75,11 @@ func CreatePublication(ctx context.Context, sourceDSN, pubName string, tables []
 	}
 	defer func() { _ = db.Close() }()
 
-	if _, err := db.ExecContext(ctx, "DROP PUBLICATION IF EXISTS "+pubName); err != nil { //nolint:gosec // 화이트리스트 검증됨
-		return fmt.Errorf("router: drop publication: %w", err)
+	var exists int
+	if err := db.QueryRowContext(ctx, "SELECT 1 FROM pg_publication WHERE pubname = $1", pubName).Scan(&exists); err == nil {
+		return nil // 이미 존재 — 재사용(활성 sub 보존).
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("router: check publication: %w", err)
 	}
 	target := "FOR ALL TABLES"
 	if len(tables) > 0 {

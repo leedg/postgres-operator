@@ -96,6 +96,16 @@ target StatefulSet/template/live Pod 에 `shard-id` 를 붙이지 않는다. 이
 
 source PDB/PVC/Service 삭제 정책과 live chaos 검증은 여전히 별도 잔여 범위다.
 
+### P-B.5 source resource retention policy (2026-06-29)
+
+source resource cleanup 의 기본 정책은 **retain by default** 로 고정한다. reshard 이후 inactive ordinal source 는
+StatefulSet replicas 를 0 으로 낮추고 status 관측에서 제외하지만, source Service, pre-existing PDB, PVC 는
+자동 삭제하지 않는다. envtest 는 이 보존 정책을 회귀로 고정한다.
+
+이 결정은 자동 삭제가 rollback/debug 데이터와 PVC ownership 을 잃게 만드는 destructive operation 이기 때문이다.
+향후 source 삭제가 필요하면 별도 opt-in 정책 필드, finalizer 순서, PVC retention semantics, live chaos drill 을
+포함한 별도 설계로 다룬다. 기본 GA 경로에서는 source resource 삭제가 자동으로 일어나지 않는다.
+
 이번 hardening batch 에서 selector 사용처를 다음처럼 분리했다.
 
 - **그대로 둔 것**: `ShardStatefulSetName`, `ShardServiceName`, PDB/TLS/PVC resize, source shard DNS,

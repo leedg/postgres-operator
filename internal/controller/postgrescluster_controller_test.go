@@ -17,6 +17,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -262,6 +263,21 @@ var _ = Describe("PostgresClusterReconciler — RFC 0001 spec", func() {
 					},
 				},
 			}
+			Expect(k8sClient.Create(ctx, BuildShardPDB(cluster, 0, 2))).To(Succeed())
+			sourcePVC := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("data-%s-0", ShardStatefulSetName(clusterName, 0)),
+					Namespace: namespace,
+					Labels:    SelectorLabels(clusterName, "shard", 0),
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sourcePVC)).To(Succeed())
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			Eventually(func(g Gomega) {
@@ -292,6 +308,21 @@ var _ = Describe("PostgresClusterReconciler — RFC 0001 spec", func() {
 				}, &sourceSTS)).To(Succeed())
 				g.Expect(sourceSTS.Spec.Replicas).NotTo(BeNil())
 				g.Expect(*sourceSTS.Spec.Replicas).To(Equal(int32(0)), "inactive source ordinal STS must scale to zero")
+
+				var sourceSvc corev1.Service
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: ShardServiceName(clusterName, 0),
+				}, &sourceSvc)).To(Succeed(), "inactive source Service is retained for conservative rollback/debug")
+
+				var sourcePDB policyv1.PodDisruptionBudget
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: ShardPDBName(clusterName, 0),
+				}, &sourcePDB)).To(Succeed(), "pre-existing source PDB is retained by default")
+
+				var retainedPVC corev1.PersistentVolumeClaim
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: sourcePVC.Name,
+				}, &retainedPVC)).To(Succeed(), "source PVC is retained by default")
 
 				var targetSTS appsv1.StatefulSet
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{

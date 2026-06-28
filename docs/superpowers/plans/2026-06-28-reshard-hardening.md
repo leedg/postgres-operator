@@ -326,6 +326,33 @@ go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-
 
 Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
+## Batch 2.12: Source Resource Retention Policy
+
+**Files:**
+- Modify: `internal/controller/postgrescluster_controller_test.go`
+- Modify: `docs/WORK_HANDOFF.ko.md`
+- Modify: `docs/kb/adr/0029-reshard-target-promotion-identity-transition.md`
+
+- [x] Pin the conservative default: retain source resources.
+  - Inactive ordinal source StatefulSet is scaled to 0.
+  - Source Service remains.
+  - Pre-existing source PDB remains.
+  - Source PVC remains.
+
+- [x] Keep destructive cleanup out of automatic Promote.
+  - No automatic deletion of source StatefulSet/Service/PVC/PDB is performed by default.
+  - Future deletion must be explicit opt-in and live-drill validated.
+
+**Checkpoint Verification:**
+
+```powershell
+go test -count=1 ./internal/controller --ginkgo.focus="adds active named reshard targets"
+go test -count=1 ./internal/controller
+go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
+```
+
+Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is named shard spec-model migration and live chaos/e2e validation. Destructive source deletion remains a future opt-in design, not a default GA behavior.
+
 ## Batch 3: Native Router Concurrent-Write E2E Design
 
 **Files:**

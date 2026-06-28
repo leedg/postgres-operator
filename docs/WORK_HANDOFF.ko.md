@@ -364,12 +364,15 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   `reshard-target=<id>` selector 에 걸리는 Pod 가 최소 1개 있어야 하고, 그중 하나 이상이
   `phase=Running`, `PodReady=True` 여야 target adopt 를 수행한다. target 이 아직 not Ready 이면 phase 를
   `Promote` 로 유지하고 requeue 하며 label mutation 을 하지 않는다.
+- Batch 2.12 정책 고정: source resource cleanup 기본값은 retain-by-default 다. inactive ordinal source 는
+  StatefulSet replicas=0 과 status 관측 제외까지만 수행하고, source Service, pre-existing PDB, PVC 는 자동
+  삭제하지 않는다. destructive source deletion 은 향후 별도 opt-in 정책과 live drill 뒤에만 다룬다.
 - Batch 3 설계 문서 완료: native router concurrent-write e2e 시나리오를
   `docs/sharding/ROUTER-GAP-ANALYSIS.ko.md` 에 기록했다. write stream 중 online CDC, write-block
   `ReadyForQuery`, routing update, checksum/key ownership, PK 없는 target UPDATE/DELETE, abort cleanup 을
   한 live gate 로 검증한다.
-- 아직 남은 범위: source PDB/resource 삭제 정책, spec shard model 의 named-list 전환은 P-B/P-C 범위다.
-  destructive cleanup 은 별도 정책과 live chaos 검증 뒤에 진행한다.
+- 아직 남은 범위: spec shard model 의 named-list 전환은 P-C 범위다. destructive source deletion 은 기본
+  동작이 아니라 향후 opt-in 정책으로만 검토한다. live chaos/e2e 검증은 여전히 필요하다.
 - 라이브 검증 전 주의: `cdc-abort` 는 `DROP SUBSCRIPTION IF EXISTS` 로 원격 replication slot 정리까지
   시도한다. source 접속 불가 상황에서는 cleanup Job 이 실패하고 `AbortCleanup=False` 로 남는 것이 현재
   의도한 안전 동작이다. source-down 상태에서도 target subscription 만 강제 제거하는 fallback 은 live drill

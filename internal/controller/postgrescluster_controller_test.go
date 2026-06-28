@@ -255,7 +255,7 @@ var _ = Describe("PostgresClusterReconciler — RFC 0001 spec", func() {
 					ShardingMode:    postgresv1alpha1.ShardingModeNative,
 					Shards: postgresv1alpha1.ShardsSpec{
 						InitialCount: 1,
-						Replicas:     0,
+						Replicas:     1,
 						Storage: postgresv1alpha1.StorageSpec{
 							Size: resource.MustParse("1Gi"),
 						},
@@ -292,6 +292,16 @@ var _ = Describe("PostgresClusterReconciler — RFC 0001 spec", func() {
 				}, &sourceSTS)).To(Succeed())
 				g.Expect(sourceSTS.Spec.Replicas).NotTo(BeNil())
 				g.Expect(*sourceSTS.Spec.Replicas).To(Equal(int32(0)), "inactive source ordinal STS must scale to zero")
+
+				var targetSTS appsv1.StatefulSet
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: TargetShardStatefulSetName(clusterName, targetShard),
+				}, &targetSTS)).To(Succeed())
+				g.Expect(targetSTS.Spec.Replicas).NotTo(BeNil())
+				g.Expect(*targetSTS.Spec.Replicas).To(Equal(int32(2)), "active target STS must match cluster members")
+				mainEnv := envMap(targetSTS.Spec.Template.Spec.Containers[0].Env)
+				g.Expect(mainEnv["POSTGRES_MEMBER_COUNT"].Value).To(Equal("2"))
+				g.Expect(mainEnv["PRIMARY_ENDPOINT"].Value).To(Equal(targetEndpoint))
 			}, envtestTimeout, envtestInterval).Should(Succeed())
 		})
 	})

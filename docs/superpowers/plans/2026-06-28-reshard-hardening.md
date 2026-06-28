@@ -206,6 +206,36 @@ go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-
 
 Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. This closes the source-observation part of P-C, but target replica scale-up/HA, explicit ShardSplitJob Promote phase, and named shard spec-model migration remain open.
 
+## Batch 2.8: Active Named Target HA Scale-Up
+
+**Files:**
+- Modify: `internal/controller/builders.go`
+- Modify: `internal/controller/postgrescluster_controller.go`
+- Modify: `internal/controller/postgrescluster_controller_test.go`
+
+- [x] Reconcile active named target resources from `PostgresClusterReconciler`.
+  - Once ShardRange points at a non-ordinal shard, the cluster reconciler maintains target ConfigMap, Service, and StatefulSet.
+  - Bootstrap-time target resources remain isolated before RoutingUpdate because ShardRange still points at the source.
+
+- [x] Scale active target StatefulSets to cluster member count.
+  - Desired replicas become `1 + spec.shards.replicas`.
+  - Hibernation/restore scales active target members to 0.
+  - `POSTGRES_MEMBER_COUNT` and `PRIMARY_ENDPOINT` are rendered for target replicas.
+
+- [x] Preserve target identity isolation.
+  - StatefulSet/Service selectors still use `postgres.keiailab.io/reshard-target=<id>`.
+  - `POSTGRES_RESHARD_TARGET` remains set, so target election stays on the isolated target lease.
+
+**Checkpoint Verification:**
+
+```powershell
+go test -count=1 ./internal/controller --ginkgo.focus="adds active named reshard targets"
+go test -count=1 ./internal/controller
+go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./internal/controller
+```
+
+Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is explicit ShardSplitJob Promote/adopt idempotency, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+
 ## Batch 3: Native Router Concurrent-Write E2E Design
 
 **Files:**

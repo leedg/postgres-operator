@@ -1194,15 +1194,33 @@ func buildTargetShardStatefulSet(
 	resources corev1.ResourceRequirements,
 	configMapName, configHash string,
 ) *appsv1.StatefulSet {
+	return buildTargetShardStatefulSetWithMembers(
+		cluster, shardID, image, pgMajor,
+		1, "",
+		storage, resources,
+		configMapName, configHash,
+	)
+}
+
+func buildTargetShardStatefulSetWithMembers(
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardID string,
+	image, pgMajor string,
+	members int32,
+	primaryEndpoint string,
+	storage postgresv1alpha1.StorageSpec,
+	resources corev1.ResourceRequirements,
+	configMapName, configHash string,
+) *appsv1.StatefulSet {
 	return buildPGStatefulSet(
 		cluster,
 		TargetShardStatefulSetName(cluster.Name, shardID),
 		TargetShardServiceName(cluster.Name, shardID),
 		0, // shardOrdinal: pod-0 initdb 경로용 (SHARD_ORDINAL env 는 정보용, 격리 label 은 reshardTargetID 가 결정)
 		image, configMapName, pgMajor,
-		1, // members: 단일 fresh primary (초기 복제본 없음)
+		members,
 		storage, resources,
-		"", // primaryEndpoint: 빈 값 → pod-0 initdb fresh primary
+		primaryEndpoint,
 		configHash,
 		shardID, // reshardTargetID → 격리 label + POSTGRES_RESHARD_TARGET env
 	)

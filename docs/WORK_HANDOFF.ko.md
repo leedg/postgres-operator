@@ -347,13 +347,17 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   보고, active set 에서 빠진 ordinal source STS 는 replicas=0 으로 낮추며 status.shards 에서 제외한다.
   target 이 Ready 일 때 stale source fallback row 때문에 cluster 가 Provisioning/Degraded 에 묶이는
   문제를 해소했다. StatefulSet/PVC 삭제는 하지 않는다.
+- Batch 2.8 개발 완료: active topology 에 포함된 non-ordinal target 은 PostgresCluster reconciler 가
+  ConfigMap/Service/StatefulSet 을 유지하고, target STS replicas 를 `1 + spec.shards.replicas` 로 맞춘다.
+  target replica 는 `POSTGRES_MEMBER_COUNT` 와 target primary `PRIMARY_ENDPOINT` 를 받아 basebackup 경로로
+  들어갈 수 있다. hibernation/restore 중에는 active target 도 replicas=0 으로 내려간다.
 - Batch 3 설계 문서 완료: native router concurrent-write e2e 시나리오를
   `docs/sharding/ROUTER-GAP-ANALYSIS.ko.md` 에 기록했다. write stream 중 online CDC, write-block
   `ReadyForQuery`, routing update, checksum/key ownership, PK 없는 target UPDATE/DELETE, abort cleanup 을
   한 live gate 로 검증한다.
-- 아직 남은 범위: target replica scale-up/HA, 명시적 ShardSplitJob Promote phase 의 fence/adopt/source
-  cleanup idempotency, source PDB/resource 삭제 정책, 그리고 spec shard model 의 named-list 전환은 P-B/P-C
-  범위다. source fence/관측 제외 전에 target 에 동일 `shard-id` 를 붙이면 split-brain 신호가 될 수 있으므로
+- 아직 남은 범위: 명시적 ShardSplitJob Promote phase 의 fence/adopt/source cleanup idempotency,
+  source PDB/resource 삭제 정책, 그리고 spec shard model 의 named-list 전환은 P-B/P-C 범위다.
+  source fence/관측 제외 전에 target 에 동일 `shard-id` 를 붙이면 split-brain 신호가 될 수 있으므로
   순서가 중요하다.
 - 라이브 검증 전 주의: `cdc-abort` 는 `DROP SUBSCRIPTION IF EXISTS` 로 원격 replication slot 정리까지
   시도한다. source 접속 불가 상황에서는 cleanup Job 이 실패하고 `AbortCleanup=False` 로 남는 것이 현재

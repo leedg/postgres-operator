@@ -345,6 +345,21 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		shardStatuses = append(shardStatuses, shardStat)
 	}
 
+	if hasActiveShardTopology {
+		targetMembers := members
+		if databasePodsStopped {
+			targetMembers = 0
+		}
+		if err := r.reconcileActiveNamedShardResources(
+			ctx, &cluster, activeShardIDs,
+			resolvedImage.Image, resolvedImage.PostgresMajor,
+			targetMembers,
+			databasePodsStopped,
+		); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "active named shard resources", logger)
+		}
+	}
+
 	if !databasePodsStopped {
 		namedShardStatuses, namedReady, err := activeNamedShardStatuses(ctx, r.Client, &cluster)
 		if err != nil {
@@ -521,6 +536,69 @@ func restoreInProgress(cluster *postgresv1alpha1.PostgresCluster) bool {
 		return false
 	}
 	return strings.TrimSpace(cluster.Annotations[AnnotationRestoreInProgress]) != ""
+}
+
+func (r *PostgresClusterReconciler) reconcileActiveNamedShardResources(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+	activeShardIDs map[string]struct{},
+	image string,
+	pgMajor string,
+	members int32,
+	databasePodsStopped bool,
+) error {
+	if cluster == nil || len(activeShardIDs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(activeShardIDs))
+	for shardID := range activeShardIDs {
+		if !isOrdinalShardID(cluster, shardID) {
+			ids = append(ids, shardID)
+		}
+	}
+	sort.Strings(ids)
+
+	for _, shardID := range ids {
+		cm := buildTargetShardConfigMap(cluster, shardID, r.Plugins)
+		configHash := postgresConfigHash(cm.Data)
+		if err := r.upsert(ctx, cluster, cm); err != nil {
+			return fmt.Errorf("upsert active target %q ConfigMap: %w", shardID, err)
+		}
+		if err := r.upsert(ctx, cluster, buildTargetHeadlessService(cluster, shardID)); err != nil {
+			return fmt.Errorf("upsert active target %q Service: %w", shardID, err)
+		}
+		svcName := TargetShardServiceName(cluster.Name, shardID)
+		primaryEndpoint := primaryEndpointForNamedShard(cluster, shardID, svcName, databasePodsStopped)
+		sts := buildTargetShardStatefulSetWithMembers(
+			cluster, shardID, image, pgMajor,
+			members, primaryEndpoint,
+			cluster.Spec.Shards.Storage, cluster.Spec.Shards.Resources,
+			cm.Name, configHash,
+		)
+		if err := r.upsert(ctx, cluster, sts); err != nil {
+			return fmt.Errorf("upsert active target %q StatefulSet: %w", shardID, err)
+		}
+	}
+	return nil
+}
+
+func primaryEndpointForNamedShard(
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardID string,
+	svcName string,
+	databasePodsStopped bool,
+) string {
+	if cluster == nil || databasePodsStopped {
+		return ""
+	}
+	for i := range cluster.Status.Shards {
+		shard := &cluster.Status.Shards[i]
+		if shard.Name == shardID && shard.Primary != nil && shard.Primary.Endpoint != "" {
+			return shard.Primary.Endpoint
+		}
+	}
+	podName := TargetShardStatefulSetName(cluster.Name, shardID) + "-0"
+	return fmt.Sprintf("%s.%s.%s.svc.cluster.local:%d", podName, svcName, cluster.Namespace, pgPort)
 }
 
 // applyClusterConditions 는 reconcile 산출물 (shard 준비 상태, router 활성/준비

@@ -43,6 +43,21 @@ Ready event 의 shard count 도 active status row 수를 사용한다.
 아직 남은 범위는 target replica scale-up/HA, 명시적 ShardSplitJob Promote phase, source resource/PDB
 정리 정책, CRD spec 의 named shard model 전환이다.
 
+### P-C.2 active target HA scale-up (2026-06-29)
+
+active topology 에 포함된 non-ordinal shard 는 `PostgresClusterReconciler` 가 ConfigMap, headless Service,
+StatefulSet 을 직접 유지한다. StatefulSet replicas 는 `1 + spec.shards.replicas` 로 조정되고,
+target replica init container 는 target primary endpoint 를 받아 `pg_basebackup` 경로로 들어간다.
+hibernation/restore 중에는 active target 도 replicas=0 으로 내려간다.
+
+selector 와 lease 격리는 유지한다. active target 의 Service/StatefulSet selector 는 여전히
+`postgres.keiailab.io/reshard-target=<id>` 이고, Pod env 에는 `POSTGRES_RESHARD_TARGET` 이 남아 target
+전용 lease 를 사용한다. 즉 이 단계는 HA scale-up 이며, 아직 "target 을 ordinal shard 로 rename/adopt" 하지는
+않는다.
+
+남은 범위는 명시적 ShardSplitJob Promote phase 의 idempotency, source PDB/resource cleanup 정책,
+CRD spec 의 named shard model 전환, 그리고 live chaos/e2e 검증이다.
+
 이번 hardening batch 에서 selector 사용처를 다음처럼 분리했다.
 
 - **그대로 둔 것**: `ShardStatefulSetName`, `ShardServiceName`, PDB/TLS/PVC resize, source shard DNS,

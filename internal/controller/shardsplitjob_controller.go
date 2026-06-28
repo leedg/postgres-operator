@@ -9,8 +9,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -46,6 +48,7 @@ type ShardSplitJobReconciler struct {
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps;services,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile 은 ShardSplitJob 의 다음 phase 로 한 단계 전이한다 (즉시 requeue 로 진행).
 func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -81,6 +84,29 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.Status().Update(ctx, &ssj)
 			return ctrl.Result{}, nil
 		}
+	}
+
+	// InitialCopy phase: source→target 데이터 복사 Job 을 띄우고 완료를 기다린다. 완료
+	// 전엔 phase 를 전이하지 않고 requeue 한다(가역 — Job 실패 시 Failed, target drop 으로
+	// rollback). 실 데이터 이동이 끝나야 CDCCatchup/Cutover 가 의미를 가진다.
+	if ssj.Status.Phase == postgresv1alpha1.ShardSplitPhaseInitialCopy {
+		done, failure, err := r.reconcileInitialCopy(ctx, &ssj)
+		if err != nil {
+			return ctrl.Result{}, err // 전이 가능(ShardRange 부재 등) — backoff requeue.
+		}
+		if failure != "" {
+			ssj.Status.Phase = postgresv1alpha1.ShardSplitPhaseFailed
+			ssj.Status.FailureReason = failure
+			now := metav1.Now()
+			ssj.Status.CompletedAt = &now
+			ssj.Status.ObservedGeneration = ssj.Generation
+			_ = r.Status().Update(ctx, &ssj)
+			return ctrl.Result{}, nil
+		}
+		if !done {
+			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil // 복사 Job 대기.
+		}
+		// 복사 완료 → 아래 nextPhase 가 CDCCatchup 으로 전이.
 	}
 
 	if ssj.Status.Phase == postgresv1alpha1.ShardSplitPhaseRoutingUpdate {
@@ -146,7 +172,8 @@ func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob)
 	case postgresv1alpha1.ShardSplitPhaseBootstrap:
 		return postgresv1alpha1.ShardSplitPhaseInitialCopy, ""
 	case postgresv1alpha1.ShardSplitPhaseInitialCopy:
-		// 실 데이터 이동은 router.CopyTable(#215, 가역). DSN 결선은 별 트랙.
+		// 실 데이터 이동(복사 Job)은 Reconcile 의 InitialCopy 블록이 완료까지 게이트한 뒤
+		// 이 전이에 도달한다(shardsplitjob_copy.go reconcileInitialCopy). 가역.
 		return postgresv1alpha1.ShardSplitPhaseCDCCatchup, ""
 	case postgresv1alpha1.ShardSplitPhaseCDCCatchup:
 		return postgresv1alpha1.ShardSplitPhaseCutover, ""
@@ -270,6 +297,7 @@ func containerImage(sts *appsv1.StatefulSet, name string) string {
 func (r *ShardSplitJobReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.ShardSplitJob{}).
+		Owns(&batchv1.Job{}). // InitialCopy 복사 Job 완료 시 재조정.
 		Named("shardsplitjob").
 		Complete(r)
 }

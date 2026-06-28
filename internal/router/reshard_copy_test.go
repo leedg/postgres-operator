@@ -77,6 +77,20 @@ func TestKeyString(t *testing.T) {
 	}
 }
 
+func TestFilterTables(t *testing.T) {
+	all := []string{"orders", "kv", "Country", "users"}
+	got := FilterTables(all, []string{"country", "REGIONS"})
+	want := []string{"orders", "kv", "users"} // country 제외(대소문자 무시), REGIONS 부재 무해.
+	if len(got) != len(want) {
+		t.Fatalf("FilterTables = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("FilterTables[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestIndexOfFold(t *testing.T) {
 	cols := []string{"ID", "Val"}
 	if i := indexOfFold(cols, "id"); i != 0 {

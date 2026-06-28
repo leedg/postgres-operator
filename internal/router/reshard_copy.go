@@ -207,6 +207,47 @@ func DeleteShardRange(ctx context.Context, sourceDSN, table string, spec v1alpha
 	return deleted, nil
 }
 
+// ListUserTables 는 dsn 의 public 스키마 base table 이름 목록을 반환한다(이름순). resharding
+// 은 모든 샤딩 테이블을 옮겨야 하므로, copy 전에 source 의 테이블을 발견하는 데 쓴다.
+func ListUserTables(ctx context.Context, dsn string) ([]string, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("router: open: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx,
+		`SELECT table_name FROM information_schema.tables
+		 WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name`)
+	if err != nil {
+		return nil, fmt.Errorf("router: list tables: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("router: scan table name: %w", err)
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// FilterTables 는 all 에서 exclude(대소문자 무시; reference 테이블 등)를 뺀 목록을 반환한다.
+func FilterTables(all, exclude []string) []string {
+	skip := make(map[string]bool, len(exclude))
+	for _, e := range exclude {
+		skip[strings.ToLower(e)] = true
+	}
+	var out []string
+	for _, t := range all {
+		if !skip[strings.ToLower(t)] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // keyString 은 row 값(any)을 vindex 키 문자열로 정규화한다 — lib/pq 는 text 를 []byte 로
 // 돌려주므로 string 변환(fmt.Sprint 면 "[97 ...]" 가 됨). 라우터의 키 추출(문자열)과 일치.
 func keyString(v any) string {

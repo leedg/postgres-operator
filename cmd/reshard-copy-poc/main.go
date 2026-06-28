@@ -27,21 +27,46 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/keiailab/postgres-operator/api/v1alpha1"
 	"github.com/keiailab/postgres-operator/internal/router"
 )
 
-// reshardSpec is the 2-shard murmur3 hash vindex matching cmd/pg-router shardSpec.
-func reshardSpec(col string) v1alpha1.ShardRangeSpec {
-	return v1alpha1.ShardRangeSpec{
-		Vindex: v1alpha1.VindexSpec{Type: v1alpha1.VindexTypeHash, Column: col, Function: "murmur3"},
-		Ranges: []v1alpha1.ShardRangeEntry{
+// reshardSpec builds the post-split vindex spec. The ranges come from
+// PGROUTER_RANGES ("shard:lo:hi,shard:lo:hi") when set (controller passes the
+// target topology), else the default 2-shard murmur3 split (standalone use).
+// fn is the vindex function from PGROUTER_VINDEX_FUNCTION (default murmur3).
+func reshardSpec(col, fn, rangesEnv string) v1alpha1.ShardRangeSpec {
+	if fn == "" {
+		fn = "murmur3"
+	}
+	ranges := parseRanges(rangesEnv)
+	if len(ranges) == 0 {
+		ranges = []v1alpha1.ShardRangeEntry{
 			{Lo: "0x00000000", Hi: "0x7fffffff", Shard: "shard-0"},
 			{Lo: "0x80000000", Hi: "0xffffffff", Shard: "shard-1"},
-		},
+		}
 	}
+	return v1alpha1.ShardRangeSpec{
+		Vindex: v1alpha1.VindexSpec{Type: v1alpha1.VindexTypeHash, Column: col, Function: v1alpha1.VindexHashFunction(fn)},
+		Ranges: ranges,
+	}
+}
+
+// parseRanges parses "shard:lo:hi,shard:lo:hi" into ShardRangeEntry list.
+func parseRanges(s string) []v1alpha1.ShardRangeEntry {
+	var out []v1alpha1.ShardRangeEntry
+	for _, part := range csv(s) {
+		f := strings.Split(part, ":")
+		if len(f) != 3 {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: bad range %q (want shard:lo:hi)\n", part)
+			os.Exit(2)
+		}
+		out = append(out, v1alpha1.ShardRangeEntry{Shard: f[0], Lo: f[1], Hi: f[2]})
+	}
+	return out
 }
 
 func main() {
@@ -72,26 +97,60 @@ func main() {
 	if col == "" {
 		col = "id"
 	}
-	spec := reshardSpec(col)
-	fmt.Printf("reshard-copy-poc: InitialCopy (range) table=%q vindex=%s target=%s source→target\n", table, col, targetShard)
-	copied, scanned, err := router.CopyShardRange(ctx, src, tgt, table, spec, targetShard)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "reshard-copy-poc: %v (copied %d/%d before error)\n", err, copied, scanned)
-		os.Exit(1)
+	spec := reshardSpec(col, os.Getenv("PGROUTER_VINDEX_FUNCTION"), os.Getenv("PGROUTER_RANGES"))
+
+	// 옮길 테이블 결정: COPY_TABLE 지정 시 그 하나, 아니면 source 의 모든 user 테이블에서
+	// reference 테이블(PGROUTER_REFERENCE_TABLES, 전 샤드 복제라 이동 대상 아님)을 뺀 전부.
+	var tables []string
+	if table != "" {
+		tables = []string{table}
+	} else {
+		all, err := router.ListUserTables(ctx, src)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: list tables: %v\n", err)
+			os.Exit(1)
+		}
+		tables = router.FilterTables(all, csv(os.Getenv("PGROUTER_REFERENCE_TABLES")))
+		fmt.Printf("reshard-copy-poc: discovered %d table(s) to reshard: %v\n", len(tables), tables)
 	}
-	fmt.Printf("reshard-copy-poc: copied %d/%d row(s) (only %s keys) source→target (rollback=drop target)\n",
-		copied, scanned, targetShard)
+
+	for _, tbl := range tables {
+		fmt.Printf("reshard-copy-poc: InitialCopy (range) table=%q vindex=%s target=%s source→target\n", tbl, col, targetShard)
+		copied, scanned, err := router.CopyShardRange(ctx, src, tgt, tbl, spec, targetShard)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: %v (copied %d/%d before error)\n", err, copied, scanned)
+			os.Exit(1)
+		}
+		fmt.Printf("reshard-copy-poc: copied %d/%d row(s) of %q (only %s keys) source→target\n",
+			copied, scanned, tbl, targetShard)
+	}
 
 	if os.Getenv("PGROUTER_RESHARD_DELETE_AFTER") == "" {
 		return
 	}
 	// Cutover cleanup: delete moved rows from source (run only after routing switch).
-	fmt.Printf("reshard-copy-poc: Cutover cleanup — deleting %s keys from source\n", targetShard)
-	deleted, err := router.DeleteShardRange(ctx, src, table, spec, targetShard)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "reshard-copy-poc: delete: %v (deleted %d before error)\n", err, deleted)
-		os.Exit(1)
+	for _, tbl := range tables {
+		fmt.Printf("reshard-copy-poc: Cutover cleanup — deleting %s keys from %q in source\n", targetShard, tbl)
+		deleted, err := router.DeleteShardRange(ctx, src, tbl, spec, targetShard)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: delete: %v (deleted %d before error)\n", err, deleted)
+			os.Exit(1)
+		}
+		fmt.Printf("reshard-copy-poc: deleted %d row(s) of %q from source\n", deleted, tbl)
 	}
-	fmt.Printf("reshard-copy-poc: deleted %d row(s) from source (split complete: %s now owns its range)\n",
-		deleted, targetShard)
+	fmt.Printf("reshard-copy-poc: split complete — %s now owns its range across %d table(s)\n", targetShard, len(tables))
+}
+
+// csv 는 콤마 구분 문자열을 trim 해 분리한다(빈 값 제거).
+func csv(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

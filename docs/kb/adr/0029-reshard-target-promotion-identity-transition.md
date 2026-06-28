@@ -84,6 +84,18 @@ requeue 하며 target StatefulSet/template/live Pod 에 `shard-id` 를 붙이지
 이 게이트는 source/target 이 같은 운영 identity 로 동시에 관측되는 #220-class 중간 상태를 줄이는 1차 fence 다.
 아직 target Pod readiness gate, source PDB/PVC/Service 삭제 정책, live chaos 검증은 별도 잔여 범위다.
 
+### P-B.4 Promote target readiness gate (2026-06-29)
+
+`Promote` phase 는 target shard identity adopt 전에 target Pod readiness 도 확인한다. target shard 는
+`postgres.keiailab.io/reshard-target=<id>` selector 로 조회되는 Pod 를 최소 1개 가져야 하며, 그중 하나 이상이
+`phase=Running` 이고 `PodReady=True` 여야 한다.
+
+target 이 active ShardRange 에 들어왔더라도 Pod 가 아직 Ready 가 아니면 `Promote` phase 를 유지한 채 requeue 하고
+target StatefulSet/template/live Pod 에 `shard-id` 를 붙이지 않는다. 이로써 routing flip 직후 target Pod 가
+부팅 중인 동안 status/failover 관측 identity 를 너무 일찍 전환하지 않는다.
+
+source PDB/PVC/Service 삭제 정책과 live chaos 검증은 여전히 별도 잔여 범위다.
+
 이번 hardening batch 에서 selector 사용처를 다음처럼 분리했다.
 
 - **그대로 둔 것**: `ShardStatefulSetName`, `ShardServiceName`, PDB/TLS/PVC resize, source shard DNS,

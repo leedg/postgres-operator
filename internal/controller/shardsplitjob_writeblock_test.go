@@ -50,6 +50,13 @@ var _ = Describe("ShardSplitJob Cutover write-block", func() {
 			{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded"},
 		}
 	}
+	markPodReady := func(pod *corev1.Pod) {
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), pod)).To(Succeed())
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: pgContainerName, Ready: true, Image: "postgres:18", ImageID: "postgres:18"}}
+		Expect(k8sClient.Status().Update(ctx, pod)).To(Succeed())
+	}
 
 	It("Cutover 가 write-block 을 켜고 RoutingUpdate 가 ranges flip 과 함께 끈다", func() {
 		clusterName := fmt.Sprintf("rsdwb-%d", GinkgoRandomSeed())
@@ -144,6 +151,7 @@ var _ = Describe("ShardSplitJob Cutover write-block", func() {
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: pgContainerName, Image: "postgres:18"}}},
 		}
 		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+		markPodReady(pod)
 
 		ssj := &postgresv1alpha1.ShardSplitJob{
 			ObjectMeta: metav1.ObjectMeta{Name: clusterName + "-ssj", Namespace: ns},
@@ -253,6 +261,74 @@ var _ = Describe("ShardSplitJob Cutover write-block", func() {
 		var gotPod corev1.Pod
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), &gotPod)).To(Succeed())
 		Expect(gotPod.Labels).NotTo(HaveKey(ShardIDLabelKey))
+	})
+
+	It("Promote phase 가 target Pod not Ready 중에는 target adopt 를 보류한다", func() {
+		clusterName := fmt.Sprintf("rsdpromready-%d", GinkgoRandomSeed())
+		keyspace := "default"
+		targetShard := "t1"
+		Expect(k8sClient.Create(ctx, &postgresv1alpha1.ShardRange{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName + "-sr", Namespace: ns},
+			Spec: postgresv1alpha1.ShardRangeSpec{
+				Cluster:  clusterName,
+				Keyspace: keyspace,
+				Vindex:   postgresv1alpha1.VindexSpec{Type: postgresv1alpha1.VindexTypeHash, Column: "id", Function: "murmur3"},
+				Ranges:   []postgresv1alpha1.ShardRangeEntry{{Lo: "0x00000000", Hi: "0xffffffff", Shard: targetShard}},
+			},
+		})).To(Succeed())
+		cluster := &postgresv1alpha1.PostgresCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			Spec: postgresv1alpha1.PostgresClusterSpec{
+				PostgresVersion: "18",
+				Shards: postgresv1alpha1.ShardsSpec{
+					Storage: postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+				},
+			},
+		}
+		sts := buildTargetShardStatefulSet(
+			cluster, targetShard, "postgres:18", "18",
+			postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}, corev1.ResourceRequirements{},
+			TargetShardConfigMapName(clusterName, targetShard), "cfg",
+		)
+		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      TargetShardStatefulSetName(clusterName, targetShard) + "-0",
+				Namespace: ns,
+				Labels:    ReshardTargetSelectorLabels(clusterName, targetShard),
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: pgContainerName, Image: "postgres:18"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+		ssj := &postgresv1alpha1.ShardSplitJob{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName + "-ssj", Namespace: ns},
+			Spec: postgresv1alpha1.ShardSplitJobSpec{
+				Cluster:  clusterName,
+				Keyspace: keyspace,
+				Sources:  []string{"shard-0"},
+				Targets: []postgresv1alpha1.ShardSplitTarget{{
+					ShardID: targetShard,
+					Ranges:  []postgresv1alpha1.ShardRangeEntry{{Lo: "0x00000000", Hi: "0xffffffff", Shard: targetShard}},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, ssj)).To(Succeed())
+		ssj.Status.Phase = postgresv1alpha1.ShardSplitPhasePromote
+		Expect(k8sClient.Status().Update(ctx, ssj)).To(Succeed())
+
+		r := &ShardSplitJobReconciler{Client: k8sClient, Scheme: scheme.Scheme}
+		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ssj)})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).NotTo(BeZero())
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ssj), ssj)).To(Succeed())
+		Expect(ssj.Status.Phase).To(Equal(postgresv1alpha1.ShardSplitPhasePromote))
+
+		var gotSTS appsv1.StatefulSet
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sts), &gotSTS)).To(Succeed())
+		Expect(gotSTS.Labels).NotTo(HaveKey(ShardIDLabelKey))
+		Expect(gotSTS.Spec.Template.Labels).NotTo(HaveKey(ShardIDLabelKey))
 	})
 
 	It("online 모드 CDCCatchup: cdc-setup Job → write-block → cdc-finalize Job 순서", func() {

@@ -297,6 +297,35 @@ go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-
 
 Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is target readiness/fence hardening beyond ShardRange topology, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
+## Batch 2.11: Promote Target Readiness Gate
+
+**Files:**
+- Modify: `internal/controller/shardsplitjob_controller.go`
+- Modify: `internal/controller/shardsplitjob_writeblock_test.go`
+
+- [x] Require a Ready target Pod before target identity adopt.
+  - The target shard must have at least one Pod selected by `postgres.keiailab.io/reshard-target=<id>`.
+  - At least one selected Pod must be `phase=Running` and `PodReady=True`.
+
+- [x] Requeue without label mutation while target is not Ready.
+  - `status.phase` remains `Promote`.
+  - Target StatefulSet/template/live Pod labels remain unchanged.
+
+- [x] Cover Ready and not-Ready paths with envtest.
+  - Ready target: Reconcile adopts target identity and completes.
+  - Not Ready target: Reconcile requeues and does not patch target labels.
+
+**Checkpoint Verification:**
+
+```powershell
+go test -count=1 ./internal/controller --ginkgo.focus="not Ready"
+go test -count=1 ./internal/controller --ginkgo.focus="Promote phase"
+go test -count=1 ./internal/controller
+go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
+```
+
+Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+
 ## Batch 3: Native Router Concurrent-Write E2E Design
 
 **Files:**

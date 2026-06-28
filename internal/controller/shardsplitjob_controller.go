@@ -301,6 +301,13 @@ func (r *ShardSplitJobReconciler) promotePreconditionsMet(ctx context.Context, s
 		if _, ok := active[shardID]; !ok {
 			return false, fmt.Sprintf("target shard %q is not active in ShardRange", shardID), nil
 		}
+		ready, reason, err := r.targetShardReadyForPromote(ctx, ssj.Namespace, ssj.Spec.Cluster, shardID)
+		if err != nil {
+			return false, "", err
+		}
+		if !ready {
+			return false, reason, nil
+		}
 	}
 	return true, "", nil
 }
@@ -330,6 +337,37 @@ func (r *ShardSplitJobReconciler) activeShardRangeIDs(ctx context.Context, ssj *
 		return nil, fmt.Errorf("no ShardRange for cluster=%s keyspace=%s", ssj.Spec.Cluster, ssj.Spec.Keyspace)
 	}
 	return active, nil
+}
+
+func (r *ShardSplitJobReconciler) targetShardReadyForPromote(ctx context.Context, namespace, cluster, shardID string) (bool, string, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels(ReshardTargetSelectorLabels(cluster, shardID)),
+	); err != nil {
+		return false, "", fmt.Errorf("list target pods for promote precondition: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return false, fmt.Sprintf("target shard %q has no pods", shardID), nil
+	}
+	for i := range pods.Items {
+		if podReadyForPromote(&pods.Items[i]) {
+			return true, "", nil
+		}
+	}
+	return false, fmt.Sprintf("target shard %q has no Ready pods", shardID), nil
+}
+
+func podReadyForPromote(pod *corev1.Pod) bool {
+	if pod == nil || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == corev1.PodReady {
+			return pod.Status.Conditions[i].Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (r *ShardSplitJobReconciler) adoptTargetShardIdentity(ctx context.Context, namespace, cluster, shardID string) error {

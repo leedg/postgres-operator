@@ -242,6 +242,72 @@ SSOT는 [ROUTER-GAP-ANALYSIS §4 능력 사다리 + §6 백로그](sharding/ROUT
 
 > 제약 현황(query-mode 라이브): ✅ simple+extended per-query(prepared 포함)·scatter·단일샤드 tx·scram 백엔드·reference·read-replica. ❌ extended scatter·cross-shard 2PC·Flush 파이프라이닝.
 
+### 6.7 2026-06-28 세션 요약 + 코드 리뷰 + 다음 진입점
+
+**이 세션에서 한 일(커밋 다수, 미푸시 — 브랜치 `chore/ha-pitr-e2e-consolidation`)**: distributed
+SQL 라우터 종단 + 온라인 resharding 을 코드+테스트+(상당수)라이브 e2e 로 완성.
+
+- **라우터 종단(per-query)**: simple + extended/prepared per-query 라우팅(연결 고정 해소,
+  `persession.go`/`extsession.go`, 샤드별 prepare-on-first-use), scatter, reference table,
+  read-replica 결선. bufio 읽기버퍼+단일write 최적화. 라이브 검증 다수.
+- **온라인 resharding (ShardSplitJob 7-phase 실 결선)**: Bootstrap(target STS) → InitialCopy
+  (offline: hash-range copy Job) / CDCCatchup(online: 논리복제 subscription) → Cutover
+  (write-block) → RoutingUpdate(ShardRange flip+unblock) → Cleanup(source 삭제 Job). 데이터+
+  스키마+인덱스/PK+CHECK/FK 제약 복제. K8s Job 실행 모델(내부 trust 접속). **offline·online
+  full e2e 둘 다 kind 실 K8s+PG 성공**(t0=44/t1=56/source=0 키유실0). CDC 메커니즘은 `TestCDCLive`
+  로 라이브 쓰기 유실0 증명.
+- **성능**: `cmd/router-bench`(prepared/멀티라우터/모드). baseline §3.0b~f. 단일 호스트는 자원
+  공유로 수평 스케일 미관측(물리 한계 확정) — 진짜 수치는 멀티머신 필요.
+- **target 승격**: 정체성-임계라 **ADR-0029 설계** 후 **P-A(shard-id label 토대, additive)** 만
+  구현. P-A.2/P-B/P-C 는 미착수.
+
+**코드 리뷰 발견(테스트 미실행, 정독)**:
+- ✅ **수정함**: `CreatePublication` DROP+CREATE → 멱등(skip-if-exists). 재시도 시 활성 sub
+  의존 pub drop 방지(커밋 `0e6f043`).
+- ⚠️ **운영 영향**: `wal_level=replica→logical`(builders.go) 는 *기존 클러스터에 operator 업그레이드
+  시 1회 rolling restart* 유발(config-hash 변경). HA(replicas>0)가 가려주나 단일샤드(replicas=0)
+  는 짧은 중단. CHANGELOG/릴리스노트 명시 필요.
+- ⚠️ **미검증 경로**: online CDC 에서 *동시 쓰기* 중 PK-없는 target(PK 는 cdc-finalize 에서 추가)
+  로의 UPDATE/DELETE 논리복제 — seq-scan 으로 동작하나 미검증(online e2e 는 정적 데이터, TestCDCLive
+  는 target 에 PK 선존재). native 라우터 동시쓰기 e2e 필요(아래 #2).
+- ⚠️ **abort 누수**: online resharding 이 cdc-setup 후 실패하면 source 의 pub/sub/replication-slot
+  이 누수(slot 이 WAL 보존 → 디스크 bloat). abort 핸들러(sub/pub drop) 후속 필요.
+- ⚠️ **FK best-effort**: cross-shard FK 는 의도적으로 skip(추가 실패 무시) — FK 강제 기대 사용자에
+  주의. 코드 주석에 명시.
+- ✅ **안전 확인**: shard-id label 은 셀렉터 미포함(additive)이라 업그레이드 race 없음. bufConn 은
+  auth 후 wrapping(over-read 없음)+쓰기 직행(deadlock 없음). write-block 에러 경로는 ReadyForQuery
+  동반(hang 버그 수정됨). 전 식별자 화이트리스트(SQL injection 안전). offline 경로는 mode 일반화
+  후 envtest 로 커버(job 이름/env 불변).
+
+**다음 작업 진입점(우선순위)**:
+1. **ADR-0029 P-A.2 → P-B (target 승격)**: `aggregate_status.go`/`metrics`/`failover` 의 shard
+   선택을 `shard-id` 인지로 일반화(단 업그레이드 중 OR-select 위해 in-code 필터 — 셀렉터만으론 구
+   pod 누락). 그 후 ShardSplitJob 에 Promote phase(fence→adopt(reshard-target→shard-id)→status
+   편입→source decommission, 멱등·single-authority). **#220-class 정체성 위험 — 라이브 chaos drill
+   (승격 중 pod kill) 의무.** 설계는 `docs/kb/adr/0029-*.md`.
+2. **native 라우터 동시쓰기 무중단 e2e**: shardingMode=native(라우터 배포)에서 클라 쓰기를 라우터
+   경유로 받아 write-block 이 실제 쓰기를 막는 무중단 cutover 실증 + 위 PK-없는-target 동시쓰기 경로
+   검증.
+3. **abort 누수 정리**: online 실패/abort 시 pub/sub/slot drop.
+4. 멀티머신 수평 스케일 실측(하드웨어), 보류 #5/#7/#9(라이브 failover).
+
+**라이브 e2e 재현 요약(kind, 다른 머신)**:
+```bash
+# 1) kind + 이미지
+kind create cluster --name pgop-dev
+docker build -t pgop:dev . ; docker build -t reshard-copy:dev -f Dockerfile.reshard .
+kind load docker-image pgop:dev reshard-copy:dev --name pgop-dev
+# 2) operator 배포 + 이미지/env
+kubectl apply -k config/default --server-side
+kubectl -n postgres-operator-system set image deploy/postgres-operator-controller-manager manager=pgop:dev
+kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-manager RESHARD_COPY_IMAGE=reshard-copy:dev
+# 3) 단일샤드 cluster + 데이터 → ShardRange + ShardSplitJob(online:true) 적용 후 phase watch
+#    (정적 데이터면 offline/online 모두 t0/t1 분할 + source=0 검증)
+# CDC 메커니즘 단위: 2 PG `postgres:18 -c wal_level=logical` + RESHARD_LIVE_SOURCE/TARGET/CONNINFO
+#    env + go test ./internal/router/ -run TestCDCLive
+# 통합(envtest): make test-integration (또는 setup-envtest + KUBEBUILDER_ASSETS 절대경로)
+```
+
 ---
 
 ## 7. 용어집

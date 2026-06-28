@@ -59,6 +59,28 @@ func TestCopyShardRange_RejectsInjection(t *testing.T) {
 	}
 }
 
+// TestCDC_RejectsInjection 은 publication/subscription/slot/테이블 이름이 화이트리스트로
+// (DB 접속 전) 차단됨을 검증한다.
+func TestCDC_RejectsInjection(t *testing.T) {
+	ctx := context.Background()
+	bad := "p; DROP TABLE u"
+	if err := CreatePublication(ctx, "", bad, nil); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("CreatePublication(%q) err = %v, want ErrInvalidTable", bad, err)
+	}
+	if err := CreateSubscription(ctx, "", "host=x", bad, "pub", true); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("CreateSubscription bad sub err = %v, want ErrInvalidTable", err)
+	}
+	if _, err := SubscriptionLagBytes(ctx, "", bad); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("SubscriptionLagBytes(%q) err = %v, want ErrInvalidTable", bad, err)
+	}
+	if err := DropSubscription(ctx, "", bad); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("DropSubscription err = %v, want ErrInvalidTable", err)
+	}
+	if _, err := DeleteForeignRange(ctx, "", bad, specWithCol("id"), "shard-0"); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("DeleteForeignRange bad table err = %v, want ErrInvalidTable", err)
+	}
+}
+
 func TestKeyString(t *testing.T) {
 	cases := []struct {
 		in   any

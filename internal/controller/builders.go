@@ -323,8 +323,10 @@ func renderPostgresConf(
 	sb.WriteString("port = 5432\n")
 	// Unix socket 위치 — instance manager 의 LocalDSN 이 본 경로에 의존.
 	fmt.Fprintf(&sb, "unix_socket_directories = '%s'\n", pgRunDir)
-	// WAL + replication 기본값 — replicas>0 일 때 streaming replication 전제.
-	sb.WriteString("wal_level = replica\n")
+	// WAL + replication 기본값. logical: 물리 streaming replication(HA)의 상위집합이라
+	// replicas HA 와 호환되며, online resharding 의 CDC 증분 catch-up(논리복제 subscription)
+	// 을 가능케 한다. 약간의 WAL 증가가 있으나 분산 SQL(resharding) 제품엔 필수.
+	sb.WriteString("wal_level = logical\n")
 	// pg_rewind 전제. data checksums 없는 기존 스토리지에서도 failover 후
 	// former primary 를 current primary timeline 으로 되감을 수 있게 한다.
 	sb.WriteString("wal_log_hints = on\n")

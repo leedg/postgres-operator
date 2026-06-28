@@ -225,7 +225,8 @@ SSOT는 [ROUTER-GAP-ANALYSIS §4 능력 사다리 + §6 백로그](sharding/ROUT
 | ~~·~~ ✅ | ~~reference table·read-replica 프록시 결선~~ | **완료(2026-06-28)** — main.go read resolver(env replica/status ResolveRead)+PGROUTER_REFERENCE_TABLES. 라이브: read→replica, ref→AnyShard, write→primary. |
 | ~~·~~ ✅ | ~~resharding 실데이터 이동(core)~~ | **완료(2026-06-28)** — `CopyShardRange`(hash-range 필터 copy)+`DeleteShardRange`(cutover). 라이브: 1..100 split→44/56 overlap=0 키유실0. |
 | ~~·~~ ✅ | ~~bufio 라우터 최적화~~ | **완료(2026-06-28)** — writeMessage 단일 write + 연결당 읽기 버퍼(bufConn). baseline §3.0e: unprepared +50%(8955→13391), prepared 1shard +34%. |
-| **1** | **ShardSplitJob 컨트롤러 K8s 결선** | reconcile 가 pod DSN 으로 CopyShardRange/DeleteShardRange 를 phase 별 호출 + write-block(토폴로지 flip)까지. 데이터이동 core 는 완성 — 자격/DSN 이 operator secret 모델과 얽혀 풀 클러스터 e2e 필요(큰 작업) |
+| ~~·~~ ✅ | ~~ShardSplitJob InitialCopy K8s 결선~~ | **완료(2026-06-28)** — InitialCopy 가 target 별 K8s Job(reshard-copy 이미지, 내부 trust 접속)으로 데이터 복사 + 완료 게이트. `shardsplitjob_copy.go`, envtest 검증(Job env·완료집계·실패보고). pg_hba 가 내부 postgres trust라 자격 불요. |
+| **1** | **ShardSplitJob full e2e + Cutover/Cleanup** | 멀티샤드 클러스터에서 ShardSplitJob 전체 phase 라이브 e2e + Cutover write-block(라우팅 freeze) + Cleanup row-delete Job(DeleteShardRange) + CDC 증분 catch-up. InitialCopy core 는 완성 |
 | **3** | **멀티머신 수평 스케일 실측** | 진짜 "분산처리능력" 수치 — 물리 분리 노드 필요(router-bench 가 샤드별 DSN 받음, 그대로 적용) |
 | **4** | **멀티 라우터 인스턴스 수평확장** | 라우터 1-hop 왕복이 남은 오버헤드(prepared direct 86K vs router 23K) — 라우터를 여러 개 띄워 처리량 확장 |
 | **6** | 보류 #5/#7/#9 | per-shard primary Service·watch·failover lease P2-T3 — 라이브 failover 필요 |

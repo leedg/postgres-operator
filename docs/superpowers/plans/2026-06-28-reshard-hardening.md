@@ -204,7 +204,7 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. This closes the source-observation part of P-C, but target replica scale-up/HA, explicit ShardSplitJob Promote phase, and named shard spec-model migration remain open.
+Status as of 2026-06-29 before Batch 2.8: all checkpoint commands pass on Windows Go 1.26.4. This closes the source-observation part of P-C, but target replica scale-up/HA, explicit ShardSplitJob Promote phase, and named shard spec-model migration remain open.
 
 ## Batch 2.8: Active Named Target HA Scale-Up
 
@@ -267,7 +267,7 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. This closes the first Promote/adopt slice only. Remaining promotion work is precondition/fence hardening, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+Status as of 2026-06-29 before Batch 2.10: all checkpoint commands pass on Windows Go 1.26.4. This closes the first Promote/adopt slice only. Remaining promotion work is precondition/fence hardening, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
 ## Batch 2.10: Promote Source-Active Precondition Gate
 
@@ -295,7 +295,7 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is target readiness/fence hardening beyond ShardRange topology, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+Status as of 2026-06-29 before Batch 2.11: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is target readiness/fence hardening beyond ShardRange topology, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
 ## Batch 2.11: Promote Target Readiness Gate
 
@@ -324,7 +324,7 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+Status as of 2026-06-29 before Batch 2.12: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
 ## Batch 2.12: Source Resource Retention Policy
 
@@ -351,7 +351,35 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is named shard spec-model migration and live chaos/e2e validation. Destructive source deletion remains a future opt-in design, not a default GA behavior.
+Status as of 2026-06-29 before Batch 2.13: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is named shard spec-model migration and live chaos/e2e validation. Destructive source deletion remains a future opt-in design, not a default GA behavior.
+
+## Batch 2.13: Named Shard Topology Model Decision
+
+**Files:**
+- Modify: `docs/WORK_HANDOFF.ko.md`
+- Modify: `docs/kb/adr/0029-reshard-target-promotion-identity-transition.md`
+- Modify: `docs/superpowers/plans/2026-06-28-reshard-hardening.md`
+
+- [x] Keep `ShardRange` as the active topology SSOT.
+  - `PostgresCluster.spec.shards.initialCount` remains the bootstrap ordinal seed count.
+  - Once a native cluster has a ShardRange, active shard identity comes from `ShardRange.spec.ranges[].shard`.
+  - Named target resources/status/HA are reconciled from that active ShardRange topology.
+
+- [x] Do not add `spec.shards.named[]` in this line.
+  - A second named-list field would duplicate `ShardRange` and create drift risk.
+  - Future arbitrary topology APIs must be designed as ShardRange evolution or generated views, not as a competing source of truth.
+
+**Checkpoint Verification:**
+
+No new code is required for this decision. The behavior is already covered by:
+
+```powershell
+go test -count=1 ./internal/controller --ginkgo.focus="adds active named reshard targets"
+go test -count=1 ./internal/controller
+go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./api/v1alpha1 ./internal/controller
+```
+
+Status as of 2026-06-29: all existing checkpoint commands pass on Windows Go 1.26.4. Remaining work that cannot be closed in resource-saving mode is live chaos/e2e validation.
 
 ## Batch 3: Native Router Concurrent-Write E2E Design
 

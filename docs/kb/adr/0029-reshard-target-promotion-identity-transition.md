@@ -106,6 +106,16 @@ StatefulSet replicas 를 0 으로 낮추고 status 관측에서 제외하지만,
 향후 source 삭제가 필요하면 별도 opt-in 정책 필드, finalizer 순서, PVC retention semantics, live chaos drill 을
 포함한 별도 설계로 다룬다. 기본 GA 경로에서는 source resource 삭제가 자동으로 일어나지 않는다.
 
+### P-C.1 named topology model decision (2026-06-29)
+
+`PostgresCluster.spec.shards` 에 별도 named shard list 를 추가하지 않는다. `initialCount` 는 bootstrap 시점의
+ordinal seed count 로 유지하고, native cluster 에 `ShardRange` 가 존재하는 순간 active topology 는
+`ShardRange.spec.ranges[].shard` 의 union 을 SSOT 로 삼는다.
+
+이 결정은 active named target status/resource/HA reconcile 이 이미 ShardRange active topology 를 사용하기 때문이다.
+`spec.shards.named[]` 같은 두 번째 목록을 추가하면 ShardRange 와 drift 되는 두 개의 truth 가 생긴다. 향후 임의
+토폴로지 API 가 필요하면 ShardRange evolution 또는 ShardRange 에서 생성되는 read-only view 로 설계한다.
+
 이번 hardening batch 에서 selector 사용처를 다음처럼 분리했다.
 
 - **그대로 둔 것**: `ShardStatefulSetName`, `ShardServiceName`, PDB/TLS/PVC resize, source shard DNS,
@@ -207,12 +217,12 @@ ShardSplitJob 에 **Promote phase**(또는 Cleanup 후 별 phase)를 추가, ope
   병행 label + phase 별 증분 + 라이브 chaos 검증으로 위험 관리.
 - **fence 단계가 정합 핵심** — source 관측 제외와 target adopt 사이 race 가 있으면 #220 재현. 단일
   reconcile authority + 멱등 + 라이브 chaos drill(승격 중 pod kill) 의무.
-- spec 의 shard 모델(ordinal count → 명명 목록) 확장은 CRD 변경(마이그레이션 고려).
+- named shard 모델은 ShardRange 를 SSOT 로 유지한다. PostgresCluster 에 별도 named-list 를 추가하지 않는다.
 
 ### 검증 의무
 - envtest: Promote phase 가 target StatefulSet/template/live Pod 에 `shard-id` 를 부여하고 selector 는
   `reshard-target` 으로 유지하는지 단언.
-- 잔여 envtest: source label 제거 또는 source STS/PDB/PVC 회수 정책이 결정되면 순서·멱등 단언 추가.
+- envtest: source resource retain-by-default 정책(Service/PDB/PVC 보존)을 단언.
 - 라이브 chaos: 승격 진행 중 operator/target pod kill → 재진입 수렴 + primary 단일성 유지 확인.
 
 ## Alternatives Considered
@@ -230,7 +240,8 @@ ShardSplitJob 에 **Promote phase**(또는 Cleanup 후 별 phase)를 추가, ope
    `shard` label 하위호환 병행). envtest 회귀(기존 ordinal cluster 무영향).
 2. **P-B**: ShardSplitJob Promote phase — fence + adopt + status 편입 + source decommission. P-B.2 target
    adopt slice 는 구현됨. source decommission 과 live chaos 는 잔여.
-3. **P-C**: spec shard 모델 확장(명명 목록) + 마이그레이션. 라이브 chaos drill.
+3. **P-C**: named topology 는 ShardRange SSOT 로 결정. PostgresCluster named-list CRD 추가는 하지 않음.
+   남은 검증은 라이브 chaos drill.
 
 > 본 ADR 은 *설계 결정* 이며 구현은 위 P-A~P-C 로 분할한다. ADR-0027 P6 의 "신중한 ground-up
 > 설계" 요구를 충족한다(standards/principles.md §1 Think Before Coding).

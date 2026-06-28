@@ -241,6 +241,30 @@ BENCH_KEYS=10000 BENCH_DURATION=5s BENCH_WORKERS=1,2,4,8,16,32 BENCH_MODE=select
 - 남은 라우터 오버헤드(prepared direct 86K vs router 16~23K)는 프록시 1-hop 의 본질적 왕복
   지연 — 멀티 라우터 인스턴스로 수평 확장하는 영역.
 
+### 3.0f 실측 5차 — 멀티 라우터 인스턴스 (2026-06-28)
+
+라우터가 병목(§3.0e)이므로 *라우터 인스턴스*를 늘리면 단일 호스트에서도 스케일할까?
+`router-bench BENCH_ROUTERS`(워커를 라우터 인스턴스에 round-robin)로 1 vs 2 인스턴스 비교
+(prepared select, 2 샤드 + 2 라우터 + 클라이언트 모두 같은 16 vCPU 호스트).
+
+| 시나리오 | w=8 | w=16 | w=32 | w=64 |
+|---|---|---|---|---|
+| router-1inst | 10,969 | 16,709 | 21,882 | 26,355 |
+| router-2inst | 10,643 | 17,551 | 19,345 | 24,406 |
+
+**해석**:
+- **2 인스턴스 ≈ 1 인스턴스 (오히려 약간 낮음)** — 멀티샤드(§3.0d)와 동일한 단일 호스트
+  물리 한계. 라우터가 병목이지만, 라우터 프로세스를 2개로 늘려도 *같은 16코어*를 2 샤드·
+  2 라우터·클라이언트가 공유하므로 합산 CPU 가 불변 → 스케일 없음(+인스턴스 오버헤드로 미세
+  감소).
+- 라우터는 **stateless**(per-instance 토폴로지 캐시·per-connection 세션·per-instance breaker)
+  라 N replica 가 독립·정확. 오퍼레이터는 이미 `RouterSpec.Replicas`(+HPA `RouterAutoscaleSpec`)
+  로 router Deployment 를 스케일한다 — **capability 는 완비**.
+- ⇒ 멀티 라우터 수평 스케일도 **물리 분리 노드(별 CPU)에서만 수치로 드러난다**. router-bench
+  의 `BENCH_ROUTERS` 가 멀티머신 라우터 DSN 을 그대로 받으므로 그 환경에서 측정하면 된다.
+
+**재현**: `BENCH_ROUTERS="host=r1...,host=r2..." BENCH_PREPARED=1 go run ./cmd/router-bench`
+
 ### 3.1 Single-shard baseline (T-1S)
 
 | date | workload | iso | clients | TPS | P50 ms | P95 ms | P99 ms | comment |

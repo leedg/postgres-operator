@@ -62,6 +62,8 @@ func main() {
 		workers   = envInts("BENCH_WORKERS", []int{1, 2, 4, 8, 16, 32})
 		mode      = env("BENCH_MODE", "select")
 		prepared  = env("BENCH_PREPARED", "") != ""
+		// BENCH_ROUTERS: 여러 라우터 인스턴스 DSN(csv) — 멀티 라우터 수평확장 측정용.
+		routerDSNs = csvEnv("BENCH_ROUTERS", nil)
 	)
 
 	spec := benchSpec()
@@ -75,19 +77,35 @@ func main() {
 
 	scenarios := []struct {
 		name string
-		dsn  string
+		dsns []string
 		keys []int
 	}{
-		{"direct-shard0", shard0DSN, keysOnShard0},
-		{"router-1shard", routerDSN, keysOnShard0},
-		{"router-2shard", routerDSN, allKeys},
+		{"direct-shard0", []string{shard0DSN}, keysOnShard0},
+		{"router-1shard", []string{routerDSN}, keysOnShard0},
+		{"router-2shard", []string{routerDSN}, allKeys},
+	}
+	// 멀티 라우터 수평확장: 같은 워크로드를 1개 vs N개 라우터 인스턴스에 워커 round-robin
+	// 분산해 비교(라우터가 병목일 때 인스턴스를 늘려 처리량이 스케일하는지).
+	if len(routerDSNs) > 1 {
+		scenarios = append(scenarios,
+			struct {
+				name string
+				dsns []string
+				keys []int
+			}{"router-1inst", []string{routerDSNs[0]}, allKeys},
+			struct {
+				name string
+				dsns []string
+				keys []int
+			}{fmt.Sprintf("router-%dinst", len(routerDSNs)), routerDSNs, allKeys},
+		)
 	}
 
 	fmt.Printf("\n%-16s %8s %12s %12s %10s\n", "scenario", "workers", "ops", "TPS", "avg_ms")
 	fmt.Println(strings.Repeat("-", 62))
 	for _, sc := range scenarios {
 		for _, w := range workers {
-			ops, avgMs := run(sc.dsn, sc.keys, w, dur, mode, prepared)
+			ops, avgMs := run(sc.dsns, sc.keys, w, dur, mode, prepared)
 			tps := float64(ops) / dur.Seconds()
 			fmt.Printf("%-16s %8d %12d %12.0f %10.3f\n", sc.name, w, ops, tps, avgMs)
 		}
@@ -128,14 +146,28 @@ func seed(shard0DSN, shard1DSN string, spec v1alpha1.ShardRangeSpec, keys int) [
 	return onShard0
 }
 
-// run 은 db 에 w 개 워커로 dur 동안 점 쿼리를 던지고 (총 ops, 평균 지연ms)를 반환한다.
+// run 은 dsns 에 w 개 워커로 dur 동안 점 쿼리를 던지고 (총 ops, 평균 지연ms)를 반환한다.
+// dsns 가 여러 개면 워커를 round-robin 분산한다(멀티 라우터 인스턴스 수평확장 측정).
 // prepared 면 워커마다 연결을 고정하고 stmt 를 *한 번만* Parse 한 뒤 Bind/Execute 를 반복
 // 한다(키당 Parse 제거 — 라우터는 샤드별 prepare-on-first-use 로 lazy prepare).
-func run(dsn string, keys []int, w int, dur time.Duration, mode string, prepared bool) (int64, float64) {
-	db := mustOpen(dsn)
-	defer db.Close()
-	db.SetMaxOpenConns(w)
-	db.SetMaxIdleConns(w)
+func run(dsns []string, keys []int, w int, dur time.Duration, mode string, prepared bool) (int64, float64) {
+	n := len(dsns)
+	perDB := make([]int, n) // dsn 별 워커 수(MaxOpenConns 설정용).
+	for i := 0; i < w; i++ {
+		perDB[i%n]++
+	}
+	dbs := make([]*sql.DB, n)
+	for i, dsn := range dsns {
+		db := mustOpen(dsn)
+		c := perDB[i]
+		if c < 1 {
+			c = 1
+		}
+		db.SetMaxOpenConns(c)
+		db.SetMaxIdleConns(c)
+		dbs[i] = db
+		defer db.Close()
+	}
 
 	query := `SELECT val FROM kv WHERE id=$1`
 	if mode == "update" {
@@ -147,10 +179,11 @@ func run(dsn string, keys []int, w int, dur time.Duration, mode string, prepared
 	var wg sync.WaitGroup
 	for i := 0; i < w; i++ {
 		wg.Add(1)
-		go func(seed int64) {
+		go func(idx int, seed int64) {
 			defer wg.Done()
 			rng := rand.New(rand.NewSource(seed))
 			ctx := context.Background()
+			db := dbs[idx%n] // 워커를 라우터 인스턴스에 round-robin.
 
 			// 워커별 연결 고정(라우터 세션 1개). prepared 면 stmt 를 한 번만 준비.
 			conn, err := db.Conn(ctx)
@@ -178,7 +211,7 @@ func run(dsn string, keys []int, w int, dur time.Duration, mode string, prepared
 				atomic.AddInt64(&totalNs, time.Since(t0).Nanoseconds())
 				atomic.AddInt64(&ops, 1)
 			}
-		}(int64(i) + 1)
+		}(i, int64(i)+1)
 	}
 	wg.Wait()
 	avgMs := 0.0
@@ -241,6 +274,21 @@ func envInt(k string, def int) int {
 		}
 	}
 	return def
+}
+
+// csvEnv 는 콤마 구분 env 를 trim 해 분리한다(빈 값 제거). 부재 시 def.
+func csvEnv(k string, def []string) []string {
+	v := os.Getenv(k)
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envDur(k string, def time.Duration) time.Duration {

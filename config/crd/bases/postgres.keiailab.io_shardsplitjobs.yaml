@@ -280,6 +280,7 @@ spec:
                 - Cutover
                 - RoutingUpdate
                 - Cleanup
+                - Promote
                 - Completed
                 - Failed
                 - Aborted

@@ -27,8 +27,9 @@ status row 는 `name=t1`, `ordinal=-1` 로 기록된다. target Pod 선택은
 `postgres.keiailab.io/shard-id=<id>` 를 모두 허용한다.
 
 이로써 routing flip 이후 `StatusBackendResolver` 가 target shard primary endpoint 를 해석할 수 있다.
-단, 이것은 lifecycle 승격 전체가 아니다. source ordinal resource decommission, target replica scale-up/HA,
-spec shard model 의 named-list 전환, Promote phase idempotency 는 아직 P-B/P-C 잔여 범위다.
+단, 이것은 lifecycle 승격 전체가 아니다. 이 시점 기준으로 source ordinal resource decommission,
+target replica scale-up/HA, spec shard model 의 named-list 전환, Promote phase idempotency 는 P-B/P-C
+잔여 범위였다.
 
 ### P-C.1 active topology source decommission (2026-06-29)
 
@@ -40,8 +41,8 @@ active topology 로 본다. active topology 에서 빠진 ordinal shard 는 Stat
 Ready=false 로 남아 cluster 를 Provisioning/Degraded 에 묶어두는 문제를 제거한다. 조건 메시지와
 Ready event 의 shard count 도 active status row 수를 사용한다.
 
-아직 남은 범위는 target replica scale-up/HA, 명시적 ShardSplitJob Promote phase, source resource/PDB
-정리 정책, CRD spec 의 named shard model 전환이다.
+이 시점 기준 잔여 범위는 target replica scale-up/HA, 명시적 ShardSplitJob Promote phase,
+source resource/PDB 정리 정책, CRD spec 의 named shard model 전환이었다.
 
 ### P-C.2 active target HA scale-up (2026-06-29)
 
@@ -55,8 +56,23 @@ selector 와 lease 격리는 유지한다. active target 의 Service/StatefulSet
 전용 lease 를 사용한다. 즉 이 단계는 HA scale-up 이며, 아직 "target 을 ordinal shard 로 rename/adopt" 하지는
 않는다.
 
-남은 범위는 명시적 ShardSplitJob Promote phase 의 idempotency, source PDB/resource cleanup 정책,
-CRD spec 의 named shard model 전환, 그리고 live chaos/e2e 검증이다.
+이 단계 직후 남은 범위는 명시적 ShardSplitJob Promote phase 의 target adopt/idempotency,
+source PDB/resource cleanup 정책, CRD spec 의 named shard model 전환, 그리고 live chaos/e2e 검증이었다.
+
+### P-B.2 explicit Promote adopt phase (2026-06-29)
+
+ShardSplitJob state machine 에 `Promote` phase 를 추가했다. 전이는 `Cleanup -> Promote -> Completed` 이며,
+CRD status phase enum 에도 `Promote` 를 반영했다.
+
+이번 조각의 역할은 target shard 를 운영 관측 identity 에 편입하는 것이다. `Promote` 는 각 target
+StatefulSet object label, Pod template label, live target Pod label 에
+`postgres.keiailab.io/shard-id=<target>` 을 붙인다. 선택자는 계속
+`postgres.keiailab.io/reshard-target=<target>` 에 고정한다. StatefulSet selector 를 바꾸지 않기 때문에
+Kubernetes selector 불변성 문제를 피하고, `POSTGRES_RESHARD_TARGET` 기반 target 전용 lease 격리도 유지한다.
+
+이 구현은 `MergeFrom` patch 기반이라 같은 phase 가 반복 reconcile 되어도 같은 label 상태로 수렴한다. 다만
+source StatefulSet/Service/PVC/PDB 삭제, source data retention 정책, promote 중 target/source pod kill 을 포함한
+live chaos 검증은 아직 별도 잔여 범위다. 즉 P-B 전체 완료가 아니라 P-B 의 adopt/idempotency slice 완료다.
 
 이번 hardening batch 에서 selector 사용처를 다음처럼 분리했다.
 
@@ -68,9 +84,9 @@ CRD spec 의 named shard model 전환, 그리고 live chaos/e2e 검증이다.
   `postgres.keiailab.io/shard=<ord>` 또는 `postgres.keiailab.io/shard-id=shard-<ord>` 를 OR 필터링한다.
 - **metrics/failover**: 직접 pod selector 를 갖지 않고 `PostgresCluster.status.shards` 를 소비한다.
   따라서 aggregation 이 `shard-id` 를 이해하면 metrics/failover 는 status 경유로 따라온다.
-- **아직 하지 않은 것**: `shard-id=t1` 같은 named target 을 status.shards 의 새 row 로 생성하지는 않았다.
-  현재 `PostgresClusterReconciler` 는 `spec.shards.initialCount` ordinal loop 를 유지한다. named shard
-  row 생성은 P-B/P-C 의 ShardRange/spec 모델 전환 범위다.
+- **완료한 것**: active `ShardRange.spec.ranges[].shard` 에 나타난 named target 은 `status.shards` 에
+  `name=<id>`, `ordinal=-1` row 로 생성한다. target Pod 집계는 `reshard-target=<id>` 또는 adopt 후
+  `shard-id=<id>` label 을 허용한다.
 - **P-B 주의점**: target 에 `shard-id` 를 붙이기 전에 source ordinal shard 를 fence/관측 제외해야 한다.
   source 와 target 이 같은 `shard-id` 로 동시에 보이면 aggregation 은 split-brain 으로 보고 primary 2개
   상황을 노출한다. 이는 의도적인 안전 신호이며, Promote phase 는 이 중간 상태를 만들지 않아야 한다.
@@ -79,10 +95,10 @@ CRD spec 의 named shard model 전환, 그리고 live chaos/e2e 검증이다.
 
 2026-06-28 기준 online resharding 의 데이터 경로가 *전부* 결선·라이브 검증되었다 (offline + online
 무중단 CDC, 스키마/인덱스/PK/제약 복제, write-block, full e2e — `WORK_HANDOFF.ko.md §6.6`).
-ShardSplitJob 7-phase 중 Bootstrap→InitialCopy/CDCCatchup→Cutover→RoutingUpdate→Cleanup→Completed
-가 실 K8s+PG 에서 동작한다.
+당시 ShardSplitJob state machine 중 Bootstrap→InitialCopy/CDCCatchup→Cutover→RoutingUpdate→Cleanup→Completed
+가 실 K8s+PG 에서 동작했다.
 
-**그러나 ADR-0027 의 P6(승격)는 미구현이다.** 현재 resharding 완료 후 상태:
+**그러나 당시 ADR-0027 의 P6(승격)는 미구현이었다.** 당시 resharding 완료 후 상태:
 
 - target shard 는 *격리 식별* 로 존재한다: K8s 자원 `<cluster>-rsd-<shardID>` + label
   `postgres.keiailab.io/reshard-target=<shardID>` (ordinal `postgres.keiailab.io/shard` label 부재).
@@ -162,8 +178,9 @@ ShardSplitJob 에 **Promote phase**(또는 Cleanup 후 별 phase)를 추가, ope
 - spec 의 shard 모델(ordinal count → 명명 목록) 확장은 CRD 변경(마이그레이션 고려).
 
 ### 검증 의무
-- envtest: Promote phase 가 target 에 `shard-id` 부여 + source label 제거 + status.shards 재계산 +
-  source STS 회수 순서·멱등 단언.
+- envtest: Promote phase 가 target StatefulSet/template/live Pod 에 `shard-id` 를 부여하고 selector 는
+  `reshard-target` 으로 유지하는지 단언.
+- 잔여 envtest: source label 제거 또는 source STS/PDB/PVC 회수 정책이 결정되면 순서·멱등 단언 추가.
 - 라이브 chaos: 승격 진행 중 operator/target pod kill → 재진입 수렴 + primary 단일성 유지 확인.
 
 ## Alternatives Considered
@@ -179,7 +196,8 @@ ShardSplitJob 에 **Promote phase**(또는 Cleanup 후 별 phase)를 추가, ope
 
 1. **P-A**: `shard-id` 통합 label 도입 + aggregate_status/metrics/failover selector 일반화(ordinal
    `shard` label 하위호환 병행). envtest 회귀(기존 ordinal cluster 무영향).
-2. **P-B**: ShardSplitJob Promote phase — fence + adopt + status 편입 + source decommission. envtest.
+2. **P-B**: ShardSplitJob Promote phase — fence + adopt + status 편입 + source decommission. P-B.2 target
+   adopt slice 는 구현됨. source decommission 과 live chaos 는 잔여.
 3. **P-C**: spec shard 모델 확장(명명 목록) + 마이그레이션. 라이브 chaos drill.
 
 > 본 ADR 은 *설계 결정* 이며 구현은 위 P-A~P-C 로 분할한다. ADR-0027 P6 의 "신중한 ground-up

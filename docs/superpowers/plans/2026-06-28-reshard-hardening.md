@@ -234,7 +234,40 @@ go test -count=1 ./internal/controller
 go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./internal/controller
 ```
 
-Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is explicit ShardSplitJob Promote/adopt idempotency, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+Status as of 2026-06-29 before Batch 2.9: all checkpoint commands pass on Windows Go 1.26.4. Remaining promotion work is explicit ShardSplitJob Promote/adopt idempotency, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
+
+## Batch 2.9: Explicit ShardSplitJob Promote Adopt Phase
+
+**Files:**
+- Modify: `api/v1alpha1/shardsplitjob_types.go`
+- Modify: `internal/controller/shardsplitjob_controller.go`
+- Modify: `internal/controller/shardsplitjob_controller_test.go`
+- Modify: `internal/controller/shardsplitjob_writeblock_test.go`
+- Generate: `config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml`
+- Sync: `charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml`
+
+- [x] Add `Promote` to the ShardSplitJob status phase enum.
+  - The state machine now advances `Cleanup -> Promote -> Completed`.
+  - Generated CRDs expose the new status value so envtest/live API validation accepts it.
+
+- [x] Adopt target shard identity idempotently.
+  - `Promote` patches target StatefulSet object labels, Pod template labels, and live target Pods with `postgres.keiailab.io/shard-id=<target>`.
+  - Target Service/StatefulSet selectors remain on `postgres.keiailab.io/reshard-target=<target>` to avoid selector mutation and preserve lease isolation.
+
+- [x] Keep this slice non-destructive.
+  - The phase does not delete source StatefulSets, Services, PVCs, or PDBs.
+  - Source data/resource retention remains a separate policy decision.
+
+**Checkpoint Verification:**
+
+```powershell
+go test -count=1 ./api/v1alpha1 ./internal/controller -run "TestShardSplitJob|TestShardSplitJob_nextPhase"
+go test -count=1 ./internal/controller --ginkgo.focus="Promote phase"
+go test -count=1 ./internal/controller
+go test -count=1 ./cmd/instance ./internal/router ./cmd/pg-router ./cmd/reshard-copy-poc ./internal/controller
+```
+
+Status as of 2026-06-29: all checkpoint commands pass on Windows Go 1.26.4. This closes the first Promote/adopt slice only. Remaining promotion work is precondition/fence hardening, source PDB/resource cleanup policy, named shard spec-model migration, and live chaos/e2e validation.
 
 ## Batch 3: Native Router Concurrent-Write E2E Design
 

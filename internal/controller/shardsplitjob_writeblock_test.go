@@ -13,9 +13,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -103,6 +105,64 @@ var _ = Describe("ShardSplitJob Cutover write-block", func() {
 		Expect(shards).To(ConsistOf("t0", "t1"))
 		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ssj), ssj)).To(Succeed())
 		Expect(ssj.Status.Phase).To(Equal(postgresv1alpha1.ShardSplitPhaseCleanup))
+	})
+
+	It("Promote phase 가 target STS 와 live Pod 에 shard-id 를 adopt label 로 붙인다", func() {
+		clusterName := fmt.Sprintf("rsdprom-%d", GinkgoRandomSeed())
+		targetShard := "t1"
+		cluster := &postgresv1alpha1.PostgresCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			Spec: postgresv1alpha1.PostgresClusterSpec{
+				PostgresVersion: "18",
+				Shards: postgresv1alpha1.ShardsSpec{
+					Storage: postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")},
+				},
+			},
+		}
+		sts := buildTargetShardStatefulSet(
+			cluster, targetShard, "postgres:18", "18",
+			postgresv1alpha1.StorageSpec{Size: resource.MustParse("1Gi")}, corev1.ResourceRequirements{},
+			TargetShardConfigMapName(clusterName, targetShard), "cfg",
+		)
+		Expect(k8sClient.Create(ctx, sts)).To(Succeed())
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      TargetShardStatefulSetName(clusterName, targetShard) + "-0",
+				Namespace: ns,
+				Labels:    ReshardTargetSelectorLabels(clusterName, targetShard),
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: pgContainerName, Image: "postgres:18"}}},
+		}
+		Expect(k8sClient.Create(ctx, pod)).To(Succeed())
+
+		ssj := &postgresv1alpha1.ShardSplitJob{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName + "-ssj", Namespace: ns},
+			Spec: postgresv1alpha1.ShardSplitJobSpec{
+				Cluster:  clusterName,
+				Keyspace: "default",
+				Sources:  []string{"shard-0"},
+				Targets: []postgresv1alpha1.ShardSplitTarget{{
+					ShardID: targetShard,
+					Ranges:  []postgresv1alpha1.ShardRangeEntry{{Lo: "0x00000000", Hi: "0xffffffff", Shard: targetShard}},
+				}},
+			},
+			Status: postgresv1alpha1.ShardSplitJobStatus{Phase: postgresv1alpha1.ShardSplitPhasePromote},
+		}
+		r := &ShardSplitJobReconciler{Client: k8sClient, Scheme: scheme.Scheme}
+		Expect(r.reconcilePromote(ctx, ssj)).To(Succeed())
+
+		var gotSTS appsv1.StatefulSet
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sts), &gotSTS)).To(Succeed())
+		Expect(gotSTS.Labels[ReshardTargetLabelKey]).To(Equal(targetShard))
+		Expect(gotSTS.Labels[ShardIDLabelKey]).To(Equal(targetShard))
+		Expect(gotSTS.Spec.Template.Labels[ReshardTargetLabelKey]).To(Equal(targetShard))
+		Expect(gotSTS.Spec.Template.Labels[ShardIDLabelKey]).To(Equal(targetShard))
+		Expect(gotSTS.Spec.Selector.MatchLabels).NotTo(HaveKey(ShardIDLabelKey))
+
+		var gotPod corev1.Pod
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pod), &gotPod)).To(Succeed())
+		Expect(gotPod.Labels[ReshardTargetLabelKey]).To(Equal(targetShard))
+		Expect(gotPod.Labels[ShardIDLabelKey]).To(Equal(targetShard))
 	})
 
 	It("online 모드 CDCCatchup: cdc-setup Job → write-block → cdc-finalize Job 순서", func() {

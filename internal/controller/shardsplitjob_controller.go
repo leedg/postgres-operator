@@ -13,6 +13,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -47,6 +48,7 @@ type ShardSplitJobReconciler struct {
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardranges,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=configmaps;services,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 
@@ -180,6 +182,18 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		// 정리 완료 → 아래 nextPhase 가 Completed 로 전이.
 	}
 
+	if ssj.Status.Phase == postgresv1alpha1.ShardSplitPhasePromote {
+		if err := r.reconcilePromote(ctx, &ssj); err != nil {
+			ssj.Status.Phase = postgresv1alpha1.ShardSplitPhaseFailed
+			ssj.Status.FailureReason = err.Error()
+			now := metav1.Now()
+			ssj.Status.CompletedAt = &now
+			ssj.Status.ObservedGeneration = ssj.Generation
+			_ = r.Status().Update(ctx, &ssj)
+			return ctrl.Result{}, nil
+		}
+	}
+
 	next, failure := r.nextPhase(&ssj)
 	if next == ssj.Status.Phase {
 		return ctrl.Result{}, nil
@@ -247,9 +261,61 @@ func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob)
 	case postgresv1alpha1.ShardSplitPhaseRoutingUpdate:
 		return postgresv1alpha1.ShardSplitPhaseCleanup, ""
 	case postgresv1alpha1.ShardSplitPhaseCleanup:
+		return postgresv1alpha1.ShardSplitPhasePromote, ""
+	case postgresv1alpha1.ShardSplitPhasePromote:
 		return postgresv1alpha1.ShardSplitPhaseCompleted, ""
 	}
 	return ssj.Status.Phase, ""
+}
+
+func (r *ShardSplitJobReconciler) reconcilePromote(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) error {
+	for i := range ssj.Spec.Targets {
+		shardID := ssj.Spec.Targets[i].ShardID
+		if err := r.adoptTargetShardIdentity(ctx, ssj.Namespace, ssj.Spec.Cluster, shardID); err != nil {
+			return fmt.Errorf("adopt target shard %q identity: %w", shardID, err)
+		}
+	}
+	return nil
+}
+
+func (r *ShardSplitJobReconciler) adoptTargetShardIdentity(ctx context.Context, namespace, cluster, shardID string) error {
+	var sts appsv1.StatefulSet
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: TargetShardStatefulSetName(cluster, shardID)}, &sts); err != nil {
+		return err
+	}
+	stsBefore := sts.DeepCopy()
+	ensureLabel(&sts.Labels, ShardIDLabelKey, shardID)
+	ensureLabel(&sts.Spec.Template.Labels, ShardIDLabelKey, shardID)
+	if err := r.Patch(ctx, &sts, client.MergeFrom(stsBefore)); err != nil {
+		return fmt.Errorf("patch target StatefulSet %q: %w", sts.Name, err)
+	}
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels(ReshardTargetSelectorLabels(cluster, shardID)),
+	); err != nil {
+		return fmt.Errorf("list target pods: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.Labels[ShardIDLabelKey] == shardID {
+			continue
+		}
+		podBefore := pod.DeepCopy()
+		ensureLabel(&pod.Labels, ShardIDLabelKey, shardID)
+		if err := r.Patch(ctx, pod, client.MergeFrom(podBefore)); err != nil {
+			return fmt.Errorf("patch target pod %q: %w", pod.Name, err)
+		}
+	}
+	return nil
+}
+
+func ensureLabel(labels *map[string]string, key, value string) {
+	if *labels == nil {
+		*labels = map[string]string{}
+	}
+	(*labels)[key] = value
 }
 
 // flattenTargetRanges 는 모든 target shard 의 키 범위를 하나의 slice 로 모은다.

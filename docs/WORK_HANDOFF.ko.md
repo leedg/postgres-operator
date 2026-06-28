@@ -226,8 +226,10 @@ SSOT는 [ROUTER-GAP-ANALYSIS §4 능력 사다리 + §6 백로그](sharding/ROUT
 | ~~·~~ ✅ | ~~resharding 실데이터 이동(core)~~ | **완료(2026-06-28)** — `CopyShardRange`(hash-range 필터 copy)+`DeleteShardRange`(cutover). 라이브: 1..100 split→44/56 overlap=0 키유실0. |
 | ~~·~~ ✅ | ~~bufio 라우터 최적화~~ | **완료(2026-06-28)** — writeMessage 단일 write + 연결당 읽기 버퍼(bufConn). baseline §3.0e: unprepared +50%(8955→13391), prepared 1shard +34%. |
 | ~~·~~ ✅ | ~~ShardSplitJob InitialCopy/Cleanup K8s 결선~~ | **완료(2026-06-28)** — InitialCopy(복사)+Cleanup(source 이동분 삭제)이 target 별 K8s Job(reshard-copy 이미지, 내부 trust 접속)으로 데이터 이동 + 완료 게이트. `shardsplitjob_copy.go`, envtest 검증. 데이터 경로(복사→cutover→회수) 닫힘. |
-| ~~·~~ ✅ | ~~Cutover write-block~~ | **완료(2026-06-28)** — ShardRangeSpec.WriteBlocked 신호 → 라우터가 쓰기 거부(읽기 통과), Cutover 가 set·RoutingUpdate 가 clear. router 단위+envtest+라이브(UPDATE→"writes blocked" hang 없음). simple-query 에러 hang 버그(ReadyForQuery 누락)도 수정. |
-| **1** | **ShardSplitJob full e2e (멀티샤드 라이브)** | 멀티샤드 PostgresCluster 에서 ShardSplitJob 전 phase 라이브 e2e(operator 멀티샤드 배포 필요) + CDC 증분 catch-up(복사 중 변경분 논리복제). 데이터이동·결선·write-block 은 완성 |
+| ~~·~~ ✅ | ~~Cutover write-block~~ | **완료(2026-06-28)** — ShardRangeSpec.WriteBlocked 신호 → 라우터가 쓰기 거부(읽기 통과), Cutover 가 set·RoutingUpdate 가 clear. router 단위+envtest+라이브. simple-query 에러 hang 버그도 수정. |
+| ~~·~~ ✅ | ~~ShardSplitJob full e2e (라이브)~~ | **완료(2026-06-28)** 🎉 — kind 실 K8s+실 PG: 단일샤드(키 1..100)→ShardSplitJob→Bootstrap(target rsd-t0/t1 부팅)→InitialCopy(스키마+데이터 복사 Job)→Cutover(write-block)→RoutingUpdate(ShardRange flip+unblock)→Cleanup(source 삭제 Job)→Completed. **결과 t0=44/t1=56/source=0, 합=100 키유실0, ShardRange flip, write-block 해제.** e2e 가 갭 2개 발견·수정(Job 이미지명 env RESHARD_COPY_IMAGE, 스키마 우선 복제). |
+| **1** | **CDC 증분 catch-up** | InitialCopy 중 source 변경분을 논리복제로 따라잡기(복사 시작~cutover 사이 라이브 쓰기 보존 = 진짜 무중단). 현 e2e 는 정적 데이터(동시쓰기 없음)라 CDCCatchup pass-through. 운영 무중단엔 필요 |
+| **2** | **resharding 운영화 마감** | target 인덱스/PK 복제(현재 데이터만), RESHARD_COPY_IMAGE 를 operator manager env 기본 결선, target shard 영구 승격(ordinal 편입) |
 | **3** | **멀티머신 수평 스케일 실측** | 진짜 "분산처리능력" 수치 — 물리 분리 노드 필요(router-bench 가 샤드별 DSN 받음, 그대로 적용) |
 | **4** | **멀티 라우터 인스턴스 수평확장** | 라우터 1-hop 왕복이 남은 오버헤드(prepared direct 86K vs router 23K) — 라우터를 여러 개 띄워 처리량 확장 |
 | **6** | 보류 #5/#7/#9 | per-shard primary Service·watch·failover lease P2-T3 — 라이브 failover 필요 |

@@ -107,6 +107,12 @@ func CopyShardRange(ctx context.Context, sourceDSN, targetDSN, table string, spe
 	}
 	defer func() { _ = tgt.Close() }()
 
+	// target 에 테이블이 없으면 source 의 컬럼 정의로 만든다(스키마 우선 복제 — resharding 은
+	// 빈 새 shard 로 옮기므로 DDL 이 먼저 있어야 INSERT 가능).
+	if err := ensureTargetTable(ctx, src, tgt, table); err != nil {
+		return 0, 0, err
+	}
+
 	rows, err := src.QueryContext(ctx, "SELECT * FROM "+table) //nolint:gosec // table는 화이트리스트 검증됨
 	if err != nil {
 		return 0, 0, fmt.Errorf("router: source select %s: %w", table, err)
@@ -246,6 +252,28 @@ func FilterTables(all, exclude []string) []string {
 		}
 	}
 	return out
+}
+
+// ensureTargetTable 은 target 에 table 이 없으면 source 의 컬럼 정의(format_type 로 충실한
+// 타입)로 CREATE TABLE 한다. PK/인덱스/제약은 복제하지 않는다(PoC — 데이터 무결성은 copy 가
+// vindex 로 보장; 인덱스는 cutover 후 별도 생성 트랙). 이미 있으면 no-op(IF NOT EXISTS).
+func ensureTargetTable(ctx context.Context, src, tgt *sql.DB, table string) error {
+	var ddl string
+	err := src.QueryRowContext(ctx, `
+		SELECT 'CREATE TABLE IF NOT EXISTS '||quote_ident($1)||' ('||
+		       string_agg(quote_ident(a.attname)||' '||format_type(a.atttypid, a.atttypmod), ', ' ORDER BY a.attnum)||')'
+		FROM pg_attribute a
+		WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped`, table).Scan(&ddl)
+	if err != nil {
+		return fmt.Errorf("router: read source schema %s: %w", table, err)
+	}
+	if ddl == "" {
+		return fmt.Errorf("router: source table %s has no columns", table)
+	}
+	if _, err := tgt.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("router: create target table %s: %w", table, err)
+	}
+	return nil
 }
 
 // keyString 은 row 값(any)을 vindex 키 문자열로 정규화한다 — lib/pq 는 text 를 []byte 로

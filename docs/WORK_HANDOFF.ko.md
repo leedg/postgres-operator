@@ -403,6 +403,15 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\test-windows.ps1 -Preset controller -GinkgoFocus "Promote phase"
   ```
 
+  Windows Defender 가 `controller.test.exe` 같은 Go test 임시 실행 파일을 반복 검사해 병목을 만들면,
+  관리자 PowerShell 에서 다음을 한 번 실행한다. repo 전체가 아니라 wrapper 가 사용하는 repo 외부 temp/cache
+  디렉터리만 예외 처리한다:
+
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\allow-windows-test-exe.ps1
+  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\allow-windows-test-exe.ps1 -Check
+  ```
+
 ### 6.9 현재 미구현 / 부분구현 재정리 (2026-06-29)
 
 - **테스트 자원 운영 정책**: 개발 중에는 Windows wrapper 같은 저비용 smoke 만 사용하고, 기능 단위가

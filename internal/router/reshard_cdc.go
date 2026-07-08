@@ -168,6 +168,52 @@ func DropSubscription(ctx context.Context, targetDSN, subName string) error {
 	return nil
 }
 
+// ForceDropSubscription 은 source(publisher)가 불통일 때도 target 의 subscription 을
+// 제거한다 — online resharding abort 의 source-down fallback(§6.7 abort 누수 대응).
+//
+// 일반 DROP SUBSCRIPTION 은 연관된 *원격 replication slot* 을 정리하려고 publisher 에
+// 접속하므로, source 가 죽으면 실패/지연한다. 본 함수는 먼저 subscription 을 DISABLE 해
+// apply worker 를 멈추고, slot_name=NONE 으로 원격 slot 을 detach 한 뒤 DROP 한다 —
+// 이렇게 하면 DROP 이 publisher 에 접속하지 않아 source 불통 상태에서도 target 측
+// subscription 이 확실히 제거된다.
+//
+// trade-off: 원격 slot 은 source 에 orphan 으로 남아(WAL 보존 → 디스크 bloat) source
+// 복구 후 별도 정리가 필요하다. 이는 target 정리(무한 누수 차단)를 우선하는 의도된 선택
+// 이다 — 정상 경로(source 살아있음)는 DropSubscription 이 slot 까지 정리하므로 본 함수는
+// fallback 전용이다. subscription 부재 시 no-op(멱등).
+func ForceDropSubscription(ctx context.Context, targetDSN, subName string) error {
+	if !pubSubNamePattern.MatchString(subName) {
+		return fmt.Errorf("%w: subscription %q", ErrInvalidTable, subName)
+	}
+	db, err := sql.Open("postgres", targetDSN)
+	if err != nil {
+		return fmt.Errorf("router: open target: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var exists int
+	err = db.QueryRowContext(ctx, "SELECT 1 FROM pg_subscription WHERE subname = $1", subName).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return nil // 이미 없음 — 멱등.
+	}
+	if err != nil {
+		return fmt.Errorf("router: check subscription: %w", err)
+	}
+
+	// DISABLE → apply worker 정지(원격 접속 중단). 실패해도 이후 단계 진행(best-effort).
+	if _, err := db.ExecContext(ctx, "ALTER SUBSCRIPTION "+subName+" DISABLE"); err != nil { //nolint:gosec // 화이트리스트
+		return fmt.Errorf("router: disable subscription: %w", err)
+	}
+	// slot_name=NONE → DROP 이 원격 slot 을 건드리지 않도록 detach(source 불통 핵심).
+	if _, err := db.ExecContext(ctx, "ALTER SUBSCRIPTION "+subName+" SET (slot_name = NONE)"); err != nil { //nolint:gosec // 화이트리스트
+		return fmt.Errorf("router: detach subscription slot: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "DROP SUBSCRIPTION IF EXISTS "+subName); err != nil { //nolint:gosec // 화이트리스트
+		return fmt.Errorf("router: drop subscription (forced): %w", err)
+	}
+	return nil
+}
+
 // DropPublication 은 source 의 publication 을 제거한다.
 func DropPublication(ctx context.Context, sourceDSN, pubName string) error {
 	if !pubSubNamePattern.MatchString(pubName) {

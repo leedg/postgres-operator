@@ -252,9 +252,19 @@ func runCDC(ctx context.Context, mode, src, tgt, targetShard string) {
 		fmt.Printf("reshard-copy-poc: cdc-finalize 완료 — 범위 밖 %d row 삭제, %s 자기 범위만 보유\n", total, targetShard)
 	case "cdc-abort":
 		fmt.Printf("reshard-copy-poc: cdc-abort target=%s\n", targetShard)
-		must(router.DropSubscription(ctx, tgt, sub), "drop subscription")
-		must(router.DropPublication(ctx, src, pub), "drop publication")
-		fmt.Printf("reshard-copy-poc: cdc-abort 완료 — subscription %s / publication %s 정리\n", sub, pub)
+		// 1) 정상 drop 시도(원격 slot 까지 정리). source 불통 등으로 실패하면 force
+		//    fallback 으로 target subscription 을 확실히 제거한다(§6.7 abort 누수 차단 —
+		//    source-down 에도 AbortCleanup 이 완료되도록).
+		if err := router.DropSubscription(ctx, tgt, sub); err != nil {
+			fmt.Printf("reshard-copy-poc: cdc-abort 정상 drop 실패(%v) → force fallback(slot detach)\n", err)
+			must(router.ForceDropSubscription(ctx, tgt, sub), "force drop subscription")
+		}
+		// 2) publication drop 은 best-effort — source 불통이면 어차피 불가하고, orphan
+		//    slot 은 source 복구 후 정리한다(target 정리 우선).
+		if err := router.DropPublication(ctx, src, pub); err != nil {
+			fmt.Printf("reshard-copy-poc: cdc-abort publication drop best-effort 실패(%v) — source 불통 가정, orphan slot 는 source 복구 후 정리\n", err)
+		}
+		fmt.Printf("reshard-copy-poc: cdc-abort 완료 — subscription %s 정리(fallback 포함)\n", sub)
 	}
 }
 

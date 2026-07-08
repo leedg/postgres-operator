@@ -75,6 +75,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("pg-router: listen %s: %v", addr, err)
 	}
+	// active-connection 게이지를 노출하는 /metrics 서버(HPA ScaleOnActiveConnections
+	// 의 custom-metrics 소스). PGROUTER_METRICS_ADDR="" 이면 비활성.
+	go serveMetrics(env("PGROUTER_METRICS_ADDR", ":9187"))
 	log.Printf("pg-router PoC listening on %s (mode=%s topology=%s backend=%s)",
 		addr, mode, env("PGROUTER_TOPOLOGY", "static"), env("PGROUTER_BACKEND", "env"))
 	for {
@@ -83,10 +86,11 @@ func main() {
 			log.Printf("pg-router: accept: %v", err)
 			continue
 		}
+		// trackConn 이 active-connection 게이지를 연결 수명 동안 유지한다.
 		if mode == "query" {
-			go handleQueryMode(conn, qr, dialer, serverVersion, backendPassword)
+			go trackConn(func() { handleQueryMode(conn, qr, dialer, serverVersion, backendPassword) })
 		} else {
-			go handleConn(conn, provider, resolve, dialer)
+			go trackConn(func() { handleConn(conn, provider, resolve, dialer) })
 		}
 	}
 }

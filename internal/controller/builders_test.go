@@ -781,6 +781,71 @@ func TestBuildRouterHPA_ExplicitMinAndCPU(t *testing.T) {
 	}
 }
 
+func TestBuildRouterHPA_ActiveConnectionsPodsMetric(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Router: &postgresv1alpha1.RouterSpec{
+				Replicas: 2,
+				Autoscale: &postgresv1alpha1.RouterAutoscaleSpec{
+					Enabled:                  true,
+					MaxReplicas:              8,
+					ScaleOnActiveConnections: true,
+					TargetActiveConnections:  500,
+				},
+			},
+		},
+	}
+
+	hpa := buildRouterHPA(cluster, RouterDeploymentName("orders"))
+
+	// CPU + Pods 두 메트릭 (opt-in 시 CPU 는 유지, active-connection 추가).
+	if len(hpa.Spec.Metrics) != 2 {
+		t.Fatalf("metrics len = %d, want 2 (cpu + pods)", len(hpa.Spec.Metrics))
+	}
+	if hpa.Spec.Metrics[0].Type != autoscalingv2.ResourceMetricSourceType {
+		t.Fatalf("metric[0] type = %q, want Resource(cpu)", hpa.Spec.Metrics[0].Type)
+	}
+	pods := hpa.Spec.Metrics[1]
+	if pods.Type != autoscalingv2.PodsMetricSourceType || pods.Pods == nil {
+		t.Fatalf("metric[1] = %+v, want Pods", pods)
+	}
+	if pods.Pods.Metric.Name != postgresv1alpha1.RouterActiveConnectionsMetric {
+		t.Fatalf("pods metric name = %q, want %q", pods.Pods.Metric.Name, postgresv1alpha1.RouterActiveConnectionsMetric)
+	}
+	if pods.Pods.Target.Type != autoscalingv2.AverageValueMetricType || pods.Pods.Target.AverageValue == nil {
+		t.Fatalf("pods target = %+v, want AverageValue", pods.Pods.Target)
+	}
+	if pods.Pods.Target.AverageValue.Value() != 500 {
+		t.Fatalf("pods target value = %d, want 500", pods.Pods.Target.AverageValue.Value())
+	}
+}
+
+func TestBuildRouterHPA_ActiveConnectionsDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	// ScaleOnActiveConnections 미설정(기본 false) → CPU-only(비파괴).
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Router: &postgresv1alpha1.RouterSpec{
+				Replicas: 2,
+				Autoscale: &postgresv1alpha1.RouterAutoscaleSpec{
+					Enabled:                 true,
+					MaxReplicas:             8,
+					TargetActiveConnections: 1000, // 값은 있어도 opt-in 아니면 무시.
+				},
+			},
+		},
+	}
+	hpa := buildRouterHPA(cluster, RouterDeploymentName("orders"))
+	if len(hpa.Spec.Metrics) != 1 {
+		t.Fatalf("metrics len = %d, want 1 (cpu-only when not opted in)", len(hpa.Spec.Metrics))
+	}
+}
+
 func TestBuildRouterDeployment_LabelsAutoscaleManagedReplicas(t *testing.T) {
 	t.Parallel()
 
@@ -811,6 +876,43 @@ func TestBuildRouterDeployment_LabelsAutoscaleManagedReplicas(t *testing.T) {
 	}
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Fatalf("initial replicas = %v, want minReplicas 3", dep.Spec.Replicas)
+	}
+}
+
+func TestBuildRouterDeployment_MetricsPortAndScrapeAnnotations(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec:       postgresv1alpha1.PostgresClusterSpec{Router: &postgresv1alpha1.RouterSpec{Replicas: 2}},
+	}
+	dep := buildRouterDeployment(cluster, "orders-router", "orders-router-config", "example.com/router:dev", 2, corev1.ResourceRequirements{})
+
+	// metrics 컨테이너 포트 존재.
+	var metricsPort *corev1.ContainerPort
+	for i := range dep.Spec.Template.Spec.Containers[0].Ports {
+		p := &dep.Spec.Template.Spec.Containers[0].Ports[i]
+		if p.Name == "metrics" {
+			metricsPort = p
+		}
+	}
+	if metricsPort == nil {
+		t.Fatalf("router container missing 'metrics' port")
+	}
+	if metricsPort.ContainerPort != routerMetricsPort {
+		t.Fatalf("metrics port = %d, want %d", metricsPort.ContainerPort, routerMetricsPort)
+	}
+
+	// Prometheus scrape annotations.
+	ann := dep.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" {
+		t.Fatalf("prometheus.io/scrape = %q, want true", ann["prometheus.io/scrape"])
+	}
+	if ann["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("prometheus.io/path = %q, want /metrics", ann["prometheus.io/path"])
+	}
+	if ann["prometheus.io/port"] != "9187" {
+		t.Fatalf("prometheus.io/port = %q, want 9187", ann["prometheus.io/port"])
 	}
 }
 

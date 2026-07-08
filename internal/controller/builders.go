@@ -11,6 +11,7 @@ import (
 	"maps"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +53,10 @@ const (
 
 	// pgPort는 PostgreSQL의 표준 포트다.
 	pgPort int32 = 5432
+
+	// routerMetricsPort 는 pg-router 가 /metrics(Prometheus 텍스트, active-connection
+	// 게이지)를 노출하는 HTTP 포트다. pg-router 의 PGROUTER_METRICS_ADDR 기본값과 정합.
+	routerMetricsPort int32 = 9187
 
 	// instanceProbePort 는 instance manager 의 healthz/readyz HTTP 포트.
 	instanceProbePort int32 = 8080
@@ -1302,9 +1307,50 @@ func routerTargetCPU(cluster *postgresv1alpha1.PostgresCluster) int32 {
 	return 70
 }
 
+func routerScaleOnActiveConnections(cluster *postgresv1alpha1.PostgresCluster) bool {
+	return cluster != nil && cluster.Spec.Router != nil && cluster.Spec.Router.Autoscale != nil &&
+		cluster.Spec.Router.Autoscale.ScaleOnActiveConnections
+}
+
+func routerTargetActiveConnections(cluster *postgresv1alpha1.PostgresCluster) int32 {
+	if cluster != nil && cluster.Spec.Router != nil && cluster.Spec.Router.Autoscale != nil &&
+		cluster.Spec.Router.Autoscale.TargetActiveConnections > 0 {
+		return cluster.Spec.Router.Autoscale.TargetActiveConnections
+	}
+	return 1000
+}
+
 func buildRouterHPA(cluster *postgresv1alpha1.PostgresCluster, deploymentName string) *autoscalingv2.HorizontalPodAutoscaler {
 	minReplicas := routerMinReplicas(cluster)
 	targetCPU := routerTargetCPU(cluster)
+	metrics := []autoscalingv2.MetricSpec{{
+		Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{
+			Name: corev1.ResourceCPU,
+			Target: autoscalingv2.MetricTarget{
+				Type:               autoscalingv2.UtilizationMetricType,
+				AverageUtilization: &targetCPU,
+			},
+		},
+	}}
+	// opt-in: active-connection Pods 메트릭. pg-router 가 노출하는
+	// RouterActiveConnectionsMetric 게이지를 custom-metrics adapter 가
+	// custom.metrics.k8s.io 로 매핑한다는 전제. Pod 당 평균 active 커넥션이
+	// target 을 넘으면 스케일 아웃. CPU 와 함께 있으면 HPA 는 둘 중 더 많은
+	// replica 를 요구하는 쪽을 택한다(표준 HPA semantics).
+	if routerScaleOnActiveConnections(cluster) {
+		target := resource.NewQuantity(int64(routerTargetActiveConnections(cluster)), resource.DecimalSI)
+		metrics = append(metrics, autoscalingv2.MetricSpec{
+			Type: autoscalingv2.PodsMetricSourceType,
+			Pods: &autoscalingv2.PodsMetricSource{
+				Metric: autoscalingv2.MetricIdentifier{Name: postgresv1alpha1.RouterActiveConnectionsMetric},
+				Target: autoscalingv2.MetricTarget{
+					Type:         autoscalingv2.AverageValueMetricType,
+					AverageValue: target,
+				},
+			},
+		})
+	}
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      RouterHPAName(cluster.Name),
@@ -1319,16 +1365,7 @@ func buildRouterHPA(cluster *postgresv1alpha1.PostgresCluster, deploymentName st
 			},
 			MinReplicas: &minReplicas,
 			MaxReplicas: routerMaxReplicas(cluster),
-			Metrics: []autoscalingv2.MetricSpec{{
-				Type: autoscalingv2.ResourceMetricSourceType,
-				Resource: &autoscalingv2.ResourceMetricSource{
-					Name: corev1.ResourceCPU,
-					Target: autoscalingv2.MetricTarget{
-						Type:               autoscalingv2.UtilizationMetricType,
-						AverageUtilization: &targetCPU,
-					},
-				},
-			}},
+			Metrics:     metrics,
 		},
 	}
 }
@@ -1349,6 +1386,16 @@ func buildRouterDeployment(
 		labels[RouterAutoscaleLabelKey] = "true"
 	}
 
+	// pg-router 는 /metrics(Prometheus 텍스트)로 active-connection 게이지를 노출한다.
+	// scrape annotation 으로 Prometheus/custom-metrics adapter 가 수집한다(HPA
+	// ScaleOnActiveConnections 결선의 metrics 소스). scrape 자체는 부작용 없으므로
+	// autoscale 비활성이어도 노출을 켜둔다(관측성).
+	podAnnotations := map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   strconv.Itoa(int(routerMetricsPort)),
+		"prometheus.io/path":   "/metrics",
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1359,7 +1406,7 @@ func buildRouterDeployment(
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
 					SecurityContext: dataplanePodSecurityContext(),
 					Containers: []corev1.Container{{
@@ -1370,6 +1417,10 @@ func buildRouterDeployment(
 						Ports: []corev1.ContainerPort{{
 							Name:          "postgres",
 							ContainerPort: pgPort,
+							Protocol:      corev1.ProtocolTCP,
+						}, {
+							Name:          "metrics",
+							ContainerPort: routerMetricsPort,
 							Protocol:      corev1.ProtocolTCP,
 						}},
 						VolumeMounts: append([]corev1.VolumeMount{

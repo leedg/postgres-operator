@@ -19,11 +19,11 @@ func entry(lo, hi, shard string) v1alpha1.ShardRangeEntry {
 
 func TestSplitHashRange(t *testing.T) {
 	tests := []struct {
-		name                   string
-		lo, hi                 string
-		wantLo0, wantHi0       string
-		wantLo1, wantHi1       string
-		wantErr                error
+		name             string
+		lo, hi           string
+		wantLo0, wantHi0 string
+		wantLo1, wantHi1 string
+		wantErr          error
 	}{
 		{
 			name: "full range halves",

@@ -479,10 +479,22 @@ spec:
                         format: int32
                         minimum: 1
                         type: integer
+                      scaleOnActiveConnections:
+                        default: false
+                        description: |-
+                          ScaleOnActiveConnections enables an additional Pods metric on the router HPA that
+                          scales on the average active client-connection count per router Pod (metric
+                          RouterActiveConnectionsMetric, exposed by pg-router's /metrics endpoint). Default
+                          false keeps the HPA CPU-only. Requires a custom-metrics adapter (e.g.
+                          prometheus-adapter) in the cluster that maps the scraped gauge into the
+                          custom.metrics.k8s.io API; without it the Pods metric reports unavailable and the
+                          HPA falls back to CPU.
+                        type: boolean
                       targetActiveConnections:
                         default: 1000
-                        description: TargetActiveConnections is the HPA active-connection
-                          target.
+                        description: |-
+                          TargetActiveConnections is the HPA active-connection target (average value per Pod).
+                          Only used when ScaleOnActiveConnections=true.
                         format: int32
                         minimum: 1
                         type: integer

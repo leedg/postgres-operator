@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -313,6 +314,17 @@ func (r *ShardSplitJobReconciler) promotePreconditionsMet(ctx context.Context, s
 			return false, fmt.Sprintf("source shard %q is still active in ShardRange", source), nil
 		}
 	}
+	// P-B.6 명시적 fence gate (ADR-0029 §승격 메커니즘 2): source ordinal shard 가
+	// 아직 *운영 관측*(status.shards 의 Ready primary)에 잡혀 있으면 target adopt 를
+	// 보류한다. ShardRange flip(active set 제외)만으로는 cluster reconciler 가 source STS
+	// 를 scale-0 하고 status 에서 제외하기 전 짧은 창이 있고, 그 사이 source·target 이
+	// 같은 shard-id 로 동시 관측되면 aggregate_status 가 primary 2개(split-brain)로
+	// 오판한다(#220-class). status 관측 제외를 명시 확인해 fence-vs-adopt race 를 닫는다.
+	if fenced, reason, err := r.sourceObservationExcluded(ctx, ssj); err != nil {
+		return false, "", err
+	} else if !fenced {
+		return false, reason, nil
+	}
 	for i := range ssj.Spec.Targets {
 		shardID := ssj.Spec.Targets[i].ShardID
 		if _, ok := active[shardID]; !ok {
@@ -324,6 +336,30 @@ func (r *ShardSplitJobReconciler) promotePreconditionsMet(ctx context.Context, s
 		}
 		if !ready {
 			return false, reason, nil
+		}
+	}
+	return true, "", nil
+}
+
+// sourceObservationExcluded 는 각 source shard 가 cluster 의 운영 관측(status.shards 의
+// Ready primary)에서 제외되었는지 확인한다(P-B.6 fence gate). source 가 아직 Ready
+// primary 로 관측되면 target adopt 를 보류해 source·target 동시 관측(#220-class
+// split-brain) 을 막는다. PostgresCluster CR 부재 시 관측 자체가 없으므로 fence 충족
+// (true) — 격리 테스트 및 cluster 삭제 경로에서 안전.
+func (r *ShardSplitJobReconciler) sourceObservationExcluded(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) (bool, string, error) {
+	var cluster postgresv1alpha1.PostgresCluster
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ssj.Namespace, Name: ssj.Spec.Cluster}, &cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "", nil
+		}
+		return false, "", fmt.Errorf("get cluster for promote fence: %w", err)
+	}
+	for _, source := range ssj.Spec.Sources {
+		for i := range cluster.Status.Shards {
+			s := &cluster.Status.Shards[i]
+			if s.Name == source && s.Primary != nil && s.Primary.Ready {
+				return false, fmt.Sprintf("source shard %q still observed with a Ready primary (fence pending)", source), nil
+			}
 		}
 	}
 	return true, "", nil

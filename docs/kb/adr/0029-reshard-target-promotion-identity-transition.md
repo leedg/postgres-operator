@@ -106,6 +106,26 @@ StatefulSet replicas 를 0 으로 낮추고 status 관측에서 제외하지만,
 향후 source 삭제가 필요하면 별도 opt-in 정책 필드, finalizer 순서, PVC retention semantics, live chaos drill 을
 포함한 별도 설계로 다룬다. 기본 GA 경로에서는 source resource 삭제가 자동으로 일어나지 않는다.
 
+### P-B.6 explicit source observation fence gate (2026-07-08)
+
+`promotePreconditionsMet` 에 명시적 fence 게이트를 추가했다(§승격 메커니즘 2 의 코드화).
+`sourceObservationExcluded` 는 각 `spec.sources[]` shard 가 `PostgresCluster.status.shards[]` 의
+**Ready primary 로 아직 관측되는지** 확인하고, 관측되면 target adopt 를 보류(phase 유지 + requeue)한다.
+
+기존 P-B.3 는 *ShardRange active set* 에서 source 제외만 확인했다. 그러나 ShardRange flip 과
+cluster reconciler 의 source STS scale-0 + status 제외(P-C.1) 사이에는 짧은 창이 있어, 그 사이
+source·target 이 같은 `shard-id` 로 동시에 관측되면 `aggregateShardStatus` 가 primary 2개
+(split-brain, #220-class)로 오판할 수 있었다. 이 게이트는 *운영 관측 SSOT(status.shards)* 기준으로
+source 가 관측에서 빠질 때까지 adopt 를 미뤄 fence-vs-adopt race 를 닫는다.
+
+- PostgresCluster CR 부재 시 관측 자체가 없으므로 fence 충족(true) — 격리/삭제 경로 안전.
+- 결정론 검증: `TestSourceObservationExcluded`(fake client, 4 케이스: Ready 관측→보류 /
+  not-Ready / source 부재 / 빈 status) + `TestSourceObservationExcluded_ClusterNotFound`.
+  기존 envtest Promote hold 테스트(P-B.3/P-B.4)가 precondition→hold 배선을 커버.
+
+여전히 잔여: source PDB/PVC/Service 삭제(opt-in, P-B.5 retain 기본 유지) + 승격 중 pod kill live
+chaos drill.
+
 ### P-C.1 named topology model decision (2026-06-29)
 
 `PostgresCluster.spec.shards` 에 별도 named shard list 를 추가하지 않는다. `initialCount` 는 bootstrap 시점의

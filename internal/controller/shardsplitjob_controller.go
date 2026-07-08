@@ -72,6 +72,23 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// AutoSplit 승인 게이트: 자동 생성 job 이 requireApproval(approval=required)이면
+	// 운영자 승인 annotation(autosplit-approved=true) 전까지 Pending 을 유지한다 —
+	// 비가역 데이터 이동 전 확인(AutoSplitSpec.RequireApproval production safety).
+	// 승인 annotation 편집이 재-reconcile 을 트리거해 SnapshotWAL 로 진행한다.
+	if (ssj.Status.Phase == "" || ssj.Status.Phase == postgresv1alpha1.ShardSplitPhasePending) &&
+		autoSplitHoldForApproval(&ssj) {
+		if ssj.Status.Phase == "" {
+			ssj.Status.Phase = postgresv1alpha1.ShardSplitPhasePending
+			ssj.Status.ObservedGeneration = ssj.Generation
+			if err := r.Status().Update(ctx, &ssj); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		logger.Info("ShardSplitJob 승인 대기 (autosplit requireApproval)", "name", ssj.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// RoutingUpdate phase: 실 routing 전환 — 해당 keyspace 의 ShardRange CRD 의 ranges 를
 	// target 으로 갱신한다. *가역* cutover 결과(rollback=ShardRange 원복, §6 L3 안전망).
 	// 사용자 비가역 승인(2026-06-04) 하에 진입. write-block(운영 write freeze) + CDC

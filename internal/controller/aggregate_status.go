@@ -148,6 +148,7 @@ func aggregateShardStatusMatching(
 
 	now := time.Now().UTC()
 	var primaryCandidate *postgresv1alpha1.ShardEndpoint
+	var primarySizeBytes int64 // 선택된 primary 가 보고한 shard DB 크기 (AutoSplit 관측).
 	var replicas []postgresv1alpha1.ShardEndpoint
 
 	for i := range pods.Items {
@@ -226,6 +227,7 @@ func aggregateShardStatusMatching(
 			} else {
 				p := ep
 				primaryCandidate = &p
+				primarySizeBytes = maxInt64(0, st.SizeBytes)
 			}
 		default:
 			replicas = append(replicas, ep)
@@ -234,6 +236,9 @@ func aggregateShardStatusMatching(
 
 	out.Primary = primaryCandidate
 	out.Replicas = replicas
+	if primaryCandidate != nil {
+		out.SizeBytes = primarySizeBytes
+	}
 	return out
 }
 

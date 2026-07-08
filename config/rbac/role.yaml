@@ -182,8 +182,19 @@ rules:
   - postgres.keiailab.io
   resources:
   - shardranges
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - postgres.keiailab.io
+  resources:
   - shardsplitjobs
   verbs:
+  - create
+  - delete
   - get
   - list
   - patch

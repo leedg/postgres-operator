@@ -27,6 +27,43 @@ var ErrSplitPlanOverlap = errors.New("router: split plan has overlapping ranges"
 // (resharding 후 source 가 커버하던 일부 키가 어떤 target 에도 속하지 않거나 그 반대).
 var ErrSplitPlanCoverage = errors.New("router: source and target key coverage differ")
 
+// ErrHashRangeTooSmall 은 split 하려는 hash range 가 단일 키(lo==hi)라 둘로 나눌 수
+// 없을 때 반환된다 (AutoSplit 후보 계산).
+var ErrHashRangeTooSmall = errors.New("router: hash range too small to split (lo == hi)")
+
+// SplitHashRange 는 hash vindex 의 [lo, hi] 폐구간을 중점에서 둘로 나눠 인접·무공백·
+// 무중첩인 두 하위 범위 [lo0,hi0], [lo1,hi1] 을 고정폭 hex("0x%08x")로 반환한다.
+// 두 하위 범위의 합집합은 정확히 원본 [lo, hi] 와 같다(데이터 보존 불변식 — 이후
+// ValidateSplitPlan 이 재확인). lo/hi 는 parseHashBound 가 해석하는 hex/10진수를
+// 받는다. lo == hi(단일 키)면 ErrHashRangeTooSmall.
+//
+// 중점: mid = lo + (hi-lo)/2 (uint32 overflow-safe). 하위 범위:
+// [lo, mid], [mid+1, hi]. hi-lo >= 1 이므로 mid < hi 가 보장되어 두 범위 모두 비지
+// 않는다.
+func SplitHashRange(lo, hi string) (lo0, hi0, lo1, hi1 string, err error) {
+	l, err := parseHashBound(lo)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("router: split lo: %w", err)
+	}
+	h, err := parseHashBound(hi)
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("router: split hi: %w", err)
+	}
+	if h < l {
+		return "", "", "", "", fmt.Errorf("router: split range has lo > hi (0x%08x > 0x%08x)", l, h)
+	}
+	if h == l {
+		return "", "", "", "", ErrHashRangeTooSmall
+	}
+	mid := l + (h-l)/2
+	return formatHashBound(l), formatHashBound(mid), formatHashBound(mid + 1), formatHashBound(h), nil
+}
+
+// formatHashBound 는 uint32 hash 경계를 ShardRangeEntry 컨벤션의 고정폭 hex 로 만든다.
+func formatHashBound(v uint32) string {
+	return fmt.Sprintf("0x%08x", v)
+}
+
 // ValidateSplitPlan 은 ShardSplitJob 의 source/target 범위가 데이터 보존 불변식을
 // 만족하는지 검증한다: ① source 들은 무중첩·무공백 연속 ② target 들은 무중첩·무공백
 // 연속 ③ source 합집합과 target 합집합의 [최소 lo, 최대 hi] 경계가 정확히 일치.

@@ -108,6 +108,15 @@ type PostgresClusterReconciler struct {
 	// 재시작한다.
 	failoverPending   map[string]time.Time
 	failoverPendingMu sync.Mutex
+
+	// Observer 는 AutoSplit 트리거 관측치 수집기다. nil 이면 SetupWithManager 가
+	// default(statusShardObserver — cluster.Status.Shards 읽기)를 주입한다.
+	Observer ShardMetricsObserver
+
+	// autoSplitBreach 는 AutoSplit 트리거 초과가 durationMinutes 동안 지속되는지
+	// 추적한다(shouldPromoteAfterDebounce 미러). namespace/name/keyspace/shard 키.
+	autoSplitBreach   map[string]time.Time
+	autoSplitBreachMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -115,6 +124,8 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=imagecatalogs;clusterimagecatalogs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresusers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardsplitjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardranges,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -505,6 +516,18 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	}
 	applyClusterConditions(&cluster, activeShardCount, allShardPrimaryReady, routerActive, routerStatus, hibernating, standaloneReplica,
 		prevPhase == postgresv1alpha1.ClusterPhaseReady, failoverDecision)
+
+	// AutoSplit: shard 관측 → 트리거 지속 판정 → 후보 있으면 ShardSplitJob 자동 생성.
+	// DB 정지 중에는 관측치가 무의미하므로 skip. spec.autoSplit 이 nil/비활성이면
+	// reconcileAutoSplit 이 즉시 Disabled 로 반환하고 condition 은 갱신하지 않는다.
+	if !databasePodsStopped && cluster.Spec.AutoSplit != nil {
+		eligible, asReason, asMessage := r.reconcileAutoSplit(ctx, &cluster, time.Now())
+		asStatus := metav1.ConditionFalse
+		if eligible > 0 {
+			asStatus = metav1.ConditionTrue
+		}
+		setCondition(&cluster.Status.Conditions, ConditionAutoSplitEligible, asStatus, asReason, asMessage, cluster.Generation)
+	}
 
 	// Config hot-reload: if cluster is Ready and primary Pods are running with
 	// a stale configHash, signal PostgreSQL to reload without restarting.
@@ -1068,6 +1091,9 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return err
 		}
 		r.PromotionPodExecutor = executor
+	}
+	if r.Observer == nil {
+		r.Observer = statusShardObserver{}
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresCluster{}).

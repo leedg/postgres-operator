@@ -190,3 +190,22 @@ func (r *Real) LagBytes(ctx context.Context) int64 {
 	}
 	return lag
 }
+
+// DatabaseSizeBytes 는 current_database() 의 크기를 pg_database_size 로 측정한다
+// (AutoSplit sizeThresholdGB 트리거 관측). connection / query 실패 시 0 반환 —
+// status reporter 가 매 5s 호출하므로 error spam 없이 미관측(0)으로 degrade 한다.
+func (r *Real) DatabaseSizeBytes(ctx context.Context) int64 {
+	db, err := r.connect()
+	if err != nil {
+		return 0
+	}
+	var size int64
+	const q = `SELECT pg_database_size(current_database())::bigint`
+	if err := db.QueryRowContext(ctx, q).Scan(&size); err != nil {
+		return 0
+	}
+	if size < 0 {
+		return 0
+	}
+	return size
+}

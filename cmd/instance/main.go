@@ -610,12 +610,23 @@ func runStatusReporter(
 		} else {
 			ready = role == statusapi.RolePrimary || role == statusapi.RoleReplica
 		}
+		// SizeBytes 는 primary 만 보고한다 — AutoSplit sizeThresholdGB 트리거 관측용.
+		// replica 에서 질의하면 물리 복제라 값은 같으나, controller 는 shard 별 primary
+		// status 만 집계하므로 primary 에서만 측정해 불필요한 질의를 아낀다. 측정 실패 시
+		// DatabaseSizeBytes 가 0(미관측)을 반환한다(best-effort, status reporting 불차단).
+		size := int64(0)
+		if sup != nil && role == statusapi.RolePrimary {
+			sizeCtx, sizeCancel := context.WithTimeout(ctx, 1*time.Second)
+			size = sup.DatabaseSizeBytes(sizeCtx)
+			sizeCancel()
+		}
 		st := statusapi.Status{
 			Role:       role,
 			Promoted:   promotedMarkerPresent(dataDir),
 			Ready:      ready,
 			Endpoint:   endpoint,
 			LagBytes:   lag,
+			SizeBytes:  size,
 			LastUpdate: time.Now().UTC(),
 		}
 		if err := patchPodAnnotation(ctx, clientset, namespace, podName, st); err != nil {

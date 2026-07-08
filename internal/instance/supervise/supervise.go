@@ -124,6 +124,13 @@ type Supervisor interface {
 	// 반환 안 함 (status reporter 가 매 5s 호출 — error spam 회피).
 	LagBytes(ctx context.Context) int64
 
+	// DatabaseSizeBytes 는 current_database() 의 크기(bytes)를 pg_database_size 로
+	// 측정한다 — AutoSplit 의 sizeThresholdGB 트리거 관측용. primary 에서만 의미가
+	// 있으며(replica 는 물리 복제라 동일 크기지만 status reporter 는 primary 만 보고),
+	// 측정 실패(connection/query 에러) 시 0 을 반환한다(미관측). error 는 별도로
+	// 반환하지 않는다 — status reporter 가 매 5s 호출하므로 spam 회피(LagBytes 정합).
+	DatabaseSizeBytes(ctx context.Context) int64
+
 	// ExitCh 는 child 종료 통보 — 정상 종료면 nil, 비정상이면 *exec.ExitError.
 	// 채널은 한 번만 송출 후 close.
 	ExitCh() <-chan error

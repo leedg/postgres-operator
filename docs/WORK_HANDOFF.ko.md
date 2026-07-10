@@ -453,8 +453,9 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   상세=[IMPL_LOG](IMPL_LOG_2026-07-08_autosplit-hpa-abort.ko.md) §7~§10)**: ① scatter 집계 재merge
   (COUNT/SUM/MIN/MAX, `64afabd`) ② 라우터 `/readyz` readiness(`66a52a1`) ③ stable per-shard primary
   Service(ExternalName failover-follow, `d24fef8`) ④ Promote source-observation fence(ADR-0029 P-B.6,
-  `8050ef3`) 완료. **dev-완결 가능 백로그 소진** — 남은 것: ShardRange/status watch informer(실 watch
-  재접속 정합이 live 검증 필요), 아래 kind-live 게이트.
+  `8050ef3`) ⑤ ShardRange/status watch informer(즉시 hot-reload, `watch.FakeWatcher` 결정론 검증,
+  IMPL_LOG §11) 완료. **dev+envtest 검증 가능 백로그 전부 소진** — 남은 것은 아래 순수 kind-live
+  게이트뿐(node14 물리디스크 복구 후).
 - **남은 live gate**: native router concurrent-write online resharding e2e(클라 쓰기를 라우터 경유로 받는
   무중단 cutover 실증), target promotion 후 live chaos/failover drill 은 kind live 필요(별도 체크포인트).
   **source-down abort cleanup fallback 구현 완료(2026-07-08)**: `router.ForceDropSubscription`

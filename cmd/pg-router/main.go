@@ -107,7 +107,7 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	cluster := env("PGROUTER_CLUSTER", "quickstart")
 	keyspace := env("PGROUTER_KEYSPACE", "default")
 
-	var k8s client.Client
+	var k8s client.WithWatch
 	if topoMode == "crd" || backendMode == "status" {
 		c, err := newK8sClient()
 		if err != nil {
@@ -158,13 +158,21 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	}
 
 	if crdProvider != nil || statusRes != nil {
-		go refreshLoop(ctx, crdProvider, statusReader, statusRes, ns, cluster)
+		// changeCh: watch 이벤트가 즉시 refresh 를 트리거한다(interval 은 fallback).
+		// 버퍼 cap 1 로 버스트를 자연 coalesce.
+		changeCh := make(chan struct{}, 1)
+		if k8s != nil {
+			watchShardRangesAndCluster(ctx, k8s, ns, changeCh, envDuration("PGROUTER_WATCH_BACKOFF", 2*time.Second))
+		}
+		go refreshLoop(ctx, crdProvider, statusReader, statusRes, ns, cluster, changeCh)
 	}
 	return provider, resolve, readResolve, nil
 }
 
-// newK8sClient builds a controller-runtime client with the operator scheme.
-func newK8sClient() (client.Client, error) {
+// newK8sClient builds a controller-runtime watching client with the operator scheme.
+// WithWatch lets the router watch ShardRange/PostgresCluster for immediate hot-reload
+// (interval polling remains as a fallback).
+func newK8sClient() (client.WithWatch, error) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("scheme: %w", err)
@@ -173,31 +181,63 @@ func newK8sClient() (client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
 	}
-	return client.New(cfg, client.Options{Scheme: scheme})
+	return client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 }
 
-// refreshLoop re-reads dynamic sources on PGROUTER_REFRESH interval (hot-reload):
-// the ShardRange topology and/or the PostgresCluster primary-endpoint status.
-func refreshLoop(ctx context.Context, cp *router.CRDTopologyProvider, reader router.ClusterStatusReader, res *router.StatusBackendResolver, ns, cluster string) {
+// refreshLoop re-reads dynamic sources on the PGROUTER_REFRESH interval (fallback) and
+// *immediately* on a watch change signal (changeCh) — the ShardRange topology and/or the
+// PostgresCluster primary-endpoint status. Watch-driven refresh shortens the failover /
+// resharding hot-reload window vs. interval-only polling; the interval remains as a safety
+// net if watches drop.
+func refreshLoop(ctx context.Context, cp *router.CRDTopologyProvider, reader router.ClusterStatusReader, res *router.StatusBackendResolver, ns, cluster string, changeCh <-chan struct{}) {
 	t := time.NewTicker(envDuration("PGROUTER_REFRESH", 10*time.Second))
 	defer t.Stop()
+	debounce := envDuration("PGROUTER_WATCH_DEBOUNCE", 200*time.Millisecond)
+
+	doRefresh := func() {
+		if cp != nil {
+			if _, err := cp.Refresh(ctx); err != nil {
+				log.Printf("pg-router: topology refresh: %v", err)
+			} else {
+				setRouterReady(true) // 초기 실패 후 refresh 로 토폴로지 확보 시 readiness 회복.
+			}
+		}
+		if res != nil && reader != nil {
+			if err := updateStatus(ctx, reader, res, ns, cluster); err != nil {
+				log.Printf("pg-router: status refresh: %v", err)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if cp != nil {
-				if _, err := cp.Refresh(ctx); err != nil {
-					log.Printf("pg-router: topology refresh: %v", err)
-				} else {
-					setRouterReady(true) // 초기 실패 후 refresh 로 토폴로지 확보 시 readiness 회복.
-				}
-			}
-			if res != nil && reader != nil {
-				if err := updateStatus(ctx, reader, res, ns, cluster); err != nil {
-					log.Printf("pg-router: status refresh: %v", err)
-				}
-			}
+			doRefresh()
+		case <-changeCh:
+			// 짧은 debounce 로 연속 변경(예: ShardRange 여러 항목 편집)을 1회 refresh 로 합침.
+			coalesce(ctx, changeCh, debounce)
+			doRefresh()
+		}
+	}
+}
+
+// coalesce 는 debounce 창 동안 changeCh 에 쌓인 추가 신호를 흡수한다(버스트 → 1 refresh).
+func coalesce(ctx context.Context, changeCh <-chan struct{}, debounce time.Duration) {
+	if debounce <= 0 {
+		return
+	}
+	t := time.NewTimer(debounce)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-changeCh:
+			// 추가 신호 흡수 — 타이머는 유지(고정 창).
+		case <-t.C:
+			return
 		}
 	}
 }

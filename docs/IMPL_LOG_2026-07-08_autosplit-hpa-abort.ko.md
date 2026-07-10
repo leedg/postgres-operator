@@ -285,8 +285,8 @@ go test ./internal/router -run 'TestReshardPKlessTargetConcurrentLive|TestReshar
   라우터 경유 클라 쓰기는 kind 필요).
 - **target 승격 후 live chaos/failover drill**: 승격 중 pod kill 로 #220-class 정체성 위험 확인
   (ADR-0029 P-B). 설계 = `docs/kb/adr/0029-*.md`.
-- **ShardRange/status watch informer**(라우터 hot-reload): 실제 watch 재접속·이벤트 정합은 live API
-  검증이 필요해 blind 구현 보류(현재 interval polling 10s 동작).
+- ~~ShardRange/status watch informer~~ → **§11 로 구현 완료**(2026-07-10). 초기 "live 필요로 보류"
+  판단은 과했고 — `watch.FakeWatcher` 로 재접속·이벤트 전달 로직을 결정론 검증 가능해 dev-완결.
 - ~~stable per-shard primary Service~~ → **§10 으로 구현 완료**(2026-07-10, ExternalName 방식 —
   pod 라벨 미변경이라 #220 무관, envtest 검증). 초기 "정체성 리스크" 판단은 *pod-label 방식* 기준
   이었고, operator-managed ExternalName alias 방식으로 안전하게 dev-완결.
@@ -357,3 +357,31 @@ primary 2개(split-brain, #220-class)로 오판 가능했다.
   시 ExternalName 갱신) + `_SkipNotReadyOrNoPrimary` + `TestBuildShardPrimaryService` + `TestPrimaryEndpointHost`
   + controller envtest 전체 PASS(회귀 0).
 - **남은 것**: 라우터가 이 primary Service DNS 를 backend 로 소비하는 config 결선(env/template — 후속).
+
+## 11. ShardRange/status watch informer — 즉시 hot-reload (2026-07-10)
+
+라우터가 interval(`PGROUTER_REFRESH` 10s) polling 만으로 토폴로지/primary status 를 다시 읽던 것을
+**watch 기반 즉시 hot-reload** 로 보강한다(failover / resharding flip 반영 지연 단축). interval 은
+watch 드롭 대비 fallback 으로 유지.
+
+- `cmd/pg-router/watch.go`:
+  - `watchReloader{connect, backoff, name}` — 한 리소스의 watch 를 유지하며 변경 이벤트를 `notify` 로
+    전달. 세션 닫힘/Error → backoff 후 재접속, ctx 취소 → 종료. `connect` 를 함수로 추상화해 fake
+    watcher 로 테스트 가능. `drain` 은 non-blocking notify(`changeCh` cap 1 coalesce).
+  - `watchShardRangesAndCluster` — ShardRange + PostgresCluster 를 각각 goroutine 으로 watch.
+- `cmd/pg-router/main.go`: `newK8sClient` → `client.NewWithWatch`(watch 가능 클라이언트). `buildRouting`
+  이 `changeCh`(cap 1) 생성 + watcher 기동 + `refreshLoop` 에 전달. `refreshLoop` 은
+  `select { ticker(fallback) | changeCh(즉시) }`, `coalesce`(debounce `PGROUTER_WATCH_DEBOUNCE` 200ms)
+  로 연속 변경을 1회 refresh 로 합침.
+- **결정론 검증**(`watch.FakeWatcher`, live API 불요): `TestWatchReloader_ForwardsEventsAndReconnects`
+  (이벤트→notify + 세션 닫힘→재접속) / `_CtxCancelExits` / `_ReconnectsOnConnectError`(connect 실패
+  backoff 재시도) / `TestCoalesce_AbsorbsBurst`(5 신호→1) / `_CtxCancelReturns`. pg-router 전체 PASS.
+- **남은 것**: 실 API 서버에서의 watch 수명/재접속(410 Gone·resourceVersion)은 live 에서 최종 확인
+  (로직은 fake 로 커버, interval fallback 이 안전망).
+
+## 12. dev-완결 백로그 종료 (2026-07-10)
+
+이로써 §6 ROUTER-GAP-ANALYSIS + §6.9 WORK_HANDOFF 의 **dev+envtest 로 검증 가능한 백로그를 전부
+처리**했다: AutoSplit(size+CPU) / HPA active-conn / abort fallback / P-B.6 fence / scatter 집계 /
+readiness / per-shard primary Service / watch informer. 남은 것은 순수 kind-live 게이트(native
+무중단 cutover 실증, 승격 chaos drill, 멀티머신 벤치)뿐이며 node14 물리디스크 복구 후 진행한다.

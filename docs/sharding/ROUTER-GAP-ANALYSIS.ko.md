@@ -179,7 +179,7 @@ parameterized/`t.col`/주석·문자열 내부 오인 방지까지 검증. **기
 **회복력 / 운영**
 - [ ] **stable per-shard primary Service (운영자 측)**: 운영자가 각 샤드의 *현재 primary*를 가리키는 안정 Service를 publish하면, 라우터가 status polling 없이 DNS만으로 즉시 failover-follow → status 모드보다 빠르고 단순. (현재는 `PGROUTER_BACKEND=status`로 status polling.)
 - [ ] **ShardRange/status watch (informer)**: 현재 interval(`PGROUTER_REFRESH`) polling → watch 기반 즉시 hot-reload(failover window 단축).
-- [ ] **라우터 자체 HA 강화**: readiness가 백엔드 도달성 반영, circuit-breaker, dial retry/backoff, replica 읽기 폴백.
+- [~] **라우터 자체 HA 강화**: circuit-breaker ✅, dial retry/backoff ✅, replica 읽기 폴백 ✅. **readiness 반영 ✅(2026-07-10)**: pg-router `/readyz`(metrics 서버) 가 라우팅 테이블(토폴로지) 확보 여부(`routerReady`)를 반영 — 확보 전 503 → k8s Service endpoint 제외(라우팅 불가 Pod 로 트래픽 안 감). Deployment readinessProbe(`/readyz`:9187) 결선(operator + standalone). `/healthz`=liveness 분리. 유닛: `TestReadyzHandler` + builder probe 검증. 남은 것: 백엔드 *능동 도달성* 프로빙(현재는 토폴로지 확보 신호 — 백엔드 dial 은 circuit-breaker 가 커버).
 - [ ] **failover 전용 lease 제대로 (RFC 0007 P2-T3)**: 이전에 production 무효 배선을 제거하고 building block으로 보존한 `internal/controller/failover/lease.go`를, failover를 reconcile 루프 밖 leader-election-agnostic runnable로 분리한 뒤 그 lease로 게이팅.
 
 **상품화 (수치)**

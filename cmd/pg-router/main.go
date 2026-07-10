@@ -122,10 +122,13 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	switch topoMode {
 	case "", "static":
 		provider = router.StaticTopologyProvider{T: router.Topology{Cluster: cluster, Keyspace: keyspace, Spec: shardSpec()}}
+		setRouterReady(true) // static 토폴로지는 즉시 라우팅 가능.
 	case "crd":
 		crdProvider = &router.CRDTopologyProvider{Lister: clientLister{c: k8s}, Namespace: ns, Cluster: cluster, Keyspace: keyspace}
 		if _, err := crdProvider.Refresh(ctx); err != nil {
 			log.Printf("pg-router: initial topology refresh: %v (will retry)", err)
+		} else {
+			setRouterReady(true) // 초기 토폴로지 확보 → readiness.
 		}
 		provider = crdProvider
 	default:
@@ -186,6 +189,8 @@ func refreshLoop(ctx context.Context, cp *router.CRDTopologyProvider, reader rou
 			if cp != nil {
 				if _, err := cp.Refresh(ctx); err != nil {
 					log.Printf("pg-router: topology refresh: %v", err)
+				} else {
+					setRouterReady(true) // 초기 실패 후 refresh 로 토폴로지 확보 시 readiness 회복.
 				}
 			}
 			if res != nil && reader != nil {

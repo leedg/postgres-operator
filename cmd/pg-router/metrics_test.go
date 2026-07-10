@@ -68,3 +68,24 @@ func TestServeMetrics_EmptyAddrIsNoop(t *testing.T) {
 	// 빈 주소는 즉시 반환(블로킹 없이) — 서버 미기동.
 	serveMetrics("")
 }
+
+func TestReadyzHandler_ReflectsRoutingReadiness(t *testing.T) {
+	// 라우팅 테이블 미확보 → 503.
+	setRouterReady(false)
+	req := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+	readyzHandler().ServeHTTP(w, req)
+	if w.Code != 503 {
+		t.Fatalf("not-ready code = %d, want 503", w.Code)
+	}
+
+	// 라우팅 테이블 확보 → 200.
+	setRouterReady(true)
+	w = httptest.NewRecorder()
+	readyzHandler().ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("ready code = %d, want 200", w.Code)
+	}
+	// 격리: 다른 테스트에 영향 주지 않도록 리셋.
+	setRouterReady(false)
+}

@@ -42,6 +42,14 @@ spec:
             - name: metrics
               containerPort: 9187
               protocol: TCP
+          # readiness = routing table(topology) loaded (/readyz). Not-ready Pods are
+          # removed from Service endpoints so traffic never hits a router that can't route.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9187
+            initialDelaySeconds: 2
+            periodSeconds: 5
           env:
             - name: PGROUTER_LISTEN
               value: ":5432"

@@ -1423,6 +1423,18 @@ func buildRouterDeployment(
 							ContainerPort: routerMetricsPort,
 							Protocol:      corev1.ProtocolTCP,
 						}},
+						// readiness = 라우팅 테이블(토폴로지) 확보 여부(/readyz). 확보 전엔
+						// Service endpoint 에서 제외되어 라우팅 불가 Pod 로 트래픽이 안 감.
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/readyz",
+									Port: intstr.FromInt32(routerMetricsPort),
+								},
+							},
+							InitialDelaySeconds: 2,
+							PeriodSeconds:       5,
+						},
 						VolumeMounts: append([]corev1.VolumeMount{
 							{Name: "config", MountPath: pgConfigMountPath, ReadOnly: true},
 						}, dataplaneEphemeralVolumeMounts()...),

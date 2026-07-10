@@ -903,6 +903,18 @@ func TestBuildRouterDeployment_MetricsPortAndScrapeAnnotations(t *testing.T) {
 		t.Fatalf("metrics port = %d, want %d", metricsPort.ContainerPort, routerMetricsPort)
 	}
 
+	// readiness probe = /readyz on metrics port.
+	rp := dep.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if rp == nil || rp.HTTPGet == nil {
+		t.Fatalf("router container missing readiness probe")
+	}
+	if rp.HTTPGet.Path != "/readyz" {
+		t.Fatalf("readiness path = %q, want /readyz", rp.HTTPGet.Path)
+	}
+	if rp.HTTPGet.Port.IntVal != routerMetricsPort {
+		t.Fatalf("readiness port = %v, want %d", rp.HTTPGet.Port, routerMetricsPort)
+	}
+
 	// Prometheus scrape annotations.
 	ann := dep.Spec.Template.Annotations
 	if ann["prometheus.io/scrape"] != "true" {

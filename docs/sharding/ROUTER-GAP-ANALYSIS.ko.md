@@ -105,7 +105,7 @@
 |---|---|---|---|---|
 | 1 | 단일 샤드 라우팅(샤딩키 point query) | 없음 | A·E 필요 | ✅ 필수 |
 | 2 | 읽기 scatter-gather(fan-out+merge) | 낮음 | scatter 골격→실연결 | 🟡 분석쿼리 |
-| 3 | scatter + 집계/정렬 pushdown | 중간 | 미착수 | 선택 |
+| 3 | scatter + 집계/정렬 pushdown | 중간 | 집계 재merge·ORDER BY·LIMIT ✅(merge 능력) / planner 감지 결선 후속 | 선택 |
 | 4 | **Reference table**(전 샤드 복제 → 조인 우회) | 낮음·고가치 | 미착수 | ✅ 권장 |
 | 5 | 무중단 resharding(CDC 논리복제 + cutover) | 높음 | ShardSplitJob 골격(데이터 이동 X) | 운영 필수 |
 | 6 | cross-shard 쓰기 / 2PC | 최고 | 미착수 | ❌ 명시적 범위 밖 |
@@ -169,7 +169,8 @@ parameterized/`t.col`/주석·문자열 내부 오인 방지까지 검증. **기
 >
 > **✅ 해소됨 — per-query 라우팅 (구 한계: 연결 고정)**: query-mode가 *첫 쿼리*로 연결을 한 샤드에 고정하던 한계를 해소했다(2026-06-28). `persession.go`의 `runPerQuerySession` 세션 루프가 한 연결의 *매* simple Query를 그 키의 샤드로 독립 라우팅하고(vtgate 모델), 샤드별 백엔드 연결을 세션 내에서 lazy 풀링·재사용한다. **라이브 검증(2 scram 샤드, 한 연결)**: `id='alice'`→shard-0, `id='bob'`→shard-1, `id='carol'`→shard-0 가 *같은 연결*에서 각각 올바른 샤드로 라우팅(로그상 4개 독립 `routed (Q)` 결정). 키 없는 쿼리는 scatter fan-out, 단일샤드 명시적 트랜잭션은 `BEGIN` 응답 합성 후 첫 키 쿼리로 한 샤드에 pin(COMMIT/ROLLBACK까지 그 백엔드 재사용) — 모두 검증. **extended protocol(Parse/Bind/Describe/Execute/Sync)도 per-query 완료(2026-06-28, `extsession.go`)** — Sync 까지 버퍼링해 배치 단위로 키의 샤드에 보내고, ParseComplete 를 합성해 ack 한 뒤 샤드별 prepare-on-first-use(저장된 Parse 주입 + 주입분 ParseComplete 필터)로 prepared statement 를 lazy 관리한다. 라이브 검증(lib/pq 한 연결 + prepared `WHERE id=$1` 5회 다른 키 → 키별 정확 라우팅). 구 pin-on-first(describe-round 단일 라운드)는 제거. *남은 범위*: cross-shard 2PC, extended scatter(키 없는 파이프라인 fan-out), Flush(H) 파이프라이닝.
 - [x] **읽기 → replica 라우팅** ✅(2026-06-28): main.go read resolver 결선 — env `PGROUTER_BACKEND_<SHARD>_REPLICA`(없으면 primary fallback) / status `StatusBackendResolver.ResolveRead`(Ready replica, failover-aware). 라이브: read alice→shard-0 replica, write→primary.
-- [x] **scatter-gather 실연결** ✅: `scattermode.go` 병렬 fan-out + UNION ALL 병합(라이브). 집계 재merge·전역 ORDER BY·LIMIT pushdown은 후속.
+- [x] **scatter-gather 실연결** ✅: `scattermode.go` 병렬 fan-out + UNION ALL 병합(라이브). ORDER BY/LIMIT pushdown ✅.
+- [x] **scatter 집계 재merge** ✅(2026-07-10): `scatter_aggregate.go` — COUNT/SUM/MIN/MAX 를 shard 별 부분 결과에서 재결합(GROUP BY 는 non-aggregate 컬럼 그룹핑). `MergeAggregate` 전략 + `Aggregates []AggregateFunc`. 정수 정밀도 유지(float 승격), SUM-no-rows=NULL·COUNT=0, LIMIT-pushdown 자동 비활성(정확성). 유닛 7종. **planner 가 SELECT 리스트를 분석해 Aggregates 를 세팅하는 결선은 후속**(AVG 는 SUM/COUNT rewrite 필요 → 범위 밖).
 - [x] **Reference table** ✅(2026-06-28): `shardSpec` `PGROUTER_REFERENCE_TABLES`(CSV) → reference-only 쿼리가 scatter 대신 AnyShard. 라이브: `SELECT FROM country` → 한 샤드(scatter 아님).
 - [~] **무중단 resharding 데이터 이동**: **데이터이동 core 완료(2026-06-28)** — `CopyShardRange`(vindex 키가 target shard 로 가는 row 만 hash-range 필터 복사, 라우팅과 동일 ResolveShard, reversible) + `DeleteShardRange`(cutover 후 source 정리). 라이브: 키 1..100 split → source 44(shard-0)/target 56(shard-1), overlap=0 키유실0. **InitialCopy 컨트롤러 결선 완료(2026-06-28)**: ShardSplitJob InitialCopy phase 가 target 별 K8s Job(reshard-copy 이미지, 클러스터 내부 trust 접속)으로 데이터 복사 + 완료까지 phase 게이트(`shardsplitjob_copy.go`, envtest 검증). pg_hba 가 내부 postgres 를 trust 하므로 자격증명 불요. **Cleanup(source 삭제 Job)·Cutover write-block(ShardRangeSpec.WriteBlocked→라우터 쓰기거부)도 결선 완료.** **full e2e 성공(2026-06-28, kind 실 K8s+실 PG)**: 단일샤드(키 1..100)→ShardSplitJob→전 phase→Completed, t0=44/t1=56/source=0 합=100 키유실0 + ShardRange flip + write-block 해제. e2e 가 갭 2개 발견·수정(Job 이미지 env, 스키마 우선 복제 `ensureTargetTable`). **남음**: 논리복제 CDC 증분 catch-up(복사 중 라이브 쓰기 보존=진짜 무중단), target 인덱스/PK 복제, target 영구 승격.
 - [ ] **cross-shard 2PC**: 사다리 6단계. **현재 명시적 범위 밖**(ROI 최저). 멀티테넌트 v1엔 불필요.

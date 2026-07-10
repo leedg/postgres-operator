@@ -73,6 +73,9 @@ const (
 	// MergeOrderBy — 첫 column 기준 k-way merge (사전식 비교).
 	// 실 구현 시 planner 가 ORDER BY column index + direction 을 전달.
 	MergeOrderBy
+	// MergeAggregate — shard 별 부분 집계(COUNT/SUM/MIN/MAX)를 컬럼별 함수로 재결합
+	// (GROUP BY 는 non-aggregate 컬럼으로 그룹핑). planner 가 Aggregates 를 전달.
+	MergeAggregate
 )
 
 // ScatterGather 는 동일 query 를 모든 지정 shard 에 fan-out 하고 gather + merge.
@@ -94,6 +97,9 @@ type ScatterGather struct {
 	// 전송량을 줄인다 (이미 LIMIT 가 있거나 다중문이면 건드리지 않음). merge 후 Limit 가
 	// 최종 cap 으로 다시 적용된다.
 	PushDownLimit bool
+	// Aggregates 는 Merge=MergeAggregate 일 때 각 출력 컬럼의 재결합 함수다(컬럼 index
+	// 정렬). AggNone = GROUP BY key / passthrough. planner 가 SELECT 리스트 분석 후 전달.
+	Aggregates []AggregateFunc
 }
 
 // NewScatterGather 는 ScatterGather 인스턴스를 반환한다. Shard 가 nil 이면
@@ -112,7 +118,9 @@ func (s *ScatterGather) Execute(ctx context.Context, query string, shards []Shar
 	}
 
 	// LIMIT pushdown: 각 샤드 전송량을 줄인다 (보수적 — 기존 LIMIT/다중문은 건드리지 않음).
-	if s.PushDownLimit && s.Limit > 0 {
+	// 집계 재결합(MergeAggregate)에서는 샤드별 LIMIT 가 부분 집계 전 행을 잘라 결과를
+	// 왜곡하므로 pushdown 하지 않는다.
+	if s.PushDownLimit && s.Limit > 0 && s.Merge != MergeAggregate {
 		query = withLimitPushdown(query, s.Limit)
 	}
 
@@ -164,6 +172,9 @@ func (s *ScatterGather) Execute(ctx context.Context, query string, shards []Shar
 }
 
 func (s *ScatterGather) merge(order []ShardID, collected map[ShardID][]Row) []Row {
+	if s.Merge == MergeAggregate && len(s.Aggregates) > 0 {
+		return s.mergeAggregate(order, collected)
+	}
 	if s.Merge != MergeOrderBy {
 		return mergeConcat(order, collected)
 	}

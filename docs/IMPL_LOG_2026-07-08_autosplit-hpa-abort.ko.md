@@ -13,6 +13,13 @@
 | `86f0add` | feat(router): active-connection 커스텀 메트릭 + HPA Pods 메트릭 |
 | `ff4f3e2` | feat(router): source-down abort fallback + 라이브 테스트 |
 | `cb4bf4e` | docs(handoff): §6.9 완료 반영 |
+| `8050ef3` | feat(reshard): Promote source-observation fence gate (ADR-0029 P-B.6) |
+| `650f149` | feat(autosplit): CPU 트리거 metrics.k8s.io 결선 (dep 0) |
+| `64afabd` | feat(router): scatter 집계 재merge (COUNT/SUM/MIN/MAX cross-shard) |
+| `66a52a1` | feat(router): /readyz 로 라우팅 테이블 확보 여부 반영 (readiness) |
+
+> **2026-07-10 후속**(dev-완결 백로그): P-B.6 fence(§7) → CPU 트리거 결선(§1 갱신) →
+> scatter 집계 재merge(§8) → 라우터 readiness(§9). 아래 §7~§9 참고.
 
 ---
 
@@ -278,4 +285,54 @@ go test ./internal/router -run 'TestReshardPKlessTargetConcurrentLive|TestReshar
   라우터 경유 클라 쓰기는 kind 필요).
 - **target 승격 후 live chaos/failover drill**: 승격 중 pod kill 로 #220-class 정체성 위험 확인
   (ADR-0029 P-B). 설계 = `docs/kb/adr/0029-*.md`.
+- **ShardRange/status watch informer**(라우터 hot-reload): 실제 watch 재접속·이벤트 정합은 live API
+  검증이 필요해 blind 구현 보류(현재 interval polling 10s 동작).
+- **stable per-shard primary Service**: primary Pod 라벨 관리가 failover 정체성 경로(#220-class)를
+  건드려 live chaos 없이 blind 구현 보류.
 - 재현 요약: [WORK_HANDOFF.ko.md §6.7](WORK_HANDOFF.ko.md) 의 kind e2e 재현 블록.
+
+---
+
+## 7. Promote source-observation fence gate (ADR-0029 P-B.6, `8050ef3`)
+
+resharding target 승격의 fence-vs-adopt race 를 닫는다. 기존 `promotePreconditionsMet` 는 ShardRange
+active set 에서 source 제외만 확인 → ShardRange flip 과 cluster reconciler 의 source scale-0/status
+제외(P-C.1) 사이 창에서 source·target 이 같은 `shard-id` 로 동시 관측되면 `aggregate_status` 가
+primary 2개(split-brain, #220-class)로 오판 가능했다.
+
+- `sourceObservationExcluded`(`internal/controller/shardsplitjob_controller.go`): 각 source 가
+  `PostgresCluster.status.shards` 의 Ready primary 로 아직 관측되면 adopt 보류(phase 유지 + requeue).
+  cluster CR 부재 시 관측 없음 → fence 충족(격리/삭제 경로 안전).
+- **설계 노트**: 처음 envtest ginkgo 로 작성했으나 full-suite 에서 running-manager 가 테스트 cluster
+  의 `status.shards` 를 재계산하며 경합(focused 통과·full 실패) → fake-client 유닛으로 결정론 검증 전환.
+- 검증: `TestSourceObservationExcluded`(fake client 4 케이스) + `_ClusterNotFound` PASS + controller
+  envtest 전체 PASS(Promote 4 spec 포함, 회귀 0). ADR-0029 §P-B.6 기록.
+
+## 8. scatter 집계 재merge (`64afabd`)
+
+능력 사다리 3단계 — scatter-gather 의 집계 재결합. `SELECT count(*) FROM t` 를 scatter 하면 shard 별
+부분 count 가 N 행으로 나와 틀렸다. 부분 집계를 함수별로 재결합해 정답 1행(또는 GROUP BY 그룹당 1행).
+
+- `internal/router/scatter_aggregate.go`: `MergeAggregate` 전략 + `Aggregates []AggregateFunc`
+  (컬럼별 함수, `AggNone`=GROUP BY key/passthrough). COUNT/SUM=합산, MIN=min, MAX=max. GROUP BY 는
+  non-aggregate 컬럼 그룹핑(그룹 순서=최초 등장). 정수 정밀도 유지(실수 등장 시 float64 승격).
+  SQL 시맨틱: COUNT-no-rows=0, SUM-no-rows=NULL. `MergeAggregate` 시 LIMIT pushdown 자동 비활성.
+- AVG 는 부분 평균 재결합 불가(가중 필요) → SUM/COUNT rewrite 필요, 범위 밖.
+- 검증: `TestScatterMergeAggregate` 7종(scalar count/sum, min/max, GROUP BY, SUM-null, float 승격,
+  GROUP BY+Limit, 빈 Aggregates→concat fallback) + router 전체 PASS.
+- **남은 것**: planner 가 SELECT 리스트를 분석해 `Aggregates` 를 세팅하는 결선(후속). merge 능력 자체는
+  tested building block(placement/metadata_store 와 동류).
+
+## 9. 라우터 readiness `/readyz` (`66a52a1`)
+
+라우터 HA 강화 — readiness 가 라우팅 가능 상태를 반영. 지금까지 `/healthz` 만(항상 200) 있어 토폴로지
+미확보 상태에서도 k8s 가 트래픽을 보낼 수 있었다.
+
+- `cmd/pg-router/metrics.go`: `routerReady`(atomic.Bool) + `/readyz`(미확보 503 → Service endpoint
+  제외). `/healthz`=liveness(항상 200) 분리. `main.go`: static 즉시 ready, crd 는 초기 Refresh 성공
+  시 ready(실패 시 refreshLoop 가 이후 확보하면 회복, 캐시 서빙이라 일시 실패로 안 내림).
+- 라우터 Deployment(operator `buildRouterDeployment` + `config/router/deployment.yaml`)에
+  readinessProbe(`/readyz`:9187) 결선.
+- 검증: `TestReadyzHandler_ReflectsRoutingReadiness`(503/200) + builder probe 단언 + pg-router/controller
+  전체 PASS.
+- **남은 것**: 백엔드 능동 도달성 프로빙(현재는 토폴로지 확보 신호 + circuit-breaker 가 dial 커버).

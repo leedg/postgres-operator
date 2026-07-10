@@ -449,6 +449,19 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   cdc-abort 가 정상 drop 실패 시 이를 fallback 으로 사용. env-guarded 라이브 테스트 2종 추가
   (`internal/router/reshard_native_live_test.go`: PK-없는 target 동시 UPDATE/DELETE seq-scan 경로 +
   abort fallback 메커니즘) — `RESHARD_LIVE_*` env + postgres:18 2개로 실행(kind/make 불요).
+- **라우터 dev 백로그 진척(2026-07-10, SSOT=[ROUTER-GAP-ANALYSIS](sharding/ROUTER-GAP-ANALYSIS.ko.md) §6,
+  상세=[IMPL_LOG](IMPL_LOG_2026-07-08_autosplit-hpa-abort.ko.md) §7~§10)**: ① scatter 집계 재merge
+  (COUNT/SUM/MIN/MAX, `64afabd`) ② 라우터 `/readyz` readiness(`66a52a1`) ③ stable per-shard primary
+  Service(ExternalName failover-follow, `d24fef8`) ④ Promote source-observation fence(ADR-0029 P-B.6,
+  `8050ef3`) 완료. **dev-완결 가능 백로그 소진** — 남은 것: ShardRange/status watch informer(실 watch
+  재접속 정합이 live 검증 필요), 아래 kind-live 게이트.
+- **남은 live gate**: native router concurrent-write online resharding e2e(클라 쓰기를 라우터 경유로 받는
+  무중단 cutover 실증), target promotion 후 live chaos/failover drill 은 kind live 필요(별도 체크포인트).
+  **source-down abort cleanup fallback 구현 완료(2026-07-08)**: `router.ForceDropSubscription`
+  (DISABLE→slot detach→DROP)으로 publisher 접속 없이 target subscription 제거, `cmd/reshard-copy-poc`
+  cdc-abort 가 정상 drop 실패 시 이를 fallback 으로 사용. env-guarded 라이브 테스트 2종 추가
+  (`internal/router/reshard_native_live_test.go`: PK-없는 target 동시 UPDATE/DELETE seq-scan 경로 +
+  abort fallback 메커니즘) — `RESHARD_LIVE_*` env + postgres:18 2개로 실행(kind/make 불요).
 - **의도적 보류**: source Service/PVC/PDB 삭제는 기본 동작이 아니며, 향후 별도 opt-in 정책과 live drill 후에만
   검토한다. cross-shard 2PC, extended scatter, Flush 파이프라이닝도 아직 범위 밖이다.
 

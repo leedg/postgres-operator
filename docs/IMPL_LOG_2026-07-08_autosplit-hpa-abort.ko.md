@@ -287,8 +287,9 @@ go test ./internal/router -run 'TestReshardPKlessTargetConcurrentLive|TestReshar
   (ADR-0029 P-B). 설계 = `docs/kb/adr/0029-*.md`.
 - **ShardRange/status watch informer**(라우터 hot-reload): 실제 watch 재접속·이벤트 정합은 live API
   검증이 필요해 blind 구현 보류(현재 interval polling 10s 동작).
-- **stable per-shard primary Service**: primary Pod 라벨 관리가 failover 정체성 경로(#220-class)를
-  건드려 live chaos 없이 blind 구현 보류.
+- ~~stable per-shard primary Service~~ → **§10 으로 구현 완료**(2026-07-10, ExternalName 방식 —
+  pod 라벨 미변경이라 #220 무관, envtest 검증). 초기 "정체성 리스크" 판단은 *pod-label 방식* 기준
+  이었고, operator-managed ExternalName alias 방식으로 안전하게 dev-완결.
 - 재현 요약: [WORK_HANDOFF.ko.md §6.7](WORK_HANDOFF.ko.md) 의 kind e2e 재현 블록.
 
 ---
@@ -336,3 +337,23 @@ primary 2개(split-brain, #220-class)로 오판 가능했다.
 - 검증: `TestReadyzHandler_ReflectsRoutingReadiness`(503/200) + builder probe 단언 + pg-router/controller
   전체 PASS.
 - **남은 것**: 백엔드 능동 도달성 프로빙(현재는 토폴로지 확보 신호 + circuit-breaker 가 dial 커버).
+
+## 10. stable per-shard primary Service (2026-07-10)
+
+각 샤드의 *현재 primary* 를 가리키는 안정 Service 를 operator 가 publish/failover 갱신한다 → 라우터/
+클라이언트가 status polling 없이 DNS 만으로 failover-follow(§6 백로그).
+
+- `internal/controller/builders.go`: `buildShardPrimaryService`(ExternalName Service — primary Pod 의
+  안정 headless DNS 로의 CNAME alias) + `primaryEndpointHost`(status Endpoint "host:port"→host).
+  `names.go`: `ShardPrimaryServiceName(<cluster>-<shard>-primary)`.
+- `postgrescluster_controller.go`: `reconcileShardPrimaryServices` — 각 shard 의 Ready primary 에 대해
+  ExternalName Service upsert(not-ready/부재 shard 는 skip, flap 방지). `copySpec` 의 Service case 에
+  `ExternalName` 동기화 추가(failover 시 갱신 핵심). status 집계 후 best-effort 호출.
+- **정체성 안전**: pod 라벨을 건드리지 않는다(operator 단일권한 ExternalName alias) → #220-class
+  split-brain 경로 무관. selectorless 라 endpoint controller 와도 무경합. RBAC 는 기존 services 권한 충족.
+- **설계 선택**: ExternalName(최소 surface — Pod IP/EndpointSlice 관리 불요) vs selectorless+EndpointSlice.
+  primary Pod 이 이미 headless per-pod DNS 를 가지므로 CNAME alias 만 operator 가 관리하면 충분.
+- 검증: `TestReconcileShardPrimaryServices_PublishAndFailoverUpdate`(초기 publish + pod-0→pod-1 failover
+  시 ExternalName 갱신) + `_SkipNotReadyOrNoPrimary` + `TestBuildShardPrimaryService` + `TestPrimaryEndpointHost`
+  + controller envtest 전체 PASS(회귀 0).
+- **남은 것**: 라우터가 이 primary Service DNS 를 backend 로 소비하는 config 결선(env/template — 후속).

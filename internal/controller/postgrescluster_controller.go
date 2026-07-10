@@ -518,6 +518,16 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	applyClusterConditions(&cluster, activeShardCount, allShardPrimaryReady, routerActive, routerStatus, hibernating, standaloneReplica,
 		prevPhase == postgresv1alpha1.ClusterPhaseReady, failoverDecision)
 
+	// per-shard primary Service: 각 shard 의 현재 Ready primary 를 가리키는 ExternalName
+	// Service 를 publish/갱신한다(§6 stable per-shard primary Service). failover 로 primary
+	// 가 바뀌면 다음 reconcile 이 ExternalName 을 새 primary 로 갱신 → 라우터/클라가 DNS 로
+	// failover-follow(status polling 불요). DB 정지 중엔 primary 부재이므로 skip. best-effort.
+	if !databasePodsStopped {
+		if err := r.reconcileShardPrimaryServices(ctx, &cluster, shardStatuses); err != nil {
+			logger.Error(err, "per-shard primary Service reconcile 실패(best-effort, reconcile 계속)")
+		}
+	}
+
 	// AutoSplit: shard 관측 → 트리거 지속 판정 → 후보 있으면 ShardSplitJob 자동 생성.
 	// DB 정지 중에는 관측치가 무의미하므로 skip. spec.autoSplit 이 nil/비활성이면
 	// reconcileAutoSplit 이 즉시 Disabled 로 반환하고 condition 은 갱신하지 않는다.
@@ -573,6 +583,33 @@ func restoreInProgress(cluster *postgresv1alpha1.PostgresCluster) bool {
 		return false
 	}
 	return strings.TrimSpace(cluster.Annotations[AnnotationRestoreInProgress]) != ""
+}
+
+// reconcileShardPrimaryServices 는 각 shard 의 현재 Ready primary 를 가리키는
+// ExternalName Service 를 upsert 한다(§6 stable per-shard primary Service). primary 가
+// 없거나 not-ready 인 shard 는 skip(마지막 값 보존 — flap 방지). failover 시 primary
+// Endpoint 가 바뀌면 ExternalName 이 갱신되어 이 이름을 참조하는 라우터/클라이언트가
+// status polling 없이 새 primary 로 접속한다.
+func (r *PostgresClusterReconciler) reconcileShardPrimaryServices(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+	shards []postgresv1alpha1.ShardStatus,
+) error {
+	for i := range shards {
+		s := &shards[i]
+		if s.Name == "" || s.Primary == nil || !s.Primary.Ready {
+			continue
+		}
+		host := primaryEndpointHost(s.Primary.Endpoint)
+		if host == "" {
+			continue
+		}
+		svc := buildShardPrimaryService(cluster, ShardPrimaryServiceName(cluster.Name, s.Name), host)
+		if err := r.upsert(ctx, cluster, svc); err != nil {
+			return fmt.Errorf("upsert primary Service for shard %q: %w", s.Name, err)
+		}
+	}
+	return nil
 }
 
 func (r *PostgresClusterReconciler) reconcileActiveNamedShardResources(
@@ -981,10 +1018,12 @@ func copySpec(dst, src client.Object) {
 	case *corev1.Service:
 		s := src.(*corev1.Service)
 		// ClusterIP 는 immutable 이므로 기존 값 보존 (CreateOrUpdate 가 이미 채워둠).
-		// Selector, Ports, Type 만 desired 로 동기화.
+		// Selector, Ports, Type, ExternalName 만 desired 로 동기화. ExternalName 은
+		// per-shard primary Service 가 failover 시 새 primary 로 갱신하는 핵심 필드다.
 		d.Spec.Selector = s.Spec.Selector
 		d.Spec.Ports = s.Spec.Ports
 		d.Spec.Type = s.Spec.Type
+		d.Spec.ExternalName = s.Spec.ExternalName
 		d.Labels = s.Labels
 	case *appsv1.StatefulSet:
 		s := src.(*appsv1.StatefulSet)

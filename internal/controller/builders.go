@@ -671,6 +671,42 @@ func buildClientService(cluster *postgresv1alpha1.PostgresCluster, name, role st
 	}
 }
 
+// buildShardPrimaryService 는 shard 의 *현재 primary* 를 가리키는 ExternalName Service 를
+// 만든다(§6 stable per-shard primary Service). externalHost 는 현재 primary Pod 의 안정
+// DNS(host, 포트 제외)다. operator 가 failover 시 externalHost 를 갱신하면 이 이름을
+// 참조하는 라우터/클라이언트가 새 primary 로 따라간다 — status polling 불요, DNS 만으로
+// failover-follow.
+//
+// ExternalName 을 쓰는 이유: primary Pod 는 이미 shard headless Service 로 안정 per-pod
+// DNS 를 가지므로, 그 DNS 로의 CNAME alias 만 operator 가 관리하면 된다(EndpointSlice/Pod
+// IP 관리 불요 — 최소 surface). selector 가 없어 endpoint controller 와 경합하지 않는다.
+func buildShardPrimaryService(cluster *postgresv1alpha1.PostgresCluster, name, externalHost string) *corev1.Service {
+	labels := SelectorLabels(cluster.Name, "shard-primary", -1)
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: cluster.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: externalHost,
+		},
+	}
+}
+
+// primaryEndpointHost 는 status 의 primary Endpoint("host:port")에서 host 만 뽑는다.
+// 포트가 없으면 그대로 반환. 빈 문자열이면 빈 문자열.
+func primaryEndpointHost(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	if i := strings.LastIndex(endpoint, ":"); i > 0 {
+		return endpoint[:i]
+	}
+	return endpoint
+}
+
 // buildInstanceServiceAccount 는 instance Pod 가 사용할 ServiceAccount 를 만든다.
 // cluster 단위 단일 SA — 모든 shard Pod 가 공유 (namespace-scoped).
 func buildInstanceServiceAccount(cluster *postgresv1alpha1.PostgresCluster) *corev1.ServiceAccount {

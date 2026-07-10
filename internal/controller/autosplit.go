@@ -4,13 +4,13 @@
 // durationMinutes 동안 *지속*되면 그 shard 의 키 범위를 중점에서 둘로 나누는
 // ShardSplitJob 을 자동 생성한다(requireApproval 이면 승인 annotation 대기).
 //
-// 관측 파이프라인: instance manager 가 primary 에서 pg_database_size 를 statusapi.Status.
-// SizeBytes 로 보고 → aggregate_status 가 ShardStatus.SizeBytes 로 집계 → 여기 default
-// observer(statusShardObserver)가 그 값을 읽는다. CPU / P99 latency 트리거는 스키마상
-// 지원되나 metrics 소스(metrics.k8s.io / router 메트릭)가 아직 결선되지 않아 관측치가
-// 0 이다 — 활성화 시 AND 조건상 자동 split 이 발동하지 않으며(오탐 방지) 그 사실을
-// AutoSplitEligible condition 메시지로 노출한다. 후속으로 metrics 소스를 결선하면
-// observer 만 교체하면 된다(그 외 로직 불변).
+// 관측 파이프라인: ① size = instance manager 가 primary 에서 pg_database_size 를
+// statusapi.Status.SizeBytes 로 보고 → aggregate_status 가 ShardStatus.SizeBytes 로 집계
+// → statusShardObserver 가 읽음. ② cpu = cpuAugmentingObserver 가 shard primary Pod 의
+// metrics.k8s.io PodMetrics(사용량) ÷ Pod CPU request × 100 을 계산(autosplit_cpu.go).
+// metrics-server 부재 시 CPU 관측 0(graceful — AND 조건상 CPU 트리거 미발동, 오탐 없음).
+// ③ P99 latency 는 아직 미결선(라우터 per-shard 지연 히스토그램 필요) → 0. latency 만
+// 활성화 시 AutoSplitEligible condition 이 MetricsSourceMissing 으로 사유를 노출한다.
 package controller
 
 import (
@@ -58,9 +58,10 @@ type ShardObservation struct {
 	ShardID string
 	// SizeBytes 는 shard 데이터베이스 크기(bytes). 0 = 미관측.
 	SizeBytes int64
-	// CPUPercent 는 평균 CPU 사용률(%). 0 = 미관측(metrics 소스 미결선).
+	// CPUPercent 는 평균 CPU 사용률(%, 사용량/request). 0 = 미관측(metrics-server 부재
+	// 또는 request 미설정). cpuAugmentingObserver 가 채운다.
 	CPUPercent int32
-	// P99LatencyMs 는 P99 지연(ms). 0 = 미관측(metrics 소스 미결선).
+	// P99LatencyMs 는 P99 지연(ms). 0 = 미관측(라우터 지연 메트릭 미결선 — 후속).
 	P99LatencyMs int32
 }
 
@@ -68,15 +69,15 @@ type ShardObservation struct {
 // statusShardObserver 는 cluster.Status.Shards 에서 순수하게 읽어 테스트 가능하며,
 // metrics 소스 결선 시 이 인터페이스만 교체한다.
 type ShardMetricsObserver interface {
-	ObserveShards(cluster *postgresv1alpha1.PostgresCluster) []ShardObservation
+	ObserveShards(ctx context.Context, cluster *postgresv1alpha1.PostgresCluster) []ShardObservation
 }
 
-// statusShardObserver 는 cluster.Status.Shards 에서 관측치를 읽는 default observer.
-// SizeBytes 는 aggregate_status 가 primary 보고값으로 채운다. CPU / latency 는 아직
-// 소스가 없어 0(미관측)으로 둔다.
+// statusShardObserver 는 cluster.Status.Shards 에서 관측치를 읽는 base observer.
+// SizeBytes 는 aggregate_status 가 primary 보고값으로 채운다. CPU / latency 는 여기서
+// 0(미관측). CPU 는 cpuAugmentingObserver 가 metrics.k8s.io 로 보강한다.
 type statusShardObserver struct{}
 
-func (statusShardObserver) ObserveShards(cluster *postgresv1alpha1.PostgresCluster) []ShardObservation {
+func (statusShardObserver) ObserveShards(_ context.Context, cluster *postgresv1alpha1.PostgresCluster) []ShardObservation {
 	if cluster == nil {
 		return nil
 	}
@@ -89,7 +90,7 @@ func (statusShardObserver) ObserveShards(cluster *postgresv1alpha1.PostgresClust
 		obs = append(obs, ShardObservation{
 			ShardID:   s.Name,
 			SizeBytes: s.SizeBytes,
-			// CPUPercent / P99LatencyMs: metrics 소스 미결선 → 0.
+			// CPUPercent 는 cpuAugmentingObserver 가 보강, P99LatencyMs 는 미결선 → base 는 0.
 		})
 	}
 	return obs
@@ -290,10 +291,10 @@ func (r *PostgresClusterReconciler) reconcileAutoSplit(
 	}
 
 	if r.Observer == nil {
-		r.Observer = statusShardObserver{}
+		r.Observer = newDefaultShardObserver(r.Client)
 	}
 	obsByShard := map[string]ShardObservation{}
-	for _, o := range r.Observer.ObserveShards(cluster) {
+	for _, o := range r.Observer.ObserveShards(ctx, cluster) {
 		obsByShard[o.ShardID] = o
 	}
 
@@ -361,8 +362,10 @@ func (r *PostgresClusterReconciler) reconcileAutoSplit(
 				continue
 			}
 			obs := obsByShard[entry.Shard]
-			breached, _, enCPU, enLat := autoSplitTriggerBreached(as.Triggers, obs)
-			if enCPU || enLat {
+			breached, _, _, enLat := autoSplitTriggerBreached(as.Triggers, obs)
+			// P99 latency 는 아직 metrics 소스 미결선(CPU 는 cpuAugmentingObserver 로
+			// metrics.k8s.io 결선됨). latency 트리거만 unsourced 로 표기한다.
+			if enLat {
 				unsourcedTrigger = true
 			}
 			key := cluster.Namespace + "/" + cluster.Name + "/" + sr.Spec.Keyspace + "/" + entry.Shard
@@ -381,7 +384,7 @@ func (r *PostgresClusterReconciler) reconcileAutoSplit(
 		case unsupportedVindex:
 			return 0, autoSplitReasonUnsupported, "자동 split 은 hash vindex 만 지원(현 keyspace 미지원)"
 		case unsourcedTrigger:
-			return 0, autoSplitReasonNoMetrics, "cpu/p99 트리거가 설정됐으나 metrics 소스 미결선 — size 트리거만 관측됨"
+			return 0, autoSplitReasonNoMetrics, "p99 latency 트리거가 설정됐으나 metrics 소스 미결선(size·cpu 만 관측)"
 		default:
 			return 0, autoSplitReasonNone, "임계 초과 지속 shard 없음"
 		}

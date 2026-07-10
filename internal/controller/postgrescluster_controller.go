@@ -128,6 +128,7 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardranges,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
@@ -1093,7 +1094,7 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.PromotionPodExecutor = executor
 	}
 	if r.Observer == nil {
-		r.Observer = statusShardObserver{}
+		r.Observer = newDefaultShardObserver(r.Client)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresCluster{}).

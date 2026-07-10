@@ -437,9 +437,11 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   `aggregate_status` 가 `ShardStatus.SizeBytes` 집계 → default observer 가 읽음). 트리거 AND 평가 +
   `durationMinutes` 지속 추적, `router.SplitHashRange` 중점 분할 → 멱등 `ShardSplitJob` 생성(owner=cluster),
   `requireApproval` 이면 SSJ 컨트롤러가 승인 annotation 전까지 Pending 유지. `AutoSplitEligible` condition.
-  **남은 것**: CPU / P99 latency 트리거는 metrics 소스(metrics.k8s.io / router 메트릭) 미결선이라 관측치 0
-  (AND 조건상 오탐 없이 미발동, condition 메시지로 노출) — size 트리거만 실동작. AutoSplit *트리거의 자동
-  실행 루프*는 되나, 자동 생성된 job 의 online 여부는 기본 offline(운영자 승인 전 편집 가능).
+  **CPU 트리거 결선 완료(2026-07-10)**: `cpuAugmentingObserver`(`autosplit_cpu.go`)가 shard primary Pod 의
+  metrics.k8s.io PodMetrics(unstructured GET, dep 0) 사용량 ÷ Pod CPU request × 100 으로 CPU% 를 채운다.
+  metrics-server / request 부재 시 graceful 0(오탐 없음). RBAC `metrics.k8s.io/pods get;list` 추가.
+  **남은 것**: P99 latency 트리거만 미결선(라우터 per-shard 지연 히스토그램 필요, 후속). size·cpu 는 실동작.
+  자동 생성된 job 의 online 여부는 기본 offline(운영자 승인 전 편집 가능).
 - **남은 live gate**: native router concurrent-write online resharding e2e(클라 쓰기를 라우터 경유로 받는
   무중단 cutover 실증), target promotion 후 live chaos/failover drill 은 kind live 필요(별도 체크포인트).
   **source-down abort cleanup fallback 구현 완료(2026-07-08)**: `router.ForceDropSubscription`

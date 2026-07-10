@@ -198,7 +198,7 @@ func TestStatusShardObserver(t *testing.T) {
 			},
 		},
 	}
-	obs := statusShardObserver{}.ObserveShards(cluster)
+	obs := statusShardObserver{}.ObserveShards(context.Background(), cluster)
 	if len(obs) != 2 {
 		t.Fatalf("expected 2 observations, got %d", len(obs))
 	}
@@ -213,7 +213,7 @@ func TestStatusShardObserver(t *testing.T) {
 // fakeObserver 는 고정 관측치를 반환하는 테스트 observer.
 type fakeObserver struct{ obs []ShardObservation }
 
-func (f fakeObserver) ObserveShards(_ *postgresv1alpha1.PostgresCluster) []ShardObservation {
+func (f fakeObserver) ObserveShards(_ context.Context, _ *postgresv1alpha1.PostgresCluster) []ShardObservation {
 	return f.obs
 }
 
@@ -338,8 +338,9 @@ func TestReconcileAutoSplit_UnsourcedMetricsReason(t *testing.T) {
 	scheme := newScheme(t)
 	ns := "default"
 	cluster := autoSplitCluster("demo", ns, false)
-	// cpu 트리거를 추가 — 소스 미결선이라 breach 불가.
-	cluster.Spec.AutoSplit.Triggers.CPUPercent = 80
+	// p99 latency 트리거를 추가 — 라우터 지연 메트릭 미결선이라 breach 불가.
+	// (cpu 는 이제 cpuAugmentingObserver 로 결선되어 unsourced 아님.)
+	cluster.Spec.AutoSplit.Triggers.P99LatencyMs = 50
 	sr := autoSplitShardRange("demo", ns, "myks", "shard-0")
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(cluster, sr).Build()
 
@@ -350,7 +351,7 @@ func TestReconcileAutoSplit_UnsourcedMetricsReason(t *testing.T) {
 	}
 	eligible, reason, _ := r.reconcileAutoSplit(context.Background(), cluster, time.Now())
 	if eligible != 0 {
-		t.Fatalf("eligible = %d, want 0 (cpu unsourced blocks AND)", eligible)
+		t.Fatalf("eligible = %d, want 0 (latency unsourced blocks AND)", eligible)
 	}
 	if reason != autoSplitReasonNoMetrics {
 		t.Fatalf("reason = %q, want %q", reason, autoSplitReasonNoMetrics)

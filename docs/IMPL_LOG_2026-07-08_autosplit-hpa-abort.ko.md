@@ -94,7 +94,9 @@ instance manager (primary)                aggregate_status               autospl
 ### 1.2 제어 루프 (`internal/controller/autosplit.go`)
 
 1. **observer** (`ShardMetricsObserver`, default `statusShardObserver`): `cluster.Status.Shards` 에서
-   순수하게 관측치 읽기(테스트 가능). CPU / P99 latency 는 metrics 소스 미결선 → 0.
+   순수하게 관측치 읽기(테스트 가능). **CPU 는 cpuAugmentingObserver 가 metrics.k8s.io
+   PodMetrics(사용량) ÷ Pod CPU request × 100 으로 보강**(2026-07-10, `autosplit_cpu.go`,
+   dep 0 = unstructured GET, metrics-server 부재 시 graceful 0). P99 latency 만 미결선(0).
 2. **트리거 평가** (`autoSplitTriggerBreached`): 활성 트리거(임계>0)를 **모두** 만족(AND). size 는
    GB→bytes 환산. cpu/latency 는 관측 0 이라 임계(>0) 미달 → 미발동(오탐 방지).
 3. **지속 추적** (`autoSplitSustained`): breach 가 `durationMinutes` 동안 지속되어야 자격
@@ -135,7 +137,11 @@ kubectl annotate shardsplitjob <name> postgres.keiailab.io/autosplit-approved=tr
 - `go test ./internal/controller` 전체 envtest **PASS 36.4s** — AutoSplit 유닛 8종
   (트리거 AND / 지속 / 후보 / 이름 / 승인게이트 / observer) + fake-client reconcile 3종
   (승인게이트 job 생성·멱등 / 임계미달 무생성 / cpu 미결선 `MetricsSourceMissing`).
-- **남은 것**: cpu/latency 트리거의 metrics 소스(metrics.k8s.io / router 메트릭) 결선 시 observer 만 교체.
+- **CPU 트리거 결선 완료(2026-07-10)**: `cpuAugmentingObserver`(`autosplit_cpu.go`)가 shard primary
+  Pod 의 metrics.k8s.io PodMetrics(unstructured GET, dep 0) 사용량을 Pod CPU request 로 나눠 CPU% 를
+  채운다. metrics-server / request 부재 시 graceful 0(오탐 없음). RBAC `metrics.k8s.io/pods get;list`
+  추가. 유닛: `TestCPUAugmentingObserver`(80% / 200% / 미관측 / request 미설정 + NoPrimaryPod).
+- **남은 것**: P99 latency 트리거만 미결선 — 라우터가 per-shard 지연 히스토그램을 노출해야 한다(후속).
 
 ---
 

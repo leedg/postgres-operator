@@ -32,6 +32,7 @@ Adjust env in `deployment.yaml`:
 | `PGROUTER_CLUSTER` / `PGROUTER_KEYSPACE` | which cluster + keyspace this router fronts |
 | `PGROUTER_REFRESH` | ShardRange re-read interval (hot-reload) |
 | `PGROUTER_BACKEND_TEMPLATE` | shard → backend DNS, with `{cluster}`/`{shard}`/`{namespace}` |
+| `PGROUTER_BACKEND=primary-service` | resolve each shard to `<cluster>-<shard>-primary` (operator-published failover-following Service — DNS-native failover, no status polling) |
 | `PGROUTER_METRICS_ADDR` | `/metrics` + `/healthz` HTTP listen addr (default `:9187`; `""` disables) |
 
 RBAC is least-privilege: `get/list/watch` on `shardranges` in the router's own

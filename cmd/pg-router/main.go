@@ -24,11 +24,12 @@ Licensed under the MIT License. See the LICENSE file for details.
 //     primary yields a graceful PostgreSQL ErrorResponse to the client (no hang,
 //     no silent drop).
 //
-// Config (env): PGROUTER_LISTEN (:5432), PGROUTER_TOPOLOGY, PGROUTER_BACKEND,
-// PGROUTER_CLUSTER, PGROUTER_KEYSPACE (default), PGROUTER_NAMESPACE (default),
-// PGROUTER_REFRESH (10s), PGROUTER_DIAL_TIMEOUT (5s),
+// Config (env): PGROUTER_LISTEN (:5432), PGROUTER_TOPOLOGY, PGROUTER_BACKEND
+// (env|template|primary-service|status), PGROUTER_CLUSTER, PGROUTER_KEYSPACE (default),
+// PGROUTER_NAMESPACE (default), PGROUTER_REFRESH (10s), PGROUTER_DIAL_TIMEOUT (5s),
 // PGROUTER_BACKEND_TEMPLATE ({cluster}/{shard}/{namespace}),
-// PGROUTER_BACKEND_SHARD_0 / _1 (env mode host:port).
+// PGROUTER_BACKEND_SHARD_0 / _1 (env mode host:port). primary-service mode resolves each
+// shard to `<cluster>-<shard>-primary` (operator-published failover-following Service).
 package main
 
 import (
@@ -145,6 +146,12 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 		readResolve = envReadBackendResolver
 	case "template":
 		resolve = templateResolver()
+	case "primary-service":
+		// operator-published per-shard primary Service(ExternalName failover-follow) 소비.
+		// reads 도 primary Service 로(이 모드는 replica read 미지원 — 필요 시 status 모드).
+		r := primaryServiceResolver(cluster, ns)
+		resolve = r
+		readResolve = r
 	case "status":
 		statusRes = router.NewStatusBackendResolver()
 		statusReader = clusterStatusReader{c: k8s}
@@ -154,7 +161,7 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 		resolve = statusRes.Resolve
 		readResolve = statusRes.ResolveRead // Ready replica, falls back to primary.
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|status)", backendMode)
+		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|primary-service|status)", backendMode)
 	}
 
 	if crdProvider != nil || statusRes != nil {
@@ -431,6 +438,16 @@ func templateResolver() router.BackendResolver {
 	).Replace(tmpl)
 	return func(shardID string) (string, error) {
 		return strings.NewReplacer("{shard}", shardID).Replace(base), nil
+	}
+}
+
+// primaryServiceResolver maps each shard to its operator-published per-shard *primary*
+// Service DNS (`<cluster>-<shard>-primary.<ns>.svc.cluster.local:5432`). The operator
+// keeps that Service pointing at the shard's current primary (ExternalName failover-
+// follow), so the router follows failover via DNS without polling PostgresCluster status.
+func primaryServiceResolver(cluster, ns string) router.BackendResolver {
+	return func(shardID string) (string, error) {
+		return fmt.Sprintf("%s-%s-primary.%s.svc.cluster.local:5432", cluster, shardID, ns), nil
 	}
 }
 

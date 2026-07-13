@@ -9,6 +9,7 @@ package controller
 import (
 	"fmt"
 	"maps"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1406,10 +1407,109 @@ func buildRouterHPA(cluster *postgresv1alpha1.PostgresCluster, deploymentName st
 	}
 }
 
-// buildRouterDeployment는 stateless QueryRouter의 Deployment를 만든다.
-// ADR 0003 §강제 메커니즘에 의해 PVC를 절대 마운트하지 않는다(StatefulSet 사용
-// 금지). 본 함수는 P12-T2 시점에 cmd/router 바이너리 이미지로 교체된다. 현재는
-// PG 베이스 이미지를 그대로 사용하는 placeholder.
+// routerImage 는 QueryRouter Pod 가 실행할 pg-router 이미지다 (ROUTER_IMAGE 로 주입,
+// 미설정 시 기본값 — 로컬 빌드 후 노드에 import 한 태그). reshardCopyImage() 와 동일 패턴:
+// 이미지 경로는 배포 환경 관심사이므로 CRD 가 아니라 operator env 로 받는다.
+func routerImage() string {
+	if v := os.Getenv("ROUTER_IMAGE"); v != "" {
+		return v
+	}
+	return "ghcr.io/keiailab/pg-router:dev"
+}
+
+// routerKeyspace 는 라우터가 조회할 ShardRange 의 keyspace 다. cmd/pg-router 의
+// PGROUTER_KEYSPACE 기본값과 정합 — ShardRange.spec.keyspace 가 이 값이어야 라우팅된다.
+const routerKeyspace = "default"
+
+// routerEnv 는 cmd/pg-router 의 env 계약을 채운다. namespace/cluster 는 CR 에서,
+// topology/backend 는 K8s API 기반 동적 모드로 고정한다(정적 env 토폴로지는 reshard 시
+// 라우팅 테이블이 갱신되지 않아 본 오퍼레이터 모델과 맞지 않는다).
+func routerEnv(cluster *postgresv1alpha1.PostgresCluster) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "PGROUTER_NAMESPACE", Value: cluster.Namespace},
+		{Name: "PGROUTER_CLUSTER", Value: cluster.Name},
+		{Name: "PGROUTER_KEYSPACE", Value: routerKeyspace},
+		{Name: "PGROUTER_TOPOLOGY", Value: "crd"},
+		{Name: "PGROUTER_BACKEND", Value: "status"},
+		{Name: "PGROUTER_LISTEN", Value: fmt.Sprintf(":%d", pgPort)},
+		{Name: "PGROUTER_METRICS_ADDR", Value: fmt.Sprintf(":%d", routerMetricsPort)},
+	}
+}
+
+// buildRouterServiceAccount 는 router Pod 전용 ServiceAccount 다. instance SA 와 분리한다
+// — router 는 PVC fence/lease 권한이 필요 없고(최소권한), instance 는 ShardRange 읽기가
+// 필요 없다.
+func buildRouterServiceAccount(cluster *postgresv1alpha1.PostgresCluster) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterServiceAccountName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+	}
+}
+
+// buildRouterRole 는 pg-router 의 K8s 읽기 권한(최소)이다.
+//
+//   - shardranges: PGROUTER_TOPOLOGY=crd 의 키→샤드 매핑 소스 (watch 로 hot-reload)
+//   - postgresclusters(+status): PGROUTER_BACKEND=status 의 샤드 엔드포인트 소스
+//     (failover 로 primary 가 바뀌면 status 를 통해 인지)
+//
+// 쓰기 verb 는 없다 — 라우터는 CR 을 변경하지 않는다.
+func buildRouterRole(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.Role {
+	return &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterRoleName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{postgresv1alpha1.GroupVersion.Group},
+				Resources: []string{"shardranges", "postgresclusters"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{postgresv1alpha1.GroupVersion.Group},
+				Resources: []string{"shardranges/status", "postgresclusters/status"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+}
+
+// buildRouterRoleBinding 은 router SA ↔ Role 결합이다.
+func buildRouterRoleBinding(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterRoleBindingName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      RouterServiceAccountName(cluster.Name),
+			Namespace: cluster.Namespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     RouterRoleName(cluster.Name),
+		},
+	}
+}
+
+// buildRouterDeployment는 stateless QueryRouter(cmd/pg-router)의 Deployment를 만든다.
+// ADR 0003 §강제 메커니즘에 의해 PVC를 절대 마운트하지 않는다(StatefulSet 사용 금지).
+//
+// image 는 pg-router 이미지여야 한다(routerImage() 가 결정). PG 베이스 이미지를 넘기면
+// 그 엔트리포인트가 POD_NAME 등 instance 전용 env 를 요구해 CrashLoop 한다.
+//
+// env 는 cmd/pg-router 의 계약(PGROUTER_*)이다:
+//   - TOPOLOGY=crd     — ShardRange CR 에서 키→샤드 매핑을 읽고 watch 로 hot-reload
+//   - BACKEND=status   — PostgresCluster.status 에서 샤드 primary/replica 엔드포인트를
+//     해석(failover 인지). 두 모드 모두 K8s API 를 읽으므로 전용 SA/Role 이 필요하다
+//     (buildRouterServiceAccount/Role/RoleBinding).
 func buildRouterDeployment(
 	cluster *postgresv1alpha1.PostgresCluster,
 	name, configMapName, image string,
@@ -1444,12 +1544,14 @@ func buildRouterDeployment(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
-					SecurityContext: dataplanePodSecurityContext(),
+					ServiceAccountName: RouterServiceAccountName(cluster.Name),
+					SecurityContext:    dataplanePodSecurityContext(),
 					Containers: []corev1.Container{{
 						Name:            "router",
 						Image:           image,
 						Resources:       resources,
 						SecurityContext: dataplaneContainerSecurityContext(),
+						Env:             routerEnv(cluster),
 						Ports: []corev1.ContainerPort{{
 							Name:          "postgres",
 							ContainerPort: pgPort,

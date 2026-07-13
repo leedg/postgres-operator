@@ -402,13 +402,25 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.upsert(ctx, &cluster, buildClientService(&cluster, svcName, "router")); err != nil {
 			return r.handleUpsertErr(ctx, &cluster, err, "router Service", logger)
 		}
-		// router 이미지: P12-T2 까지 PG 베이스 이미지 placeholder.
+		// router 는 K8s API(ShardRange / PostgresCluster.status)를 읽으므로 전용 SA + Role 이
+		// 선행되어야 한다 — Deployment 보다 먼저 upsert (SA 부재 시 Pod 가 기동 후 403).
+		if err := r.upsert(ctx, &cluster, buildRouterServiceAccount(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router ServiceAccount", logger)
+		}
+		if err := r.upsert(ctx, &cluster, buildRouterRole(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router Role", logger)
+		}
+		if err := r.upsert(ctx, &cluster, buildRouterRoleBinding(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router RoleBinding", logger)
+		}
 		routerReplicas := cluster.Spec.Router.Replicas
 		if databasePodsStopped {
 			routerReplicas = 0
 		}
+		// router 이미지는 pg-router(cmd/pg-router) 다 — instance(PG) 이미지를 넘기면 그
+		// 엔트리포인트가 POD_NAME 등 instance env 를 요구해 CrashLoop 한다.
 		desiredDep := buildRouterDeployment(
-			&cluster, depName, cmName, resolvedImage.Image,
+			&cluster, depName, cmName, routerImage(),
 			routerReplicas,
 			cluster.Spec.Router.Resources,
 		)

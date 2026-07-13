@@ -1270,3 +1270,93 @@ func TestBuildTargetShardConfigMapAndService_Isolation(t *testing.T) {
 			svc.Spec.Selector, tsts.Spec.Template.Labels)
 	}
 }
+
+// --- B-01 회귀 차단: router Deployment 가 pg-router 로 뜨는가 -------------------
+//
+// 트리거 사고(4노드 라이브, Phase 1): router Pod 가 CrashLoopBackOff. 원인 2겹 —
+// (a) reconcile 이 instance(PG) 이미지를 router 에 넘김 (b) pg-router 계약(PGROUTER_*)
+// env 미주입. 아래 테스트는 두 원인을 각각 고정한다.
+
+func TestRouterImage_EnvOverrideAndDefault(t *testing.T) {
+	t.Setenv("ROUTER_IMAGE", "")
+	if got := routerImage(); got != "ghcr.io/keiailab/pg-router:dev" {
+		t.Errorf("routerImage() 기본값 = %q", got)
+	}
+	t.Setenv("ROUTER_IMAGE", "pg-router:local")
+	if got := routerImage(); got != "pg-router:local" {
+		t.Errorf("routerImage() env override = %q, want pg-router:local", got)
+	}
+}
+
+func TestBuildRouterDeployment_InjectsPGRouterEnvAndServiceAccount(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	}
+	dep := buildRouterDeployment(cluster, "orders-router", "orders-router-config",
+		"pg-router:local", 2, corev1.ResourceRequirements{})
+
+	if sa := dep.Spec.Template.Spec.ServiceAccountName; sa != "orders-router" {
+		t.Errorf("router SA = %q, want orders-router (K8s API 읽기 권한 필요)", sa)
+	}
+
+	env := map[string]string{}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	// pg-router 가 ShardRange(topology) + PostgresCluster.status(backend) 를 읽어야
+	// reshard·failover 후에도 라우팅 테이블이 따라간다.
+	want := map[string]string{
+		"PGROUTER_NAMESPACE": "pg-test",
+		"PGROUTER_CLUSTER":   "orders",
+		"PGROUTER_KEYSPACE":  routerKeyspace,
+		"PGROUTER_TOPOLOGY":  "crd",
+		"PGROUTER_BACKEND":   "status",
+		"PGROUTER_LISTEN":    ":5432",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("router env %s = %q, want %q", k, env[k], v)
+		}
+	}
+	// metrics addr 은 scrape annotation / HPA custom-metrics 포트와 일치해야 한다.
+	if env["PGROUTER_METRICS_ADDR"] != ":9187" {
+		t.Errorf("PGROUTER_METRICS_ADDR = %q, want :9187", env["PGROUTER_METRICS_ADDR"])
+	}
+	// 라우터는 stateless — PVC 마운트 금지(ADR 0003).
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			t.Errorf("router Pod 가 PVC 마운트: %s", v.Name)
+		}
+	}
+}
+
+func TestBuildRouterRole_ReadOnlyOnShardRangeAndCluster(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	}
+	role := buildRouterRole(cluster)
+	if len(role.Rules) == 0 {
+		t.Fatal("router Role 규칙 0")
+	}
+	for _, rule := range role.Rules {
+		for _, verb := range rule.Verbs {
+			switch verb {
+			case "get", "list", "watch":
+			default:
+				t.Errorf("router Role 에 쓰기 verb %q (읽기 전용이어야 함): %v", verb, rule.Resources)
+			}
+		}
+	}
+	rb := buildRouterRoleBinding(cluster)
+	if rb.Subjects[0].Name != buildRouterServiceAccount(cluster).Name {
+		t.Errorf("RoleBinding subject(%s) 가 router SA(%s) 와 불일치",
+			rb.Subjects[0].Name, buildRouterServiceAccount(cluster).Name)
+	}
+	if rb.RoleRef.Name != role.Name {
+		t.Errorf("RoleBinding roleRef(%s) 가 Role(%s) 와 불일치", rb.RoleRef.Name, role.Name)
+	}
+}

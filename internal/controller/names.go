@@ -96,6 +96,22 @@ func RouterHPAName(cluster string) string {
 	return fmt.Sprintf("%s-router", cluster)
 }
 
+// RouterServiceAccountName 은 router Pod 전용 ServiceAccount 이름이다.
+// instance SA 와 분리 — 권한 집합이 다르다(라우터=ShardRange/status 읽기 전용).
+func RouterServiceAccountName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
+// RouterRoleName 은 RouterServiceAccount 에 부착되는 Role 이름이다.
+func RouterRoleName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
+// RouterRoleBindingName 은 router SA↔Role 결합 RoleBinding 이름이다.
+func RouterRoleBindingName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
 // PoolerDeploymentName 은 Pooler CR 이 소유하는 PgBouncer Deployment 이름이다.
 func PoolerDeploymentName(pooler string) string {
 	return fmt.Sprintf("%s-pooler", pooler)

@@ -13,6 +13,12 @@
 // 그룹핑해 그룹당 aggregate 를 결합한다.
 package router
 
+import (
+	"sort"
+	"strconv"
+	"strings"
+)
+
 // AggregateFunc 는 재결합 시 각 출력 컬럼의 결합 함수다. planner 가 SELECT 리스트를
 // 분석해 컬럼별로 지정한다(AggNone = GROUP BY key / passthrough 컬럼).
 type AggregateFunc int
@@ -195,6 +201,45 @@ func toInt64(v any) (int64, bool) {
 		return int64(n), true
 	case uint64:
 		return int64(n), true
+	case string:
+		// PG 텍스트 프로토콜은 모든 값을 문자열로 준다 — 부분 집계(count/sum)의 재결합에
+		// 필수(B-11: 문자열 미파싱 시 count 가 0 이 됐다).
+		i, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64)
+		return i, err == nil
+	case []byte:
+		i, err := strconv.ParseInt(strings.TrimSpace(string(n)), 10, 64)
+		return i, err == nil
 	}
 	return 0, false
+}
+
+// --- 와이어 레벨 라우터(cmd/pg-router) 결선용 익스포트 래퍼 -----------------------
+//
+// 배경(B-11): 재결합 로직은 여기 있었지만 *실제 배포되는 라우터*(cmd/pg-router 의
+// scatter 경로)가 이를 호출하지 않아, `SELECT count(*)` 이 샤드별 부분결과 N행을 그대로
+// 클라이언트에 반환했다(4노드 라이브 실측 2026-07-14: count → 2행 `3`,`1`). 라우터는
+// ScatterGather.Execute(ShardExecutor 추상) 대신 PG 와이어 메시지를 직접 다루므로,
+// *이미 수집된 부분 결과*에 재결합만 적용할 진입점이 필요하다.
+
+// MergeAggregatePartials 는 샤드별 부분 집계 행들을 컬럼별 함수(aggs)로 재결합해
+// 그룹당 1행으로 만든다. aggs 는 DetectAggregates 의 반환값을 그대로 쓴다.
+func MergeAggregatePartials(rows []Row, aggs []AggregateFunc) []Row {
+	if len(aggs) == 0 {
+		return rows
+	}
+	sg := &ScatterGather{Merge: MergeAggregate, Aggregates: aggs}
+	const all ShardID = "scatter"
+	return sg.mergeAggregate([]ShardID{all}, map[ShardID][]Row{all: rows})
+}
+
+// SortRowsByCol 은 병합된 행들을 col 번째 컬럼으로 안정 정렬한다(전역 ORDER BY merge).
+// 각 샤드 결과는 PG 가 이미 정렬해 보내므로, flatten 후 재정렬하면 전역 순서가 된다.
+func SortRowsByCol(rows []Row, col int, desc bool) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		c := cmpAtCol(rows[i], rows[j], col)
+		if desc {
+			return c > 0
+		}
+		return c < 0
+	})
 }

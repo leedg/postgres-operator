@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -289,6 +290,12 @@ func toFloat(v any) (float64, bool) {
 		return float64(n), true
 	case float64:
 		return n, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+		return f, err == nil
+	case []byte:
+		f, err := strconv.ParseFloat(strings.TrimSpace(string(n)), 64)
+		return f, err == nil
 	}
 	return 0, false
 }

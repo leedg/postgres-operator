@@ -113,6 +113,16 @@ func CopyShardRange(ctx context.Context, sourceDSN, targetDSN, table string, spe
 		return 0, 0, err
 	}
 
+	// 재시도 멱등성 (B-16, 4노드 라이브 실측 2026-07-14): InitialCopy Job 은 실패 시
+	// backoffLimit 만큼 재시도된다. 이전 시도가 일부 행을 넣고 죽었으면 재시도가 같은 행을
+	// 또 INSERT 해 target 이 중복 상태가 되고, 이후 인덱스 복제가
+	// `could not create unique index "orders_pkey" (23505)` 로 실패한다.
+	// target 은 *이 작업이 만든 빈 shard* 이므로(source 는 read-only) 복사 시작 전에 비우는
+	// 것이 안전하며, 이것이 복사를 재시도 가능하게 만든다. rollback 도 동일하게 truncate 다.
+	if _, err := tgt.ExecContext(ctx, "TRUNCATE TABLE "+table); err != nil { //nolint:gosec // table 화이트리스트 검증됨
+		return 0, 0, fmt.Errorf("router: truncate target %s (retry idempotency): %w", table, err)
+	}
+
 	rows, err := src.QueryContext(ctx, "SELECT * FROM "+table) //nolint:gosec // table는 화이트리스트 검증됨
 	if err != nil {
 		return 0, 0, fmt.Errorf("router: source select %s: %w", table, err)

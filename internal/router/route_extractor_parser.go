@@ -248,13 +248,24 @@ func isOpChar(c byte) bool {
 // `tenant_id='a'` 와 외부 `tenant_id='b'`, 또는 `OR`) 어느 샤드인지 모호하다. 잘못된
 // 샤드로 라우팅(특히 쓰기)하는 것보다, 추출 실패로 두어 호출자가 scatter/거부하게 하는
 // 편이 안전하다. 동일 리터럴만 반복되면 그 값을 쓴다.
+// isKeyLiteral 은 토큰이 라우팅 키로 쓸 수 있는 *리터럴* 인지 본다.
+//
+// B-13 (4노드 라이브 실측 2026-07-14): 기존엔 문자열 리터럴(tokStr)만 인정해서 **정수
+// 샤딩 키가 통째로 라우팅되지 않았다** — `tenant_id int` 인 스키마에서 읽기는 조용히
+// scatter 로 새고(느리고 부정확), 쓰기는 `cannot scatter a keyless write query` 로 전부
+// 거부됐다. 정수 키(user_id / tenant_id)는 가장 흔한 샤딩 키이므로 숫자 리터럴도 키다.
+// 해시는 키 *문자열* 기준이므로(`murmur3("1")`) 토큰 텍스트를 그대로 쓴다.
+func isKeyLiteral(t token) bool {
+	return (t.kind == tokStr || t.kind == tokNum) && t.text != ""
+}
+
 func whereEqTok(toks []token, col string) (string, bool) {
 	found := ""
 	got := false
 	for i := 0; i+2 < len(toks); i++ {
 		if toks[i].kind == tokIdent && strings.EqualFold(toks[i].text, col) &&
 			toks[i+1].kind == tokSym && toks[i+1].text == "=" &&
-			toks[i+2].kind == tokStr {
+			isKeyLiteral(toks[i+2]) {
 			v := toks[i+2].text
 			if v == "" {
 				continue
@@ -286,7 +297,7 @@ func insertValueTok(toks []token, col string) (string, bool) {
 			continue
 		}
 		ve := valElems[idx]
-		if len(ve) == 1 && ve[0].kind == tokStr && ve[0].text != "" {
+		if len(ve) == 1 && isKeyLiteral(ve[0]) {
 			return ve[0].text, true
 		}
 		return "", false

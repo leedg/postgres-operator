@@ -472,9 +472,32 @@ func flattenTargetRanges(targets []postgresv1alpha1.ShardSplitTarget) []postgres
 	return out
 }
 
-// applyRouting 은 ShardSplitJob 의 cluster/keyspace 에 해당하는 ShardRange 의 ranges 를
-// target 으로 갱신하여 routing 을 새 shard 로 전환한다 (가역 cutover — 원본 ShardRange
-// 로 rollback). split plan 은 Pending phase 에서 ValidateSplitPlan 으로 이미 검증됨.
+// mergeSplitRanges 는 기존 ranges 에서 *source shard 의 range 만* 제거하고 target ranges 를
+// 더한다 — split 과 무관한 shard 의 range 는 그대로 보존한다.
+//
+// B-18 (4노드 라이브 실측 2026-07-14): 기존 구현은 `sr.Spec.Ranges = flattenTargetRanges(...)`
+// 로 **전체 ranges 를 target 것으로 대체**했다. 그 결과 shard-1 하나를 분할했을 뿐인데
+// shard-0 의 range(0x00000000~0x7fffffff)가 통째로 사라져 shard-0 의 데이터가 라우팅 불가가
+// 되고(PostgresCluster.status.shards 에서도 제거 → STS 0/0), Cleanup Job 은 이미 사라진
+// source 에 접속하려다 실패했다. split 은 *부분 갱신*이어야 한다.
+func mergeSplitRanges(existing []postgresv1alpha1.ShardRangeEntry, sources []string, targets []postgresv1alpha1.ShardSplitTarget) []postgresv1alpha1.ShardRangeEntry {
+	removed := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		removed[s] = true
+	}
+	out := make([]postgresv1alpha1.ShardRangeEntry, 0, len(existing)+len(targets))
+	for _, e := range existing {
+		if !removed[e.Shard] {
+			out = append(out, e) // split 과 무관한 shard — 보존.
+		}
+	}
+	return append(out, flattenTargetRanges(targets)...)
+}
+
+// applyRouting 은 ShardSplitJob 의 cluster/keyspace 에 해당하는 ShardRange 에서 *source
+// shard 의 range 를 target ranges 로 치환*하여 routing 을 새 shard 로 전환한다 (가역
+// cutover — 원본 ShardRange 로 rollback). 다른 shard 의 range 는 건드리지 않는다(B-18).
+// split plan 은 Pending phase 에서 ValidateSplitPlan 으로 이미 검증됨.
 func (r *ShardSplitJobReconciler) applyRouting(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) error {
 	var list postgresv1alpha1.ShardRangeList
 	if err := r.List(ctx, &list, client.InNamespace(ssj.Namespace)); err != nil {
@@ -483,7 +506,7 @@ func (r *ShardSplitJobReconciler) applyRouting(ctx context.Context, ssj *postgre
 	for i := range list.Items {
 		sr := &list.Items[i]
 		if sr.Spec.Cluster == ssj.Spec.Cluster && sr.Spec.Keyspace == ssj.Spec.Keyspace {
-			sr.Spec.Ranges = flattenTargetRanges(ssj.Spec.Targets)
+			sr.Spec.Ranges = mergeSplitRanges(sr.Spec.Ranges, ssj.Spec.Sources, ssj.Spec.Targets)
 			sr.Spec.WriteBlocked = false // 라우팅 전환 완료 → write-block 해제(쓰기 재개, 이제 새 shard 로).
 			if err := r.Update(ctx, sr); err != nil {
 				return fmt.Errorf("update ShardRange %s: %w", sr.Name, err)

@@ -1452,10 +1452,15 @@ func buildRouterServiceAccount(cluster *postgresv1alpha1.PostgresCluster) *corev
 // buildRouterRole 는 pg-router 의 K8s 읽기 권한(최소)이다.
 //
 //   - shardranges: PGROUTER_TOPOLOGY=crd 의 키→샤드 매핑 소스 (watch 로 hot-reload)
-//   - postgresclusters(+status): PGROUTER_BACKEND=status 의 샤드 엔드포인트 소스
-//     (failover 로 primary 가 바뀌면 status 를 통해 인지)
+//   - postgresclusters: PGROUTER_BACKEND=status 의 샤드 엔드포인트 소스
+//     (failover 로 primary 가 바뀌면 .status 를 통해 인지)
 //
 // 쓰기 verb 는 없다 — 라우터는 CR 을 변경하지 않는다.
+//
+// `*/status` 서브리소스 규칙은 두지 않는다: `.status` 는 부모 리소스를 GET/LIST 할 때 함께
+// 실려오므로 읽기에는 불필요하고(status 서브리소스 권한은 *쓰기* 용), operator 자신이 해당
+// 권한을 보유하지 않아 RBAC escalation 방지에 걸려 Role 생성이 거부된다 (라이브 실측 2026-07-14:
+// `roles ... is forbidden: ... attempting to grant RBAC permissions not currently held`).
 func buildRouterRole(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1467,11 +1472,6 @@ func buildRouterRole(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.Role {
 			{
 				APIGroups: []string{postgresv1alpha1.GroupVersion.Group},
 				Resources: []string{"shardranges", "postgresclusters"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{postgresv1alpha1.GroupVersion.Group},
-				Resources: []string{"shardranges/status", "postgresclusters/status"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
 		},

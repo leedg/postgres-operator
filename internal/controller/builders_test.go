@@ -1360,3 +1360,20 @@ func TestBuildRouterRole_ReadOnlyOnShardRangeAndCluster(t *testing.T) {
 		t.Errorf("RoleBinding roleRef(%s) 가 Role(%s) 와 불일치", rb.RoleRef.Name, role.Name)
 	}
 }
+
+// router Role 은 `*/status` 서브리소스 규칙을 두면 안 된다 — operator 가 해당 권한을 보유하지
+// 않아 RBAC escalation 방지에 걸려 Role 생성 자체가 거부된다(라이브 실측 2026-07-14).
+func TestBuildRouterRole_NoStatusSubresource(t *testing.T) {
+	t.Parallel()
+
+	role := buildRouterRole(&postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	})
+	for _, rule := range role.Rules {
+		for _, res := range rule.Resources {
+			if strings.Contains(res, "/status") {
+				t.Errorf("router Role 에 status 서브리소스 %q — escalation 차단으로 Role 생성 실패한다", res)
+			}
+		}
+	}
+}

@@ -1313,6 +1313,7 @@ func TestBuildRouterDeployment_InjectsPGRouterEnvAndServiceAccount(t *testing.T)
 		"PGROUTER_KEYSPACE":  routerKeyspace,
 		"PGROUTER_TOPOLOGY":  "crd",
 		"PGROUTER_BACKEND":   "status",
+		"PGROUTER_MODE":      "query",
 		"PGROUTER_LISTEN":    ":5432",
 	}
 	for k, v := range want {

@@ -1431,9 +1431,22 @@ func routerEnv(cluster *postgresv1alpha1.PostgresCluster) []corev1.EnvVar {
 		{Name: "PGROUTER_KEYSPACE", Value: routerKeyspace},
 		{Name: "PGROUTER_TOPOLOGY", Value: "crd"},
 		{Name: "PGROUTER_BACKEND", Value: "status"},
+		{Name: "PGROUTER_MODE", Value: routerMode()},
 		{Name: "PGROUTER_LISTEN", Value: fmt.Sprintf(":%d", pgPort)},
 		{Name: "PGROUTER_METRICS_ADDR", Value: fmt.Sprintf(":%d", routerMetricsPort)},
 	}
+}
+
+// routerMode 는 pg-router 의 라우팅 모드다 (ROUTER_MODE 로 주입, 기본 query).
+//
+// query  = 쿼리를 파싱해 샤딩 키로 per-query 라우팅 + scatter-gather. 분산 SQL 의 본 모드.
+// connection = 접속 시 *dbname* 을 키로 삼아 한 연결을 한 샤드에 고정하는 PoC 모드 —
+// 실 dbname 과 샤딩 키가 충돌하므로 오퍼레이터 기본값으로는 부적합하다.
+func routerMode() string {
+	if v := os.Getenv("ROUTER_MODE"); v != "" {
+		return v
+	}
+	return "query"
 }
 
 // buildRouterServiceAccount 는 router Pod 전용 ServiceAccount 다. instance SA 와 분리한다

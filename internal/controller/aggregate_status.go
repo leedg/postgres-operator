@@ -158,11 +158,28 @@ func aggregateShardStatusMatching(
 		}
 		st, ok := parsePodStatus(pod)
 		if !ok {
-			// annotation 부재 — Pod 부팅 직후. fallback 표기.
+			// annotation 부재. 두 경우가 있다:
+			//
+			//  (a) 일반 shard Pod 부팅 직후 — instance manager 가 아직 status 를 안 붙였다.
+			//      곧 붙으므로 replica(미준비)로 표기하고 넘어간다.
+			//  (b) **reshard target Pod** — 이 STS 는 instance manager 없이 PG 만 띄우므로
+			//      status annotation 을 *영원히* 발행하지 않는다. 그래서 split 이 끝나도
+			//      ShardStatus.Primary 가 계속 비었고, 라우터(PGROUTER_BACKEND=status)가 새
+			//      샤드의 백엔드를 해석하지 못해 접속이 끊겼다
+			//      (B-19, 4노드 라이브 실측 2026-07-14: `connection to server was lost`).
+			//      target 은 단일 인스턴스 primary 가 구조적으로 보장되므로(replica 없음),
+			//      Kubernetes readiness 를 근거로 primary 로 인정한다.
 			ep := postgresv1alpha1.ShardEndpoint{
 				Pod:      pod.Name,
 				Endpoint: defaultEndpoint(pod.Name, svcName, cluster.Namespace),
 				Ready:    false,
+			}
+			if pod.Labels[ReshardTargetLabelKey] != "" && !kubernetesPodNotReady(pod) {
+				ep.Ready = true
+				if primaryCandidate == nil {
+					primaryCandidate = &ep
+				}
+				continue
 			}
 			replicas = append(replicas, ep)
 			continue

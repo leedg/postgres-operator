@@ -69,3 +69,21 @@ func TestAutoExtractor_FallsBackToRegex(t *testing.T) {
 		t.Fatalf("auto extract = (%q,%v), want (alice,true)", key, ok)
 	}
 }
+
+// B-13: regex 추출기도 숫자 리터럴(정수 샤딩 키)을 키로 인정해야 한다.
+// 배포된 라우터의 기본 추출기가 regex 였기 때문에, parser 만 고쳐선 라이브가 안 고쳐졌다.
+func TestRegexExtractor_NumericKey(t *testing.T) {
+	ex := regexExtractor{}
+	cases := []struct{ name, query, want string }{
+		{"where 정수", "SELECT * FROM orders WHERE tenant_id = 7", "7"},
+		{"insert 정수", "INSERT INTO orders (tenant_id, amount) VALUES (7, 12.5)", "7"},
+		{"where 문자열 회귀", "SELECT * FROM t WHERE tenant_id = 'alice'", "alice"},
+		{"insert 문자열 회귀", "INSERT INTO t (tenant_id, v) VALUES ('alice','a')", "alice"},
+	}
+	for _, c := range cases {
+		got, ok := ex.ExtractRoutingKey(c.query, "tenant_id")
+		if !ok || got != c.want {
+			t.Errorf("%s: = (%q,%v), want (%q,true)", c.name, got, ok, c.want)
+		}
+	}
+}

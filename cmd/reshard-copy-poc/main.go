@@ -105,9 +105,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "reshard-copy-poc: full copy requires PGROUTER_COPY_TABLE")
 		os.Exit(2)
 	}
-	timeout := 60 * time.Second
-	if cdcMode {
-		timeout = 15 * time.Minute // CDC bulk 복사/drain 은 길 수 있다.
+	// 복사 제한시간. offline(범위복사) 기본값이 60s 로 하드코딩돼 있어 조금만 큰 테이블이면
+	// `context deadline exceeded` 로 InitialCopy 가 실패했다 (B-15, 4노드 라이브 실측
+	// 2026-07-14: orders 10만행 복사가 60s 를 넘겨 ShardSplitJob 이 Failed). 데이터 크기는
+	// 클러스터마다 다르므로 env 로 조정 가능하게 하고, 기본값도 현실적인 값으로 올린다.
+	timeout := 15 * time.Minute
+	if v := os.Getenv("RESHARD_COPY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		} else {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: invalid RESHARD_COPY_TIMEOUT=%q (using %s)\n", v, timeout)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

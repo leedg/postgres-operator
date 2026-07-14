@@ -358,8 +358,18 @@ func podMatchesNamedShardIdentity(pod *corev1.Pod, shardID string) bool {
 	if pod == nil || shardID == "" {
 		return false
 	}
+	// reshard 의 copy/delete **Job Pod** 도 대상 shard 를 가리키는 reshard-target 라벨을
+	// 달고 있다. 이들은 DB 인스턴스가 아니라 *일회성 작업* 이므로 shard 멤버로 세면 안 된다
+	// (B-20, 4노드 라이브 실측 2026-07-14: status.shards[shard-1a].replicas 에 copy Job Pod
+	// 들이 들어가 primary 선출을 오염시켰다).
+	if pod.Labels[jobNameLabelKey] != "" {
+		return false
+	}
 	return pod.Labels[ShardIDLabelKey] == shardID || pod.Labels[ReshardTargetLabelKey] == shardID
 }
+
+// jobNameLabelKey 는 batch/v1 Job 이 자기 Pod 에 붙이는 표준 라벨이다.
+const jobNameLabelKey = "batch.kubernetes.io/job-name"
 
 func kubernetesPodNotReady(pod *corev1.Pod) bool {
 	if pod == nil {

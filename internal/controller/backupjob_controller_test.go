@@ -1093,6 +1093,14 @@ func TestRestorePrimaryPodHealth(t *testing.T) {
 		{"pg ready", []corev1.Pod{pgReady}, true, false},
 		{"pg crashloop → crashed", []corev1.Pod{pgCrash}, false, true},
 		{"pg starting → neither", []corev1.Pod{pgStarting}, false, false},
+		{"pg RestartCount>=2 → crashed (sampling 무관)", []corev1.Pod{{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: pgContainerName, Ready: false, RestartCount: 3, State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		}}}}, false, true},
+		{"pg 단일 재시작(RestartCount 1) → 아직 크래시 아님", []corev1.Pod{{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: pgContainerName, Ready: false, RestartCount: 1, State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		}}}}, false, false},
 		{"non-pg container crash 는 무시", []corev1.Pod{otherCrash}, false, false},
 		{"ready 가 crash 보다 우선", []corev1.Pod{pgReady, pgCrash}, true, false},
 	}

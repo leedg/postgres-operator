@@ -1,7 +1,7 @@
 # postgres-operator 기능 심층 분석
 
 > 각 CRD와 컨트롤러의 내부 동작을 코드 레벨에서 분석한 문서.
-> 대상 버전: v0.4.0-beta.1 | 소스: `api/v1alpha1/`, `internal/controller/`
+> 대상 operator 버전: v0.4.0-beta.8 | Helm chart: 0.4.0-beta.9 | 소스: `api/v1alpha1/`, `internal/controller/`
 
 ---
 
@@ -15,7 +15,7 @@
 6. [PostgresUser — 선언적 역할 관리](#6-postgresuser--선언적-역할-관리)
 7. [ImageCatalog / ClusterImageCatalog — 이미지 카탈로그](#7-imagecatalog--clusterimagecatalog--이미지-카탈로그)
 8. [Plugin SDK — 확장 아키텍처](#8-plugin-sdk--확장-아키텍처)
-9. [ShardSplitJob / ShardRange — 미래 샤딩 설계](#9-shardsplitjob--shardrange--미래-샤딩-설계)
+9. [ShardSplitJob / ShardRange — 구현된 샤딩 제어면](#9-shardsplitjob--shardrange--구현된-샤딩-제어면)
 
 ---
 
@@ -873,14 +873,13 @@ spec:
 
 ---
 
-## 9. ShardSplitJob / ShardRange — 미래 샤딩 설계
+## 9. ShardSplitJob / ShardRange — 구현된 샤딩 제어면
 
-**소스**: `api/v1alpha1/shardrange_types.go`, `api/v1alpha1/shardsplitjob_types.go`
+**소스**: `api/v1alpha1/shardrange_types.go`, `api/v1alpha1/shardsplitjob_types.go`, `internal/controller/shardsplitjob_controller.go`, `internal/controller/shardsplitjob_copy.go`, `internal/controller/shardsplitjob_cdc.go`
 
 ### 9.1 현재 상태
 
-CRD 타입만 정의되어 있으며 **컨트롤러가 구현되지 않았다**.
-`ShardSplitJobReconciler`는 빈 scaffolding이다.
+두 CRD와 `ShardSplitJobReconciler`가 manager에 등록되어 있다. `ShardRange`는 라우터가 감시하는 토폴로지 원본이며, `ShardSplitJob`은 대상 리소스 생성부터 데이터 이동·라우팅 전환·정리·승격까지 실제 부수효과를 수행한다. 다만 beta 경로이므로 운영자는 snapshot과 rollback 절차를 별도로 검증해야 한다.
 
 ### 9.2 ShardRange — 샤드 범위 정의
 
@@ -917,18 +916,21 @@ spec:
   # 분할 후 두 shard의 범위 정의
 ```
 
-7단계 분할 알고리즘 (RFC 0003):
-1. 새 shard 프로비저닝
-2. 초기 full 복제
-3. Catch-up 복제 (변경분)
-4. 트래픽 잠금 (write 차단)
-5. 최종 동기화
-6. 라우팅 테이블 전환
-7. 트래픽 잠금 해제
+상태 전이는 다음과 같다.
+
+1. `Pending` — 대상 범위와 승인 조건 검증
+2. `SnapshotWAL` — 복사 기준점 준비
+3. `Bootstrap` — 대상 ConfigMap, Service, StatefulSet 생성
+4. `InitialCopy` — 멱등 full/range copy Job 완료 대기
+5. `CDCCatchup` — online 모드에서 logical replication의 초기 tablesync와 WAL lag를 모두 게이트
+6. `Cutover` → `RoutingUpdate` — write block 뒤 `ShardRange`를 병합 갱신하여 무관한 범위를 보존
+7. `Cleanup` → `Promote` → `Completed` — source 이동분 정리와 target 승격 전제조건 확인
+
+`Failed`와 `Aborted`는 별도 종료 상태다. `allowForwardOnly` cutover, AutoSplit 승인, source 관측, write block 해제는 코드의 명시적 안전 게이트를 따른다.
 
 ### 9.4 AutoSplit — 자동 분할 트리거
 
-`shardingMode=native`에서만 의미를 가지며, 현재는 설계 단계다.
+`shardingMode=native`에서만 동작한다. 컨트롤러가 관측값의 지속 시간과 임계치를 평가해 `ShardSplitJob`을 만들며, `requireApproval`이면 승인 annotation 전까지 `Pending`에 머문다. 자동 정책은 환경별 metrics 가용성과 임계치 검증이 필요하다.
 
 ```yaml
 spec:

@@ -72,6 +72,7 @@ def main() -> int:
         fail("api/v1alpha1/shardsplitjob_types.go: references removed controller path")
     if "internal/controller/shardsplit/" in read("docs/ROADMAP.md"):
         fail("docs/ROADMAP.md: references removed controller path")
+    check_contains("docs/kb/adr/0028-postgres-first-then-commons-dedup.md", ["해당 패키지는 이후 제거됐고", "현행 파일 경로를 주장하지 않는다"])
     check_contains("docs/FEATURE_DEEP_DIVE.md", ["cluster: my-cluster", "keyspace: orders", "vindex:", "lo:", "hi:", "sources: [shard-0]", "targets:", "shardID:"])
     check_contains("docs/PROJECT_OVERVIEW.md", ["ShardSplitJobReconciler", "pg-router", "CRD 목록 (10종)", "[현재 beta]"])
 

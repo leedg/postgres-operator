@@ -72,6 +72,21 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// 구 CRD에서 생성됐거나 admission 적용 전에 진행 중이던 요청도 모든 phase
+	// 부수효과보다 먼저 차단한다. Failed/Aborted의 안전 cleanup은 위 terminal
+	// 분기에서 계속 허용한다.
+	if reason := unsupportedSplitSpecReason(&ssj); reason != "" {
+		ssj.Status.Phase = postgresv1alpha1.ShardSplitPhaseFailed
+		ssj.Status.FailureReason = reason
+		now := metav1.Now()
+		ssj.Status.CompletedAt = &now
+		ssj.Status.ObservedGeneration = ssj.Generation
+		if err := r.Status().Update(ctx, &ssj); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// RoutingUpdate phase: 실 routing 전환 — 해당 keyspace 의 ShardRange CRD 의 ranges 를
 	// target 으로 갱신한다. *가역* cutover 결과(rollback=ShardRange 원복, §6 L3 안전망).
 	// 사용자 비가역 승인(2026-06-04) 하에 진입. write-block(운영 write freeze) + CDC

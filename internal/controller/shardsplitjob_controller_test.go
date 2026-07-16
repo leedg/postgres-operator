@@ -7,9 +7,16 @@ Licensed under the MIT License. See the LICENSE file for details.
 package controller
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	postgresv1alpha1 "github.com/keiailab/postgres-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func ssjWith(phase postgresv1alpha1.ShardSplitJobPhase, fwdOnly bool, targets []postgresv1alpha1.ShardSplitTarget) *postgresv1alpha1.ShardSplitJob {
@@ -85,6 +92,50 @@ func TestShardSplitJob_nextPhase_RejectsUnsupportedSourceShapes(t *testing.T) {
 			}
 			if reason == "" {
 				t.Fatal("unsupported source shape must include a failure reason")
+			}
+		})
+	}
+}
+
+func TestReconcileShardSplitJob_RejectsUnsupportedShapeBeforePhaseEffects(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		direction postgresv1alpha1.ShardSplitDirection
+		sources   []string
+		want      string
+	}{
+		{"in-flight merge", postgresv1alpha1.ShardSplitDirectionMerge, []string{"shard-0", "shard-1"}, "merge direction is not implemented"},
+		{"in-flight multi-source split", postgresv1alpha1.ShardSplitDirectionSplit, []string{"shard-0", "shard-1"}, "split requires exactly one source"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			scheme := newScheme(t)
+			job := ssjWith(postgresv1alpha1.ShardSplitPhaseBootstrap, false, twoTargets())
+			job.ObjectMeta = metav1.ObjectMeta{Name: "unsafe", Namespace: "default"}
+			job.Spec.Direction = tc.direction
+			job.Spec.Sources = tc.sources
+			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(job).WithObjects(job).Build()
+			r := &ShardSplitJobReconciler{Client: client, Scheme: scheme}
+
+			if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: job.Name, Namespace: job.Namespace}}); err != nil {
+				t.Fatalf("Reconcile() error = %v", err)
+			}
+
+			var got postgresv1alpha1.ShardSplitJob
+			if err := client.Get(context.Background(), types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, &got); err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if got.Status.Phase != postgresv1alpha1.ShardSplitPhaseFailed || !strings.Contains(got.Status.FailureReason, tc.want) {
+				t.Fatalf("status = (%q, %q), want Failed containing %q", got.Status.Phase, got.Status.FailureReason, tc.want)
+			}
+			var configMaps corev1.ConfigMapList
+			if err := client.List(context.Background(), &configMaps); err != nil {
+				t.Fatalf("List(ConfigMap) error = %v", err)
+			}
+			if len(configMaps.Items) != 0 {
+				t.Fatalf("unsupported request created %d ConfigMaps", len(configMaps.Items))
 			}
 		})
 	}

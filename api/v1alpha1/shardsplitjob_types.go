@@ -60,6 +60,7 @@ const (
 // +kubebuilder:validation:XValidation:rule="!has(self.direction) || self.direction == 'split'",message="merge direction is not implemented"
 // +kubebuilder:validation:XValidation:rule="size(self.sources) == 1",message="split requires exactly one source"
 // +kubebuilder:validation:XValidation:rule="size(self.targets) > 0",message="targets must not be empty"
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable after creation"
 type ShardSplitJobSpec struct {
 	// Cluster 는 본 작업이 속한 PostgresCluster 의 이름 (동일 namespace).
 	// +kubebuilder:validation:Required

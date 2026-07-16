@@ -195,6 +195,8 @@ spec:
               rule: size(self.sources) == 1
             - message: targets must not be empty
               rule: size(self.targets) > 0
+            - message: spec is immutable after creation
+              rule: self == oldSelf
           status:
             description: ShardSplitJobStatus 는 reconciler 가 관찰한 7-step state machine
               상태.

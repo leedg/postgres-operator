@@ -151,6 +151,41 @@ func SubscriptionLagBytes(ctx context.Context, sourceDSN, slotName string) (int6
 	return lag.Int64, nil
 }
 
+// TablesyncPending 는 target(subscriber) 에서 subscription 의 *초기 테이블 복사*(tablesync)가
+// 아직 끝나지 않은 relation 수를 센다. Postgres 논리복제는 CREATE SUBSCRIPTION ... copy_data=true
+// 직후 게시 테이블을 pg_subscription_rel 에 등록(srsubstate='i')하고, tablesync worker 가 테이블마다
+// 초기 스냅샷을 복사한 뒤 상태를 's'(synced)→'r'(ready) 로 올린다. 이 진행은 *오직* srsubstate 에만
+// 드러나며, SubscriptionLagBytes(슬롯 confirmed_flush_lsn 기준 WAL lag)는 apply worker 의 LSN 만
+// 보므로 초기 스냅샷이 0% 여도 lag≈0 을 보고할 수 있다(B-21 데이터 유실 근본원인). 이 함수가 그
+// 공백을 메운다 — 반환 0 이면 wantTables 전부 초기 복사 완료('r'|'s').
+func TablesyncPending(ctx context.Context, targetDSN, subName string, wantTables int) (int, error) {
+	if !pubSubNamePattern.MatchString(subName) {
+		return -1, fmt.Errorf("%w: sub %q", ErrInvalidTable, subName)
+	}
+	db, err := sql.Open("postgres", targetDSN)
+	if err != nil {
+		return -1, fmt.Errorf("router: open target: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var total, pending int
+	err = db.QueryRowContext(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE sr.srsubstate NOT IN ('r', 's'))
+		FROM pg_subscription_rel sr
+		JOIN pg_subscription s ON s.oid = sr.srsubid
+		WHERE s.subname = $1`, subName).Scan(&total, &pending)
+	if err != nil {
+		return -1, fmt.Errorf("router: tablesync state: %w", err)
+	}
+	// 카탈로그에 아직 등록되지 않은 테이블도 미완으로 센다(CREATE SUBSCRIPTION 직후 등록 전
+	// 창에서 total < wantTables 일 수 있음 — 이때 게이트가 조기 통과하지 않도록).
+	if missing := wantTables - total; missing > 0 {
+		pending += missing
+	}
+	return pending, nil
+}
+
 // DropSubscription 은 target 의 subscription 을 제거한다(원격 슬롯도 정리 시도). 슬롯 정리가
 // 실패해도(원격 미도달) subscription 은 끊고 진행한다.
 func DropSubscription(ctx context.Context, targetDSN, subName string) error {

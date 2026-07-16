@@ -231,8 +231,11 @@ func runCDC(ctx context.Context, mode, src, tgt, targetShard string) {
 		must(router.EnsureSchema(ctx, src, tgt, tables), "ensure schema")
 		must(router.CreatePublication(ctx, src, pub, tables), "create publication")
 		must(router.CreateSubscription(ctx, tgt, connInfo, sub, pub, true), "create subscription")
+		// 초기 스냅샷(tablesync) 완료를 *먼저* 게이트한다 — WAL lag 만으론 초기 COPY 미완을
+		// 놓쳐 cutover/source-delete 가 빈 target 위에서 진행되어 데이터가 유실된다(B-21).
+		waitTablesync(ctx, tgt, sub, len(tables))
 		waitLag(ctx, src, sub, maxLag)
-		fmt.Printf("reshard-copy-poc: cdc-setup 완료 — subscription %s 활성, lag ≤ %d\n", sub, maxLag)
+		fmt.Printf("reshard-copy-poc: cdc-setup 완료 — subscription %s 활성, 초기복사 완료 + lag ≤ %d\n", sub, maxLag)
 	case "cdc-finalize":
 		col := os.Getenv("PGROUTER_VINDEX_COLUMN")
 		if col == "" {
@@ -284,6 +287,26 @@ func cdcTables(ctx context.Context, src string) []string {
 	all, err := router.ListUserTables(ctx, src)
 	must(err, "list tables")
 	return router.FilterTables(all, csv(os.Getenv("PGROUTER_REFERENCE_TABLES")))
+}
+
+// waitTablesync 는 target subscription 의 초기 테이블 복사(pg_subscription_rel.srsubstate)가
+// wantTables 전부 'r'|'s' 될 때까지 폴링한다(ctx 만료 시 실패 → phase Failed → 데이터 유실 대신
+// 명시적 실패). B-21: waitLag(WAL lag) 만으론 초기 스냅샷 미완을 놓쳐 유실이 발생했다.
+func waitTablesync(ctx context.Context, tgt, sub string, wantTables int) {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: tablesync wait timeout (sub=%s)\n", sub)
+			os.Exit(1)
+		default:
+		}
+		pending, err := router.TablesyncPending(ctx, tgt, sub, wantTables)
+		must(err, "tablesync")
+		if pending == 0 {
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // waitLag 는 subscription 슬롯 lag 가 maxLag 이하가 될 때까지 폴링한다(ctx 만료 시 실패).

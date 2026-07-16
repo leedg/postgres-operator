@@ -889,17 +889,18 @@ spec:
 apiVersion: postgres.keiailab.io/v1alpha1
 kind: ShardRange
 spec:
-  cluster:
-    name: my-cluster
-  table: orders
-  shardKey: customer_id
+  cluster: my-cluster
+  keyspace: orders
+  vindex:
+    type: range
+    column: customer_id
   ranges:
-    - shard: 0
-      min: "0"
-      max: "1000000"
-    - shard: 1
-      min: "1000000"
-      max: ""  # 무한대
+    - shard: shard-0
+      lo: "0"
+      hi: "1000000"
+    - shard: shard-1
+      lo: "1000000"
+      hi: "2000000"
 ```
 
 ### 9.3 ShardSplitJob — 온라인 샤드 분할
@@ -910,16 +911,23 @@ spec:
 apiVersion: postgres.keiailab.io/v1alpha1
 kind: ShardSplitJob
 spec:
-  cluster:
-    name: my-cluster
-  sourceShard: 0
-  # 분할 후 두 shard의 범위 정의
+  cluster: my-cluster
+  keyspace: orders
+  sources: [shard-0]
+  targets:
+    - shardID: shard-1a
+      ranges:
+        - {lo: "0", hi: "500000", shard: shard-1a}
+    - shardID: shard-1b
+      ranges:
+        - {lo: "500000", hi: "1000000", shard: shard-1b}
+  online: true
 ```
 
 상태 전이는 다음과 같다.
 
 1. `Pending` — 대상 범위와 승인 조건 검증
-2. `SnapshotWAL` — 복사 기준점 준비
+2. `SnapshotWAL` — 현재는 상태 전이만 수행하는 no-op placeholder이며 `snapshotLSN`을 기록하지 않음
 3. `Bootstrap` — 대상 ConfigMap, Service, StatefulSet 생성
 4. `InitialCopy` — 멱등 full/range copy Job 완료 대기
 5. `CDCCatchup` — online 모드에서 logical replication의 초기 tablesync와 WAL lag를 모두 게이트

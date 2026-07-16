@@ -11,11 +11,12 @@
 단기 목표는 단일 클러스터 PostgreSQL(Primary + Replica) 운영 자동화이며, 장기 목표는 **수평 샤딩 + 분산 SQL 레이어**를 vanilla PostgreSQL 위에 구축하는 것이다.
 
 ```
-[현재 GA]
+[현재 beta]
   단일 클러스터: Primary + Replica, HA Failover, 백업, 커넥션 풀, 선언적 DB/역할
 
-[로드맵 — 설계 단계]
-  ShardRange CRD → pg-router 쿼리 라우터 → 크로스 샤드 분산 트랜잭션
+[현재 beta + 후속 로드맵]
+  ShardRange CRD → pg-router 쿼리 라우터 → ShardSplitJob 구현
+  후속: 범용 크로스 샤드 분산 트랜잭션
 ```
 
 ---
@@ -77,7 +78,7 @@
 
 ---
 
-## 4. CRD 목록 (8종)
+## 4. CRD 목록 (10종)
 
 | CRD | 단축명 | 범위 | 역할 |
 |---|---|---|---|
@@ -89,6 +90,8 @@
 | `PostgresUser` | `pguser` | Namespace | PostgreSQL 역할 / 패스워드 선언적 관리 |
 | `ImageCatalog` | `pgic` | Namespace | 네임스페이스 범위 PostgreSQL 이미지 카탈로그 |
 | `ClusterImageCatalog` | `pgcic` | Cluster | 클러스터 전체 공유 이미지 카탈로그 |
+| `ShardRange` | `shr` | Namespace | 키스페이스의 샤드 범위와 라우팅 토폴로지 |
+| `ShardSplitJob` | — | Namespace | online/offline shard split 상태 머신 |
 
 ---
 
@@ -176,8 +179,8 @@ postgres-operator/
 │   ├── postgresuser_types.go
 │   ├── scheduledbackup_types.go
 │   ├── imagecatalog_types.go
-│   ├── shardrange_types.go      # 로드맵 전용 (컨트롤러 없음)
-│   └── shardsplitjob_types.go   # 로드맵 전용 (컨트롤러 없음)
+│   ├── shardrange_types.go      # 라우터가 감시하는 샤드 토폴로지
+│   └── shardsplitjob_types.go   # 구현된 split/merge 작업 API
 │
 ├── internal/
 │   ├── controller/          # Reconciler 구현체

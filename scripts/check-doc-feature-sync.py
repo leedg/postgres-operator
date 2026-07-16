@@ -58,15 +58,17 @@ def main() -> int:
         check_contains(path, [latest_tag, chart_version])
 
     check_contains("README.md", ["`ShardRange`", "`ShardSplitJob`", "`pg-router`", "GitHub", "canonical"])
-    check_contains("docs/FEATURE_DEEP_DIVE.md", ["SnapshotWAL", "Bootstrap", "InitialCopy", "CDCCatchup", "RoutingUpdate", "Cleanup", "Promote"])
-    check_contains("docs/PROJECT_OVERVIEW.md", ["ShardSplitJobReconciler", "pg-router"])
+    check_contains("README.md", ["ordinal `shard-N`", "cannot yet be selected as a later split source"])
+    check_contains("docs/FEATURE_DEEP_DIVE.md", ["SnapshotWAL", "no-op placeholder", "snapshotLSN", "Bootstrap", "InitialCopy", "CDCCatchup", "RoutingUpdate", "Cleanup", "Promote"])
+    check_contains("docs/FEATURE_DEEP_DIVE.md", ["cluster: my-cluster", "keyspace: orders", "vindex:", "lo:", "hi:", "sources: [shard-0]", "targets:", "shardID:"])
+    check_contains("docs/PROJECT_OVERVIEW.md", ["ShardSplitJobReconciler", "pg-router", "CRD 목록 (10종)", "[현재 beta]"])
 
     if "ShardSplitJobReconciler" not in read("cmd/main.go"):
         fail("cmd/main.go: ShardSplitJobReconciler is not registered")
     stale_patterns = {
         "README.md": [r"no controllers exist", r"design-only"],
         "docs/FEATURE_DEEP_DIVE.md": [r"빈 scaffolding", r"미래 샤딩 설계"],
-        "docs/PROJECT_OVERVIEW.md": [r"컨트롤러 미구현", r"CRD만, 컨트롤러 구현 예정"],
+        "docs/PROJECT_OVERVIEW.md": [r"컨트롤러 미구현", r"CRD만, 컨트롤러 구현 예정", r"컨트롤러 없음", r"로드맵 전용", r"\[현재 GA\]", r"설계 단계"],
     }
     for path, patterns in stale_patterns.items():
         text = read(path)
@@ -81,6 +83,14 @@ def main() -> int:
     ):
         if not (ROOT / Path(path).parent / target).resolve().is_file():
             fail(f"{path}: linked target does not exist: {target}")
+
+    artifacthub_block = re.search(r"artifacthub.io/crds: \|\n(.*?)\n  artifacthub.io/crdsExamples:", chart, re.S)
+    artifacthub_kinds = set(re.findall(r"(?m)^    - kind: (\w+)$", artifacthub_block.group(1) if artifacthub_block else ""))
+    if artifacthub_kinds != kinds:
+        fail(f"Chart.yaml artifacthub.io/crds mismatch; missing={sorted(kinds-artifacthub_kinds)}, extra={sorted(artifacthub_kinds-kinds)}")
+    changes = re.search(r"artifacthub.io/changes: \|\n(.*?)(?:\n\S|\Z)", chart, re.S)
+    if not changes or app_version not in changes.group(1) or "0.4.0-beta.1" in changes.group(1):
+        fail("Chart.yaml artifacthub.io/changes does not describe current appVersion")
 
     if ERRORS:
         for error in ERRORS:

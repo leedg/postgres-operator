@@ -117,7 +117,7 @@ GitHub README 의 shield.io badge 는 위 hex 사용 권장.
 README 의 shield.io badge 순서 (좌→우):
 
 1. License (MIT)
-2. Go Version (1.25+)
+2. Go Version (1.26+)
 3. Database (PostgreSQL 18+)
 4. Kubernetes Version (1.26+)
 5. Container Image (ghcr.io/keiailab)

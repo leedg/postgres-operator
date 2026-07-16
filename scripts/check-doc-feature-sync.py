@@ -60,6 +60,10 @@ def main() -> int:
     check_contains("README.md", ["`ShardRange`", "`ShardSplitJob`", "`pg-router`", "GitHub", "canonical"])
     check_contains("README.md", ["ordinal `shard-N`", "cannot yet be selected as a later split source"])
     check_contains("docs/FEATURE_DEEP_DIVE.md", ["SnapshotWAL", "no-op placeholder", "snapshotLSN", "Bootstrap", "InitialCopy", "CDCCatchup", "RoutingUpdate", "Cleanup", "Promote"])
+    snapshot_description = "현재 SnapshotWAL 은 no-op 이므로 컨트롤러가 이 값을 채우지 않는다."
+    check_contains("api/v1alpha1/shardsplitjob_types.go", ["현재는 호환성을 위해 유지하는 no-op 전이 단계", snapshot_description])
+    check_contains("config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml", [snapshot_description])
+    check_contains("charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml", [snapshot_description])
     check_contains("docs/FEATURE_DEEP_DIVE.md", ["cluster: my-cluster", "keyspace: orders", "vindex:", "lo:", "hi:", "sources: [shard-0]", "targets:", "shardID:"])
     check_contains("docs/PROJECT_OVERVIEW.md", ["ShardSplitJobReconciler", "pg-router", "CRD 목록 (10종)", "[현재 beta]"])
 

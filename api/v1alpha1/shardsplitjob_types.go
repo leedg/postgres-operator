@@ -14,7 +14,7 @@ import (
 //
 // 7-step workflow (RFC-0002 §online-resharding 정합):
 //
-//  1. Snapshot + WAL capture — source shard 의 시점 일관 base snapshot 확보
+//  1. SnapshotWAL — 현재는 호환성을 위해 유지하는 no-op 전이 단계
 //  2. Bootstrap target shard — 신규 shard StatefulSet 생성 + PG init
 //  3. Initial copy — base snapshot 적용 (logical 또는 pg_basebackup)
 //  4. CDC catch-up — source 의 변경분을 logical replication 으로 따라잡기
@@ -172,7 +172,8 @@ type ShardSplitJobStatus struct {
 	// +optional
 	CutoverStartedAt *metav1.Time `json:"cutoverStartedAt,omitempty"`
 
-	// SnapshotLSN 은 SnapshotWAL phase 에서 확정된 source 시점 LSN.
+	// SnapshotLSN 은 향후 snapshot 기준점 기록을 위한 예약 필드이다.
+	// 현재 SnapshotWAL 은 no-op 이므로 컨트롤러가 이 값을 채우지 않는다.
 	// +optional
 	SnapshotLSN string `json:"snapshotLSN,omitempty"`
 

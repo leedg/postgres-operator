@@ -100,15 +100,17 @@ Future (G4+) — ring-based mapping for minimal data movement on resize.
   - **Multi-shard scatter-gather**: aggregation queries → parallel + merge
   - **Cross-shard transactions**: 2PC coordinator (G5 D.10.2)
 
-### Sharding 7-step online resharding (G4 D.9.x)
+### 현재 online resharding 상태 머신 (G4 D.9.x)
 
-1. **Snapshot + WAL capture** — source shard pg_basebackup + WAL position record
-2. **Target shard bootstrap** — new empty StatefulSet
-3. **Initial copy** — pg_basebackup from snapshot
-4. **CDC catch-up** — logical replication from source primary
-5. **Cutover** — pg-router 라우팅 갱신 + 짧은 write-block (target <500ms p99)
-6. **Routing update** — `_pgo_shard_metadata` 갱신 + propagation
-7. **Source cleanup** — old shard data + StatefulSet GC
+1. **Pending** — split plan과 승인 조건 검증
+2. **SnapshotWAL** — 호환성을 위한 no-op 예약 단계; 현재 WAL position/`snapshotLSN`을 기록하지 않음
+3. **Bootstrap** — target ConfigMap, Service, StatefulSet 생성
+4. **InitialCopy** — 멱등 bulk/range copy Job 완료 대기
+5. **CDCCatchup** — logical replication 초기 tablesync와 WAL lag 게이트
+6. **Cutover / RoutingUpdate** — write-block 후 `ShardRange` 병합 갱신
+7. **Cleanup / Promote** — source 이동분 정리 후 target 승격 전제조건 검증
+
+운영 cutover p99나 WAL snapshot 보장은 아직 문서화된 목표이지 현재 구현 보장이 아니다.
 
 ## G5 Pending — Distributed SQL (D.10.x)
 

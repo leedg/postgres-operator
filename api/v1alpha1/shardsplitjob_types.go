@@ -22,8 +22,8 @@ import (
 //  6. Routing update — ShardRange CRD 의 ranges 갱신 + metadata store sync
 //  7. Source cleanup — old shard 의 split-out 키 범위 데이터 회수
 //
-// 본 CRD 는 *state machine 만 정의* — 실 step 구현은 internal/controller/
-// shardsplit/ + internal/router/ 에 위임 (P-D §D.9.* 후속).
+// 본 CRD 는 state machine API를 정의하고, 현재 부수효과는
+// internal/controller/shardsplitjob_*.go와 internal/router/에 구현되어 있다.
 
 // ShardSplitJobPhase 는 resharding state machine 의 현재 phase 이다.
 // +kubebuilder:validation:Enum=Pending;SnapshotWAL;Bootstrap;InitialCopy;CDCCatchup;Cutover;RoutingUpdate;Cleanup;Promote;Completed;Failed;Aborted

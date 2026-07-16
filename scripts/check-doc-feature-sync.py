@@ -64,6 +64,14 @@ def main() -> int:
     check_contains("api/v1alpha1/shardsplitjob_types.go", ["현재는 호환성을 위해 유지하는 no-op 전이 단계", snapshot_description])
     check_contains("config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml", [snapshot_description])
     check_contains("charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml", [snapshot_description])
+    check_contains("docs/sharding/SHARDING.md", ["no-op 예약 단계", "현재 구현 보장이 아니다"])
+    check_contains("internal/router/resharding.go", ["SnapshotWAL은 현재 부수효과가 없는 예약 전이 단계다."])
+    check_contains("docs/ROADMAP.md", ["현재는 no-op 예약 단계이며 `status.snapshotLSN`을 채우지 않는다."])
+    check_contains("docs/ROADMAP.md", ["AllowForwardOnly=true", "완전한 post-cutover 자동 rollback 보장이 아니다."])
+    if "internal/controller/shardsplit/" in read("api/v1alpha1/shardsplitjob_types.go"):
+        fail("api/v1alpha1/shardsplitjob_types.go: references removed controller path")
+    if "internal/controller/shardsplit/" in read("docs/ROADMAP.md"):
+        fail("docs/ROADMAP.md: references removed controller path")
     check_contains("docs/FEATURE_DEEP_DIVE.md", ["cluster: my-cluster", "keyspace: orders", "vindex:", "lo:", "hi:", "sources: [shard-0]", "targets:", "shardID:"])
     check_contains("docs/PROJECT_OVERVIEW.md", ["ShardSplitJobReconciler", "pg-router", "CRD 목록 (10종)", "[현재 beta]"])
 

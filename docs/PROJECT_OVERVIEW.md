@@ -91,7 +91,7 @@
 | `ImageCatalog` | `pgic` | Namespace | 네임스페이스 범위 PostgreSQL 이미지 카탈로그 |
 | `ClusterImageCatalog` | `pgcic` | Cluster | 클러스터 전체 공유 이미지 카탈로그 |
 | `ShardRange` | `shr` | Namespace | 키스페이스의 샤드 범위와 라우팅 토폴로지 |
-| `ShardSplitJob` | — | Namespace | online/offline shard split 상태 머신 |
+| `ShardSplitJob` | `ssj` | Namespace | single-source online/offline shard split 상태 머신 |
 
 ---
 

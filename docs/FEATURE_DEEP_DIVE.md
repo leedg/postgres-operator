@@ -875,11 +875,11 @@ spec:
 
 ## 9. ShardSplitJob / ShardRange — 구현된 샤딩 제어면
 
-**소스**: `api/v1alpha1/shardrange_types.go`, `api/v1alpha1/shardsplitjob_types.go`, `internal/controller/shardsplitjob_controller.go`, `internal/controller/shardsplitjob_copy.go`, `internal/controller/shardsplitjob_cdc.go`
+**소스**: `api/v1alpha1/shardrange_types.go`, `api/v1alpha1/shardsplitjob_types.go`, `internal/controller/shardsplitjob_controller.go`, `internal/controller/shardsplitjob_copy.go`
 
 ### 9.1 현재 상태
 
-두 CRD와 `ShardSplitJobReconciler`가 manager에 등록되어 있다. `ShardRange`는 라우터가 감시하는 토폴로지 원본이며, `ShardSplitJob`은 대상 리소스 생성부터 데이터 이동·라우팅 전환·정리·승격까지 실제 부수효과를 수행한다. 다만 beta 경로이므로 운영자는 snapshot과 rollback 절차를 별도로 검증해야 한다.
+두 CRD와 `ShardSplitJobReconciler`가 manager에 등록되어 있다. `ShardRange`는 라우터가 감시하는 토폴로지 원본이며, `ShardSplitJob`은 단일 source split의 대상 리소스 생성부터 데이터 이동·라우팅 전환·정리·승격까지 실제 부수효과를 수행한다. `direction=merge`와 다중 source는 데이터 이동 전에 거부된다. `cutoverWindow`는 예약 필드이고 자동 rollback은 구현되지 않았으므로 운영자는 snapshot과 수동 rollback 절차를 별도로 검증해야 한다.
 
 ### 9.2 ShardRange — 샤드 범위 정의
 
@@ -929,12 +929,12 @@ spec:
 1. `Pending` — 대상 범위와 승인 조건 검증
 2. `SnapshotWAL` — 현재는 상태 전이만 수행하는 no-op placeholder이며 `snapshotLSN`을 기록하지 않음
 3. `Bootstrap` — 대상 ConfigMap, Service, StatefulSet 생성
-4. `InitialCopy` — 멱등 full/range copy Job 완료 대기
-5. `CDCCatchup` — online 모드에서 logical replication의 초기 tablesync와 WAL lag를 모두 게이트
+4. `InitialCopy` — offline 모드에서 멱등 full/range copy Job 완료 대기; online 모드는 즉시 통과
+5. `CDCCatchup` — online 모드에서 `copy_data=true` logical replication의 초기 tablesync와 WAL lag를 모두 게이트
 6. `Cutover` → `RoutingUpdate` — write block 뒤 `ShardRange`를 병합 갱신하여 무관한 범위를 보존
 7. `Cleanup` → `Promote` → `Completed` — source 이동분 정리와 target 승격 전제조건 확인
 
-`Failed`와 `Aborted`는 별도 종료 상태다. `allowForwardOnly` cutover, AutoSplit 승인, source 관측, write block 해제는 코드의 명시적 안전 게이트를 따른다.
+`Failed`와 `Aborted`는 별도 종료 상태다. 현재 `allowForwardOnly=true`는 routing 전에 거부되며, false도 자동 rollback을 보장하지 않는다. AutoSplit 승인, source 관측, write block 해제는 코드의 명시적 안전 게이트를 따른다.
 
 ### 9.4 AutoSplit — 자동 분할 트리거
 

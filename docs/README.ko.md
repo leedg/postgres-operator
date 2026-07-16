@@ -67,9 +67,9 @@ operator manager
 
 ## 기능
 
-### 현재 출하 (v0.4.0-beta.1)
+### 현재 소스 (operator v0.4.0-beta.8 / chart 0.4.0-beta.9)
 
-helm chart 와 OperatorHub bundle 은 **8 owned CRD** 출하. CRD 상태는 production 클러스터에서 *오늘 reconcile 되는 범위* 반영:
+현재 chart 소스는 **10 owned CRD**를 포함한다. 게시된 release 상태와 production 검증은 별도로 추적한다.
 
 | CRD | 역할 | 상태 |
 |---|---|---|
@@ -81,6 +81,8 @@ helm chart 와 OperatorHub bundle 은 **8 owned CRD** 출하. CRD 상태는 prod
 | `PostgresUser` | 선언적 role + password + membership (ready-primary psql) | ⚠️ controller 부분 |
 | `ImageCatalog` | Namespace 범위 PostgreSQL runtime image 카탈로그 | ⚠️ rollout path |
 | `ClusterImageCatalog` | Cluster 범위 공유 PostgreSQL runtime image 카탈로그 | ⚠️ rollout path |
+| `ShardRange` | shard routing metadata source of truth | ⚠️ controller 구현, live 검증 필요 |
+| `ShardSplitJob` | 단일 source split workflow | ⚠️ merge/다중 source 거부, live SLO·rollback drill 필요 |
 
 Helm chart 추가: PrometheusRule + Grafana dashboard (Pooler overview + Cluster overview), restricted PSA SecurityContext, deny-by-default NetworkPolicy, cert-manager TLS 통합, OpenTelemetry-ready hook.
 
@@ -112,7 +114,7 @@ phase 세부 (sub-task / SLO / ADR/RFC 참조): [`ROADMAP.md`](ROADMAP.md).
 ## Quickstart
 
 ```bash
-# 1. operator + 8 CRD 설치 (helm chart 또는 OperatorHub bundle)
+# 1. operator + 10 CRD 설치 (helm chart 또는 OperatorHub bundle)
 helm install postgres-operator charts/postgres-operator
 
 # 2. quickstart PostgresCluster 적용
@@ -141,7 +143,7 @@ helm upgrade postgres-operator charts/postgres-operator \
 
 ## Production readiness
 
-**현재 상태 (0.4.0-beta.1)**: Level 4 Deep Insights 달성. PrometheusRule (8 alerts), Grafana dashboard, ServiceMonitor, WAL archiving, backup retention, config hot-reload, annotation-based switchover 운영 중.
+**현재 소스 상태 (operator 0.4.0-beta.8 / chart 0.4.0-beta.9)**: PrometheusRule, Grafana dashboard, ServiceMonitor, WAL archiving, backup retention, config hot-reload, annotation-based switchover가 포함된다. 게시 및 live 검증 상태는 별도 추적한다.
 
 GA 거리:
 - **P1** — production-ready single-shard 는 HA Lease 분산 lock controller + BackupJob/ScheduledBackup live drill + PITR checksum drill + chaos-mesh failover suite 필요.
@@ -152,7 +154,7 @@ GA 거리:
 
 - BackupJob / ScheduledBackup / Pooler / PostgresDatabase / PostgresUser controller 는 *부분 구현* — CRD 표면 + 핵심 reconcile 경로 출하, live drill 검증 (rotation / PITR / retain-policy) 은 phase 별 추적 중.
 - ImageCatalog / ClusterImageCatalog rollout-drift 측정은 StatefulSet annotation 레이어 구현. production rollout SLA 미인증.
-- Sharding subsystem (`ShardRange`, `pg-router`, `ShardSplitJob`) 은 **설계만** — spec: [`docs/sharding/SHARDING.md`](sharding/SHARDING.md). runtime 코드 없음.
+- Sharding subsystem은 runtime 코드가 있다. `ShardRange`와 `pg-router` routing, 단일 source `ShardSplitJob` split을 구현했지만 merge·다중 source는 거부하며 live SLO와 자동 rollback은 미검증/미구현이다. 상세: [`docs/sharding/SHARDING.md`](sharding/SHARDING.md).
 - 위 Phase 로드맵 = 다년간 horizon. 오늘 운영 범위 = single-shard HA 전용.
 
 ## Uninstall
@@ -191,7 +193,7 @@ GitHub Actions 는 OSS 표준 suite (CI / scorecard / CodeQL / DCO / dependency-
 
 ## 문서
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 단일 페이지 아키텍처 설명 (8 CRD surface + self-built distributed SQL + G0-G6 상태 + ADR cross-link)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 단일 페이지 아키텍처 설명 (10 CRD surface + self-built distributed SQL + G0-G6 상태 + ADR cross-link)
 - `docs/kb/adr/` — Architecture Decision Record (현재: 0001–0026)
 - `docs/rfcs/` — RFC draft (현재: 0001–0007)
 - `docs/operator-guide/` — Deployment / pooler-monitoring / community-operators-onboarding / HA

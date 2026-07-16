@@ -105,12 +105,12 @@ Future (G4+) — ring-based mapping for minimal data movement on resize.
 1. **Pending** — split plan과 승인 조건 검증
 2. **SnapshotWAL** — 호환성을 위한 no-op 예약 단계; 현재 WAL position/`snapshotLSN`을 기록하지 않음
 3. **Bootstrap** — target ConfigMap, Service, StatefulSet 생성
-4. **InitialCopy** — 멱등 bulk/range copy Job 완료 대기
-5. **CDCCatchup** — logical replication 초기 tablesync와 WAL lag 게이트
+4. **InitialCopy** — offline 모드의 멱등 bulk/range copy Job 완료 대기; online 모드는 no-op
+5. **CDCCatchup** — online 모드의 `copy_data=true` logical replication 초기 tablesync와 WAL lag 게이트
 6. **Cutover / RoutingUpdate** — write-block 후 `ShardRange` 병합 갱신
 7. **Cleanup / Promote** — source 이동분 정리 후 target 승격 전제조건 검증
 
-운영 cutover p99나 WAL snapshot 보장은 아직 문서화된 목표이지 현재 구현 보장이 아니다.
+운영 cutover p99, WAL snapshot, 자동 rollback은 아직 문서화된 목표이지 현재 구현 보장이 아니다. 현재는 단일 source split만 허용하고 merge/다중 source를 거부한다.
 
 ## G5 Pending — Distributed SQL (D.10.x)
 

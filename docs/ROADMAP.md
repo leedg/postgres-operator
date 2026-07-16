@@ -171,7 +171,7 @@ cluster via GitOps.
 **Goal**: split / rebalance without data loss.
 
 - [x] **`ShardSplitJob` CRD** — `api/v1alpha1/shardsplitjob_types.go` (~180 lines): ShardSplitJobSpec (Cluster/Keyspace/Direction/Sources/Targets/CutoverWindow/CDCMaxLag/AllowForwardOnly) + ShardSplitTarget (ShardID/Ranges/Placement) + ShardSplitJobStatus (Phase 11-enum/ObservedGeneration/StartedAt/CompletedAt/CurrentLagBytes/CutoverStartedAt/SnapshotLSN/FailureReason/Conditions) + ShardSplitDirection 2-enum (split/merge) + zz_generated_shardsplitjob.go deepcopy. 5 sub-test PASS (`TestShardSplitJob`, D.9.1, 2026-05-19). 라이브 CRD apply 는 mesh 복원 후 별 turn.
-- [~] **현재 reshard state machine** — `internal/controller/shardsplitjob_controller.go`와 `shardsplitjob_{copy,cdc}.go`가 target bootstrap, InitialCopy Job, online CDC tablesync/lag gate, write-block, `ShardRange` routing update, source cleanup, promotion을 수행한다. failure/abort 회귀 테스트와 B-17~B-21 데이터 보전 수정이 포함된다.
+- [~] **현재 reshard state machine** — `internal/controller/shardsplitjob_controller.go`와 `shardsplitjob_copy.go`가 target bootstrap, offline InitialCopy Job, online CDC tablesync/lag gate, write-block, `ShardRange` routing update, source cleanup, promotion을 수행한다. failure/abort 회귀 테스트와 B-17~B-21 데이터 보전 수정이 포함된다. 단일 source split만 지원하며 merge/다중 source는 fail-closed 한다.
   - [ ] `SnapshotWAL`의 실제 snapshot/LSN capture — 현재는 no-op 예약 단계이며 `status.snapshotLSN`을 채우지 않는다.
   - [x] Target bootstrap — target ConfigMap/Service/StatefulSet을 멱등 생성한다.
   - [x] Initial copy — bulk/range copy Job의 성공을 phase 전이 조건으로 사용한다.

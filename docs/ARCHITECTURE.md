@@ -13,11 +13,11 @@
 
 - **Purpose**: MIT-licensed PostgreSQL Kubernetes Operator delivering production-grade operational quality and distributed SQL via *self-built* code — no external PostgreSQL operator fork or wrapper.
 - **Scope**: vanilla PostgreSQL 18+ on K8s, single-shard HA → sharding → online resharding → distributed SQL → GA.
-- **Stability tier**: v0.4.0-beta.1 — Level 4 Deep Insights (metrics, alerts, dashboards, WAL archiving, backup retention, switchover)
+- **Source version**: operator `v0.4.0-beta.8` / Helm chart `0.4.0-beta.9`
 - **License**: MIT (deps: BSD/Apache/MIT/PG-License only — no copyleft on SaaS)
 - **Module path**: `github.com/keiailab/postgres-operator`
 
-## CRD surface (8 CRDs)
+## CRD surface (10 CRDs)
 
 | CRD | apiVersion | Scope | Description |
 |---|---|---|---|
@@ -28,7 +28,8 @@
 | `PostgresUser` | `postgres.keiailab.io/v1alpha1` | Namespaced | Declarative role + password rotation |
 | `Pooler` | `postgres.keiailab.io/v1alpha1` | Namespaced | PgBouncer connection pooler |
 | `ImageCatalog` / `ClusterImageCatalog` | `postgres.keiailab.io/v1alpha1` | Namespaced / Cluster | Image catalog for declarative upgrades |
-| (G3+ planned) `ShardRange` / `ShardSplitJob` | — | — | Sharding metadata + 7-step online resharding |
+| `ShardRange` | `postgres.keiailab.io/v1alpha1` | Namespaced | Sharding routing metadata source of truth |
+| `ShardSplitJob` | `postgres.keiailab.io/v1alpha1` | Namespaced | Single-source split workflow; merge and multi-source requests are rejected |
 
 ## Self-built distributed SQL architecture
 
@@ -81,7 +82,7 @@ Adoption: **5/8 (63%)**.
 | G1 | Single-shard HA (failover + sync repl + PVC fence + lease) | 81% (HA election Lease pending) |
 | G2 | Operational quality (TLS auto / PrometheusRule / Grafana / Pooler / RBAC / ImageCatalog / Hibernation) | 72% (live drill pending) |
 | G3 | Sharding foundation (`ShardRange` CRD + pg-router PoC + metadata) | 37% |
-| G4 | Online resharding (`ShardSplitJob` 7-step) | 0% |
+| G4 | Online resharding (`ShardSplitJob` 7-step) | Single-source split implemented; live SLO and rollback drill pending |
 | G5 | Distributed SQL (scatter-gather + 2PC/saga + isolation + benchmarks) | 0% |
 | G6 | 1.0.0 GA (soak ≥7d + chaos + SBOM + cosign + 6 runbooks) | 12% |
 
@@ -97,7 +98,7 @@ Adoption: **5/8 (63%)**.
 
 ## Build / deploy
 
-- Container image: `ghcr.io/keiailab/postgres-operator:v0.4.0-beta.1`
+- Container image source version: `ghcr.io/keiailab/postgres-operator:v0.4.0-beta.8` (publication is tracked separately)
 - Helm chart: `charts/postgres-operator/` (`keiailab.github.io/postgres-operator`)
 - OLM bundle: `bundle/`
 - ArtifactHub: `keiailab-postgres-operator`

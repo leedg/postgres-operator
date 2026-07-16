@@ -70,9 +70,9 @@ operator manager
 
 ## Features (機能)
 
-### 現在出荷中 (v0.4.0-beta.1)
+### 現在のソース (operator v0.4.0-beta.8 / chart 0.4.0-beta.9)
 
-helm チャートおよび OperatorHub バンドルでは **8 つの所有 CRD** を出荷しています。CRD のステータスは、本番クラスターにおいて現時点で reconcile されている内容を反映します:
+現在の chart ソースには **10 個の owned CRD** が含まれます。公開済み release と本番検証の状態は別途追跡します:
 
 | CRD | 役割 | ステータス |
 |---|---|---|
@@ -84,6 +84,8 @@ helm チャートおよび OperatorHub バンドルでは **8 つの所有 CRD**
 | `PostgresUser` | 宣言的な role + password + membership (ready-primary psql) | ⚠️ controller partial |
 | `ImageCatalog` | Namespace スコープの PostgreSQL ランタイムイメージカタログ | ⚠️ rollout path |
 | `ClusterImageCatalog` | クラスター全体共有の PostgreSQL ランタイムイメージカタログ | ⚠️ rollout path |
+| `ShardRange` | shard routing metadata の source of truth | ⚠️ controller 実装済み、live 検証が必要 |
+| `ShardSplitJob` | 単一 source split workflow | ⚠️ merge/複数 source は拒否、live SLO・rollback drill が必要 |
 
 helm チャートには次が追加されています: PrometheusRule + Grafana ダッシュボード(Pooler overview + Cluster overview)、restricted PSA SecurityContext、deny-by-default の NetworkPolicy、cert-manager TLS 統合、OpenTelemetry 対応フック。
 
@@ -115,7 +117,7 @@ helm チャートには次が追加されています: PrometheusRule + Grafana 
 ## Quickstart (クイックスタート)
 
 ```bash
-# 1. オペレーター + 8 CRD のインストール (helm チャートまたは OperatorHub bundle)
+# 1. オペレーター + 10 CRD のインストール (helm チャートまたは OperatorHub bundle)
 helm install postgres-operator charts/postgres-operator
 
 # 2. quickstart 用 PostgresCluster を適用
@@ -144,7 +146,7 @@ helm upgrade postgres-operator charts/postgres-operator \
 
 ## Production readiness (本番運用準備)
 
-**現状 (0.4.0-beta.1)**: Level 4 Deep Insights 達成。PrometheusRule (8 alerts)、Grafana ダッシュボード、ServiceMonitor、WAL アーカイブ、バックアップリテンション、config ホットリロード、アノテーションベース switchover が運用中です。
+**現在のソース (operator 0.4.0-beta.8 / chart 0.4.0-beta.9)**: PrometheusRule、Grafana ダッシュボード、ServiceMonitor、WAL アーカイブ、バックアップリテンション、config ホットリロード、アノテーションベース switchover を含みます。公開・live 検証状態は別途追跡します。
 
 GA までの距離:
 - **P1** — 本番対応のシングルシャードには、HA Lease 分散ロックコントローラー、BackupJob/ScheduledBackup の実機 drill、PITR チェックサム drill、および chaos-mesh failover スイートが必要です。
@@ -155,7 +157,7 @@ GA までの距離:
 
 - BackupJob / ScheduledBackup / Pooler / PostgresDatabase / PostgresUser コントローラーは *partial* — CRD サーフェスは出荷されコアパスは reconcile されますが、実機 drill 検証 (rotation / PITR / retain-policy) はフェーズ別に保留・追跡中です。
 - ImageCatalog / ClusterImageCatalog の rollout-drift 測定は StatefulSet アノテーション層で実装済みですが、本番 rollout SLA はまだ認定されていません。
-- Sharding サブシステム (`ShardRange`、`pg-router`、`ShardSplitJob`) は **設計のみ** — 仕様は [`docs/sharding/SHARDING.md`](sharding/SHARDING.md) を参照。ランタイムコードはまだありません。
+- Sharding サブシステムには runtime コードがあります。`ShardRange` と `pg-router` routing、単一 source の `ShardSplitJob` split は実装済みですが、merge・複数 source は拒否し、live SLO と自動 rollback は未検証/未実装です。詳細は [`docs/sharding/SHARDING.md`](sharding/SHARDING.md) を参照してください。
 - 上記のフェーズロードマップは複数年スパンを示唆しており、現時点の運用範囲はシングルシャード HA のみです。
 
 ## Uninstall (アンインストール)
@@ -194,7 +196,7 @@ GitHub Actions が OSS 標準スイートを実行します (CI / scorecard / Co
 
 ## Documentation (ドキュメント)
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 単一ページのアーキテクチャ説明(8 CRD サーフェス + 自前構築の分散 SQL + G0-G6 ステータス + ADR クロスリンク)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — 単一ページのアーキテクチャ説明(10 CRD サーフェス + 自前構築の分散 SQL + G0-G6 ステータス + ADR クロスリンク)
 - `docs/kb/adr/` — Architecture Decision Records (現行: 0001–0026)
 - `docs/rfcs/` — RFC ドラフト (現行: 0001–0007)
 - `docs/operator-guide/` — Deployment / pooler-monitoring / community-operators-onboarding / HA

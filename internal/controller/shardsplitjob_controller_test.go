@@ -14,7 +14,12 @@ import (
 
 func ssjWith(phase postgresv1alpha1.ShardSplitJobPhase, fwdOnly bool, targets []postgresv1alpha1.ShardSplitTarget) *postgresv1alpha1.ShardSplitJob {
 	return &postgresv1alpha1.ShardSplitJob{
-		Spec:   postgresv1alpha1.ShardSplitJobSpec{AllowForwardOnly: fwdOnly, Targets: targets},
+		Spec: postgresv1alpha1.ShardSplitJobSpec{
+			Direction:        postgresv1alpha1.ShardSplitDirectionSplit,
+			Sources:          []string{"shard-0"},
+			AllowForwardOnly: fwdOnly,
+			Targets:          targets,
+		},
 		Status: postgresv1alpha1.ShardSplitJobStatus{Phase: phase},
 	}
 }
@@ -55,6 +60,31 @@ func TestShardSplitJob_nextPhase(t *testing.T) {
 			got, _ := r.nextPhase(tc.ssj)
 			if got != tc.want {
 				t.Fatalf("nextPhase = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+func TestShardSplitJob_nextPhase_RejectsUnsupportedSourceShapes(t *testing.T) {
+	r := &ShardSplitJobReconciler{}
+	cases := []struct {
+		name      string
+		direction postgresv1alpha1.ShardSplitDirection
+		sources   []string
+	}{
+		{"merge is not implemented", postgresv1alpha1.ShardSplitDirectionMerge, []string{"shard-0", "shard-1"}},
+		{"split requires exactly one source", postgresv1alpha1.ShardSplitDirectionSplit, []string{"shard-0", "shard-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ssj := ssjWith(postgresv1alpha1.ShardSplitPhasePending, false, twoTargets())
+			ssj.Spec.Direction = tc.direction
+			ssj.Spec.Sources = tc.sources
+			got, reason := r.nextPhase(ssj)
+			if got != postgresv1alpha1.ShardSplitPhaseFailed {
+				t.Fatalf("nextPhase = %q, want Failed", got)
+			}
+			if reason == "" {
+				t.Fatal("unsupported source shape must include a failure reason")
 			}
 		})
 	}

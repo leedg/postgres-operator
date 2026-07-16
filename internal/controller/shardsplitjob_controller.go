@@ -242,6 +242,15 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob) (postgresv1alpha1.ShardSplitJobPhase, string) {
 	switch ssj.Status.Phase {
 	case "", postgresv1alpha1.ShardSplitPhasePending:
+		// 현재 데이터 이동 구현은 split 전용이며 source[0]만 복사한다.
+		// merge 또는 다중 source를 허용하면 routing update가 복사되지 않은 source까지
+		// 제거할 수 있으므로 어떤 부수효과보다 먼저 fail-closed 한다.
+		if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "merge direction is not implemented"
+		}
+		if len(ssj.Spec.Sources) != 1 {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "split requires exactly one source"
+		}
 		// 데이터 보존 불변식 gate (#213). target 범위가 무중첩·무공백 연속이어야.
 		targets := flattenTargetRanges(ssj.Spec.Targets)
 		if err := router.ValidateSplitPlan(targets, targets); err != nil {

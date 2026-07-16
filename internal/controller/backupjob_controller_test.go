@@ -1062,3 +1062,47 @@ func assertEmptyDirVolume(t *testing.T, volumes []corev1.Volume, name string) {
 	}
 	t.Fatalf("EmptyDir volume %q not found in %+v", name, volumes)
 }
+
+// TestRestorePrimaryPodHealth 는 #B-26 fix — restore 후 PG 기동 상태 분류를 검증한다.
+func TestRestorePrimaryPodHealth(t *testing.T) {
+	pgReady := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: true},
+	}}}
+	pgCrash := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+		}},
+	}}}
+	pgStarting := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"},
+		}},
+	}}}
+	otherCrash := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "sidecar", Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+		}},
+	}}}
+
+	cases := []struct {
+		name              string
+		pods              []corev1.Pod
+		wantReady, wantCrash bool
+	}{
+		{"empty (STS scale-up 전)", nil, false, false},
+		{"pg ready", []corev1.Pod{pgReady}, true, false},
+		{"pg crashloop → crashed", []corev1.Pod{pgCrash}, false, true},
+		{"pg starting → neither", []corev1.Pod{pgStarting}, false, false},
+		{"non-pg container crash 는 무시", []corev1.Pod{otherCrash}, false, false},
+		{"ready 가 crash 보다 우선", []corev1.Pod{pgReady, pgCrash}, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ready, crashed := restorePrimaryPodHealth(tc.pods)
+			if ready != tc.wantReady || crashed != tc.wantCrash {
+				t.Fatalf("restorePrimaryPodHealth = (ready=%v crashed=%v), want (ready=%v crashed=%v)",
+					ready, crashed, tc.wantReady, tc.wantCrash)
+			}
+		})
+	}
+}

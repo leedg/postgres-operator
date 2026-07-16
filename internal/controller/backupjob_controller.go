@@ -73,6 +73,10 @@ const (
 	backupJobRunnerNameMaxLen     = 63
 	backupJobRunnerNameSuffix     = "-runner"
 	backupJobRunnerRequeueWait    = 15 * time.Second
+	// backupRestoreHealthTimeout 는 restore Job 완료 후 PostgreSQL 이 기동(Ready)해야 하는
+	// 최대 시간이다. 초과하면 restore 를 Failed 로 본다 (#B-26: 도달불가 recovery target 등으로
+	// PG 가 CrashLoop 하면 restore 는 실패). recovery + basebackup 재생을 넉넉히 커버.
+	backupRestoreHealthTimeout = 5 * time.Minute
 
 	BackupJobReasonAwaitingInvocation           = "AwaitingPluginInvocation"
 	BackupJobReasonClusterNotFound              = "ClusterNotFound"
@@ -87,6 +91,8 @@ const (
 	BackupJobReasonRestoreAlreadyInProgress     = "RestoreAlreadyInProgress"
 	BackupJobReasonRestoreSucceeded             = "RestoreSucceeded"
 	BackupJobReasonRestoreFailed                = "RestoreFailed"
+	BackupJobReasonRestoreVerifyingHealth       = "RestoreVerifyingHealth"
+	BackupJobReasonRestorePostgresFailed        = "RestorePostgresFailed"
 	BackupJobReasonRunnerJobCreated             = "RunnerJobCreated"
 	BackupJobReasonRunnerJobRunning             = "RunnerJobRunning"
 	BackupJobReasonRunnerJobSucceeded           = "RunnerJobSucceeded"
@@ -643,19 +649,61 @@ func (r *BackupJobReconciler) reconcileSidecarRestore(
 	}
 
 	if jobConditionTrue(&runner, batchv1.JobComplete) {
+		// restore Job(pgbackrest)이 완료 = 데이터 파일 복원 + recovery 설정까지. 이제 STS 가
+		// 다시 올라와 PostgreSQL 이 recovery 를 수행한다. #B-26: PG 가 실제로 기동(Ready)해야
+		// restore 를 Succeeded 로 본다. 도달불가 recovery target 등으로 PG 가 CrashLoop 하면
+		// pgbackrest 는 성공이어도 restore 는 실패다(옛 동작은 여기서 곧장 Succeeded 선언 →
+		// CrashLoop 을 status 에 안 드러냈다).
 		if err := r.releaseClusterRestoreAnnotation(ctx, bj, cluster); err != nil {
 			return ctrl.Result{}, err
 		}
-		endedAt := nowFunc()
-		bj.Status.EndedAt = &endedAt
-		bj.Status.Phase = postgresv1alpha1.BackupJobSucceeded
-		bj.Status.ObservedGeneration = bj.Generation
-		setBackupJobCondition(bj, metav1.ConditionTrue,
-			BackupJobReasonRestoreSucceeded,
-			"Restore runner Job "+runner.Name+" completed successfully")
-		commonsevents.Emitf(r.Recorder, bj, BackupJobReasonRestoreSucceeded,
-			"Restore runner Job %s completed successfully", runner.Name)
-		return ctrl.Result{}, r.statusUpdate(ctx, bj)
+		ready, crashed, err := r.shardRestorePrimaryHealth(ctx, cluster, 0)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		switch {
+		case ready:
+			endedAt := nowFunc()
+			bj.Status.EndedAt = &endedAt
+			bj.Status.Phase = postgresv1alpha1.BackupJobSucceeded
+			bj.Status.ObservedGeneration = bj.Generation
+			setBackupJobCondition(bj, metav1.ConditionTrue,
+				BackupJobReasonRestoreSucceeded,
+				"Restore runner Job "+runner.Name+" completed and PostgreSQL is Ready after recovery")
+			commonsevents.Emitf(r.Recorder, bj, BackupJobReasonRestoreSucceeded,
+				"Restore runner Job %s completed and PostgreSQL is Ready after recovery", runner.Name)
+			return ctrl.Result{}, r.statusUpdate(ctx, bj)
+		case crashed:
+			endedAt := nowFunc()
+			bj.Status.EndedAt = &endedAt
+			bj.Status.Phase = postgresv1alpha1.BackupJobFailed
+			bj.Status.ObservedGeneration = bj.Generation
+			setBackupJobCondition(bj, metav1.ConditionFalse,
+				BackupJobReasonRestorePostgresFailed,
+				"Restore files applied but PostgreSQL failed to start (CrashLoopBackOff) — "+
+					"the recovery target may be beyond the archived WAL range (unreachable)")
+			commonsevents.EmitWarningf(r.Recorder, bj, BackupJobReasonRestorePostgresFailed,
+				"Restore %s: PostgreSQL failed to start after recovery (CrashLoopBackOff)", bj.Name)
+			return ctrl.Result{}, r.statusUpdate(ctx, bj)
+		default:
+			// 아직 기동 중. 완료 후 backupRestoreHealthTimeout 초과 시 timeout 실패.
+			if runner.Status.CompletionTime != nil &&
+				nowFunc().Time.Sub(runner.Status.CompletionTime.Time) > backupRestoreHealthTimeout {
+				endedAt := nowFunc()
+				bj.Status.EndedAt = &endedAt
+				bj.Status.Phase = postgresv1alpha1.BackupJobFailed
+				bj.Status.ObservedGeneration = bj.Generation
+				setBackupJobCondition(bj, metav1.ConditionFalse,
+					BackupJobReasonRestorePostgresFailed,
+					"Restore files applied but PostgreSQL did not become Ready within the health timeout")
+				return ctrl.Result{}, r.statusUpdate(ctx, bj)
+			}
+			bj.Status.ObservedGeneration = bj.Generation
+			setBackupJobCondition(bj, metav1.ConditionFalse,
+				BackupJobReasonRestoreVerifyingHealth,
+				"Restore files applied; waiting for PostgreSQL to start and reach Ready after recovery")
+			return ctrl.Result{RequeueAfter: backupJobRunnerRequeueWait}, r.statusUpdate(ctx, bj)
+		}
 	}
 
 	if failed := findJobCondition(&runner, batchv1.JobFailed); failed != nil && failed.Status == corev1.ConditionTrue {
@@ -759,6 +807,45 @@ func (r *BackupJobReconciler) shardPodsStopped(
 		return false, err
 	}
 	return len(pods.Items) == 0, nil
+}
+
+// restorePrimaryPodHealth 는 restore 후 재기동한 shard-0 pod 목록에서 PostgreSQL 컨테이너의
+// 기동 상태를 분류한다(순수 함수 — 단위테스트 용이). ready=true 면 PG 정상 기동(복구 완료),
+// crashed=true 면 CrashLoopBackOff(도달불가 recovery target 등으로 PG 가 기동 거부). 둘 다
+// false 면 아직 기동 중(또는 STS scale-up 전으로 pod 부재).
+func restorePrimaryPodHealth(pods []corev1.Pod) (ready, crashed bool) {
+	for i := range pods {
+		for j := range pods[i].Status.ContainerStatuses {
+			cs := &pods[i].Status.ContainerStatuses[j]
+			if cs.Name != pgContainerName {
+				continue
+			}
+			if cs.Ready {
+				return true, false
+			}
+			if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+// shardRestorePrimaryHealth 는 shard-0 pod 를 조회해 restorePrimaryPodHealth 로 분류한다.
+func (r *BackupJobReconciler) shardRestorePrimaryHealth(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardOrdinal int32,
+) (ready, crashed bool, err error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(SelectorLabels(cluster.Name, "shard", shardOrdinal)),
+	); err != nil {
+		return false, false, err
+	}
+	ready, crashed = restorePrimaryPodHealth(pods.Items)
+	return ready, crashed, nil
 }
 
 func (r *BackupJobReconciler) ensureClusterRestoreAnnotation(

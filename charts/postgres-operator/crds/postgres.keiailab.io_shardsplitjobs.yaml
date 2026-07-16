@@ -65,7 +65,7 @@ spec:
           spec:
             description: |-
               ShardSplitJobSpec 는 사용자 의도된 shard split 작업이다. merge 값은 향후 API
-              호환성을 위해 예약되어 있지만 현재 admission과 controller가 거부한다.
+              호환성을 위해 예약되어 있지만 현재 controller가 모든 부수효과 전에 거부한다.
             properties:
               allowForwardOnly:
                 default: false
@@ -95,7 +95,7 @@ spec:
                 default: split
                 description: |-
                   Direction 은 향후 split 또는 merge 방향을 표현한다. 현재는 split만 구현되어
-                  API validation과 controller가 merge를 부수효과 전에 거부한다. 기본 split.
+                  controller가 merge를 부수효과 전에 거부한다. 기본 split.
                 enum:
                 - split
                 - merge
@@ -189,10 +189,6 @@ spec:
             - targets
             type: object
             x-kubernetes-validations:
-            - message: merge direction is not implemented
-              rule: '!has(self.direction) || self.direction == ''split'''
-            - message: split requires exactly one source
-              rule: size(self.sources) == 1
             - message: targets must not be empty
               rule: size(self.targets) > 0
             - message: spec is immutable after creation

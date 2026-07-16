@@ -56,9 +56,7 @@ const (
 )
 
 // ShardSplitJobSpec 는 사용자 의도된 shard split 작업이다. merge 값은 향후 API
-// 호환성을 위해 예약되어 있지만 현재 admission과 controller가 거부한다.
-// +kubebuilder:validation:XValidation:rule="!has(self.direction) || self.direction == 'split'",message="merge direction is not implemented"
-// +kubebuilder:validation:XValidation:rule="size(self.sources) == 1",message="split requires exactly one source"
+// 호환성을 위해 예약되어 있지만 현재 controller가 모든 부수효과 전에 거부한다.
 // +kubebuilder:validation:XValidation:rule="size(self.targets) > 0",message="targets must not be empty"
 // +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable after creation"
 type ShardSplitJobSpec struct {
@@ -73,7 +71,7 @@ type ShardSplitJobSpec struct {
 	Keyspace string `json:"keyspace"`
 
 	// Direction 은 향후 split 또는 merge 방향을 표현한다. 현재는 split만 구현되어
-	// API validation과 controller가 merge를 부수효과 전에 거부한다. 기본 split.
+	// controller가 merge를 부수효과 전에 거부한다. 기본 split.
 	// +kubebuilder:default=split
 	// +optional
 	Direction ShardSplitDirection `json:"direction,omitempty"`

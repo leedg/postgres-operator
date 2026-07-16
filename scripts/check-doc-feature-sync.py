@@ -130,25 +130,26 @@ def main() -> int:
     first_phase_effect = controller.find("if ssj.Status.Phase == postgresv1alpha1.ShardSplitPhaseBootstrap")
     if global_guard < 0 or first_phase_effect < 0 or global_guard > first_phase_effect:
         fail("ShardSplitJob global support guard must run before every operational phase effect")
+    for stale in ("rollback 가능", "reversible path"):
+        if stale in controller:
+            fail(f"internal/controller/shardsplitjob_controller.go: stale rollback guarantee {stale!r}")
+    if "allowForwardOnly=true is not implemented" not in controller:
+        fail("internal/controller/shardsplitjob_controller.go: unsupported forward-only reason is missing")
 
     check_contains("api/v1alpha1/shardsplitjob_types.go", [
-        "!has(self.direction) || self.direction == 'split'",
-        "size(self.sources) == 1",
-        "merge direction is not implemented",
         'self == oldSelf',
         "spec is immutable after creation",
+        "controller가 모든 부수효과 전에 거부한다",
     ])
     for path in (
         "config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml",
         "charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml",
     ):
-        check_contains(path, [
-            "!has(self.direction) || self.direction == ''split''",
-            "size(self.sources) == 1",
-            "merge direction is not implemented",
-            "self == oldSelf",
-            "spec is immutable after creation",
-        ])
+        check_contains(path, ["self == oldSelf", "spec is immutable after creation"])
+        crd_text = read(path)
+        for rollout_blocker in ("merge direction is not implemented", "size(self.sources) == 1"):
+            if rollout_blocker in crd_text:
+                fail(f"{path}: legacy status updates would be blocked before Kubernetes 1.30: {rollout_blocker!r}")
     source_crd = (ROOT / "config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml").read_bytes()
     chart_crd = (ROOT / "charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml").read_bytes()
     if source_crd != chart_crd:

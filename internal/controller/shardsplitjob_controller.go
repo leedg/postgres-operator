@@ -283,11 +283,11 @@ func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob)
 	case postgresv1alpha1.ShardSplitPhaseCDCCatchup:
 		return postgresv1alpha1.ShardSplitPhaseCutover, ""
 	case postgresv1alpha1.ShardSplitPhaseCutover:
-		// *비가역* gate: AllowForwardOnly=true 는 rollback 불가 → 안전망(§6 L3) 미보유
-		// 골격에서는 진입 거부. false(rollback 가능)만 자동 진행.
+		// 현재 forward-only 정책은 구현하지 않았으므로 true를 명시적으로 거부한다.
+		// false는 routing 진행 허용 조건일 뿐 자동 rollback 보장이 아니다.
 		if ssj.Spec.AllowForwardOnly {
 			return postgresv1alpha1.ShardSplitPhaseFailed,
-				"cutover requires reversible path (AllowForwardOnly=false) in skeleton reconciler"
+				"allowForwardOnly=true is not implemented"
 		}
 		return postgresv1alpha1.ShardSplitPhaseRoutingUpdate, ""
 	case postgresv1alpha1.ShardSplitPhaseRoutingUpdate:

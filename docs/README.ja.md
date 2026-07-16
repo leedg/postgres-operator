@@ -9,7 +9,7 @@
 > English README: [README.md](../README.md) — canonical / 正本
 
 <p align="center">
-  <a href="../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"/></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"/></a>
   <a href="https://golang.org/"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go" alt="Go Version"/></a>
   <a href="https://www.postgresql.org/"><img src="https://img.shields.io/badge/PostgreSQL-18%2B-336791?logo=postgresql" alt="PostgreSQL"/></a>
   <a href="https://kubernetes.io/"><img src="https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes" alt="Kubernetes"/></a>
@@ -52,7 +52,7 @@ Application (libpq / JDBC / asyncpg)
 pg-router  (stateless, HPA-scaled)
     │  - vindex evaluation (hash / range / consistent-hash / lookup)
     │  - single-shard fast path / multi-shard scatter-gather
-    │  - distributed transaction coordinator (2PC + saga)
+    │  - 将来目標: distributed transaction coordinator (2PC + saga; 未実装)
     ├──────┬──────┬──────┬──────
   Shard A  Shard B  Shard C  Shard D     (per shard: 1 primary + N replicas)
     │ instance manager (election + fencing + supervise postgres)
@@ -117,7 +117,8 @@ helm チャートには次が追加されています: PrometheusRule + Grafana 
 ## Quickstart (クイックスタート)
 
 ```bash
-# 1. オペレーター + 10 CRD のインストール (helm チャートまたは OperatorHub bundle)
+# 1. Helm chart: オペレーター + 10 CRD をインストール
+# OperatorHub bundle は現在 8 CRD で ShardRange/ShardSplitJob を含まない
 helm install postgres-operator charts/postgres-operator
 
 # 2. quickstart 用 PostgresCluster を適用

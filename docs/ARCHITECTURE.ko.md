@@ -41,7 +41,7 @@ Application (libpq / JDBC / asyncpg)
 pg-router  (stateless, HPA-scaled)
     │ - vindex 평가 (hash / range / consistent-hash / lookup)
     │ - single-shard fast path / multi-shard scatter-gather
-    │ - distributed transaction coordinator (2PC + saga)
+    │ - 향후 목표: distributed transaction coordinator (2PC + saga; 미구현)
     ├──────┬──────┬──────┬──────
   Shard A  Shard B  Shard C  Shard D     (shard 별: 1 primary + N replica)
     │ instance manager (election + fencing + postgres 감독)

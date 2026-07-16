@@ -9,7 +9,7 @@
 > English README: [README.md](../README.md) — canonical / 정본
 
 <p align="center">
-  <a href="../LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"/></a>
+  <a href="../LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"/></a>
   <a href="https://golang.org/"><img src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go" alt="Go Version"/></a>
   <a href="https://www.postgresql.org/"><img src="https://img.shields.io/badge/PostgreSQL-18%2B-336791?logo=postgresql" alt="PostgreSQL"/></a>
   <a href="https://kubernetes.io/"><img src="https://img.shields.io/badge/Kubernetes-1.26+-326CE5?logo=kubernetes" alt="Kubernetes"/></a>
@@ -49,7 +49,7 @@ Application (libpq / JDBC / asyncpg)
 pg-router  (stateless, HPA-scaled)
     │  - vindex 평가 (hash / range / consistent-hash / lookup)
     │  - single-shard fast path / multi-shard scatter-gather
-    │  - distributed transaction coordinator (2PC + saga)
+    │  - 향후 목표: distributed transaction coordinator (2PC + saga; 미구현)
     ├──────┬──────┬──────┬──────
   Shard A  Shard B  Shard C  Shard D     (shard 별: 1 primary + N replica)
     │ instance manager (election + fencing + postgres 감독)
@@ -114,7 +114,8 @@ phase 세부 (sub-task / SLO / ADR/RFC 참조): [`ROADMAP.md`](ROADMAP.md).
 ## Quickstart
 
 ```bash
-# 1. operator + 10 CRD 설치 (helm chart 또는 OperatorHub bundle)
+# 1. Helm chart: operator + 10 CRD 설치
+# OperatorHub bundle은 현재 8 CRD이며 ShardRange/ShardSplitJob은 포함하지 않음
 helm install postgres-operator charts/postgres-operator
 
 # 2. quickstart PostgresCluster 적용

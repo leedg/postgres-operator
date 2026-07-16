@@ -93,24 +93,50 @@ def main() -> int:
         text = read(path)
         if not re.search(r"10 (?:owned )?CRD|10종|10 個|10 个", text):
             fail(f"{path}: current 10-CRD count is missing")
-        for pattern in (r"v0\.4\.0-beta\.1", r"8 (?:owned )?CRD", r"8종", r"8つ", r"8 个", r"design-only", r"설계만", r"ランタイムコードはまだありません", r"暂无运行时代码"):
+        stale_current_patterns = [r"v0\.4\.0-beta\.1", r"design-only", r"설계만", r"ランタイムコードはまだありません", r"暂无运行时代码"]
+        if path in architecture_docs:
+            stale_current_patterns.extend((r"8 (?:owned )?CRD", r"8종", r"8つ", r"8 个"))
+        for pattern in stale_current_patterns:
             if re.search(pattern, text, re.I):
                 fail(f"{path}: stale current-state claim matches {pattern!r}")
 
+    future_markers = {
+        "docs/ARCHITECTURE.md": "future target:",
+        "docs/ARCHITECTURE.ko.md": "향후 목표:",
+        "docs/ARCHITECTURE.ja.md": "将来目標:",
+        "docs/ARCHITECTURE.zh.md": "未来目标:",
+    }
+    for path in architecture_docs:
+        check_contains(path, ["distributed transaction coordinator", future_markers[path]])
+    for path in translated_readmes:
+        check_contains(path, ["License-MIT-blue.svg", "OperatorHub bundle", "2PC + saga"])
+        marker = "향후 목표:" if ".ko." in path else "将来目標:" if ".ja." in path else "未来目标:"
+        check_contains(path, [marker])
+        if not re.search(r"8 (?:個|个)?\s*CRD", read(path)):
+            fail(f"{path}: OperatorHub's current 8-CRD boundary is missing")
+        if "License-Apache_2.0" in read(path):
+            fail(f"{path}: license badge must match MIT LICENSE")
+
     controller = read("internal/controller/shardsplitjob_controller.go")
     for guard in (
+        "if reason := unsupportedSplitSpecReason(&ssj); reason != \"\"",
+        "func unsupportedSplitSpecReason",
         "if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge",
-        'return postgresv1alpha1.ShardSplitPhaseFailed, "merge direction is not implemented"',
         "if len(ssj.Spec.Sources) != 1",
-        'return postgresv1alpha1.ShardSplitPhaseFailed, "split requires exactly one source"',
     ):
         if guard not in controller:
             fail(f"internal/controller/shardsplitjob_controller.go: missing fail-closed guard {guard!r}")
+    global_guard = controller.find('if reason := unsupportedSplitSpecReason(&ssj); reason != ""')
+    first_phase_effect = controller.find("if ssj.Status.Phase == postgresv1alpha1.ShardSplitPhaseBootstrap")
+    if global_guard < 0 or first_phase_effect < 0 or global_guard > first_phase_effect:
+        fail("ShardSplitJob global support guard must run before every operational phase effect")
 
     check_contains("api/v1alpha1/shardsplitjob_types.go", [
         "!has(self.direction) || self.direction == 'split'",
         "size(self.sources) == 1",
         "merge direction is not implemented",
+        'self == oldSelf',
+        "spec is immutable after creation",
     ])
     for path in (
         "config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml",
@@ -120,15 +146,29 @@ def main() -> int:
             "!has(self.direction) || self.direction == ''split''",
             "size(self.sources) == 1",
             "merge direction is not implemented",
+            "self == oldSelf",
+            "spec is immutable after creation",
         ])
     source_crd = (ROOT / "config/crd/bases/postgres.keiailab.io_shardsplitjobs.yaml").read_bytes()
     chart_crd = (ROOT / "charts/postgres-operator/crds/postgres.keiailab.io_shardsplitjobs.yaml").read_bytes()
     if source_crd != chart_crd:
         fail("ShardSplitJob source and chart CRDs must be byte-identical")
 
+    bundle_kinds: set[str] = set()
+    for crd in (ROOT / "bundle/manifests").glob("postgres.keiailab.io_*.yaml"):
+        match = re.search(r"(?m)^\s{4}kind:\s*(\w+)\s*$", crd.read_text(encoding="utf-8"))
+        if match:
+            bundle_kinds.add(match.group(1))
+    if len(bundle_kinds) != 8 or {"ShardRange", "ShardSplitJob"} & bundle_kinds:
+        fail(f"bundle/manifests: expected 8 legacy CRDs without sharding, got {sorted(bundle_kinds)}")
+
     for path in ("docs/FEATURE_DEEP_DIVE.md", "docs/ROADMAP.md"):
         if "shardsplitjob_cdc.go" in read(path):
             fail(f"{path}: references nonexistent shardsplitjob_cdc.go")
+    check_contains("docs/kb/adr/0027-non-ordinal-reshard-target-shard-identity.md", [
+        "Current implementation note (2026-07-16)",
+        "자동 rollback, merge는 구현되지 않았다",
+    ])
 
     if "ShardSplitJobReconciler" not in read("cmd/main.go"):
         fail("cmd/main.go: ShardSplitJobReconciler is not registered")

@@ -108,6 +108,17 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			_ = r.Status().Update(ctx, &ssj)
 			return ctrl.Result{}, nil
 		}
+		// #B-28: target StatefulSet 을 upsert 했다고 곧장 InitialCopy 로 넘어가면, copy Job 이
+		// target pod 부팅(및 headless DNS 등록) 전에 실행돼 "no such host" 로 실패한다(E-1 에서
+		// 수동 "target Ready 후 재적용" 으로 우회했던 race). target pod 가 Ready 될 때까지
+		// Bootstrap 에 머물며 requeue 한다 — nextPhase 전이 게이트.
+		ready, err := r.bootstrapTargetsReady(ctx, &ssj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
 	}
 
 	// InitialCopy phase: source→target 데이터 복사 Job 을 띄우고 완료를 기다린다. 완료
@@ -390,6 +401,24 @@ func (r *ShardSplitJobReconciler) activeShardRangeIDs(ctx context.Context, ssj *
 		return nil, fmt.Errorf("no ShardRange for cluster=%s keyspace=%s", ssj.Spec.Cluster, ssj.Spec.Keyspace)
 	}
 	return active, nil
+}
+
+// bootstrapTargetsReady 는 #B-28 — 모든 target shard 에 Ready(PodRunning + Ready condition)
+// 인 pod 가 하나 이상 있는지 본다. copy Job 실행(InitialCopy) 전 게이트로, target pod 부팅 +
+// headless DNS 등록이 끝났음을 보장해 "no such host" copy 실패를 막는다. targetShardReadyForPromote
+// 와 같은 readiness 판정(podReadyForPromote)을 재사용한다.
+func (r *ShardSplitJobReconciler) bootstrapTargetsReady(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) (bool, error) {
+	for i := range ssj.Spec.Targets {
+		shardID := ssj.Spec.Targets[i].ShardID
+		ready, _, err := r.targetShardReadyForPromote(ctx, ssj.Namespace, ssj.Spec.Cluster, shardID)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *ShardSplitJobReconciler) targetShardReadyForPromote(ctx context.Context, namespace, cluster, shardID string) (bool, string, error) {

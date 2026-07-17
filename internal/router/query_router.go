@@ -25,6 +25,12 @@ var ErrNoRoutingKey = errors.New("router: no single-shard routing key (scatter-g
 // ErrWriteBlocked 는 resharding cutover 중 쓰기가 일시 차단된 경우이다(읽기는 허용).
 var ErrWriteBlocked = errors.New("router: writes blocked (resharding cutover in progress)")
 
+// ErrCrossShardInsert 는 다중행 INSERT 의 튜플들이 서로 다른 shard 로 라우팅되는 경우이다
+// (#B-30). 라우터가 다중행 INSERT 를 첫 튜플 키로만 라우팅해 나머지 행을 오배치하던 조용한
+// 데이터 손상 대신, 명시적 에러로 거부한다(호출자가 클라이언트에 알림). 클라이언트는 행을
+// 나눠 보내거나 단일-샤드 배치로 재구성해야 한다.
+var ErrCrossShardInsert = errors.New("router: multi-row INSERT spans multiple shards; split rows per shard")
+
 // RouteDecision 은 한 쿼리의 라우팅 결정이다.
 type RouteDecision struct {
 	// Shard 는 대상 shard 이름. Scatter=true 면 비어 있다.
@@ -81,6 +87,28 @@ func (qr QueryRouter) Route(query string) (RouteDecision, error) {
 		return RouteDecision{}, fmt.Errorf("router: QueryRouter has no route key extractor")
 	}
 	col := qr.Topology.Spec.Vindex.Column
+
+	// #B-30: 다중행 INSERT 는 모든 튜플 키가 같은 shard 로 수렴할 때만 안전하다. 여러 shard 로
+	// 갈리면 첫 키로만 라우팅해 나머지 행을 오배치하던 조용한 손상 대신 ErrCrossShardInsert 로
+	// 거부한다. 단일 shard 수렴 시 그 shard 로 라우팅(정상). (단일행 INSERT 는 keys 1개라
+	// 자연히 통과 — 아래 일반 추출 경로와 동치이나, 다중 튜플을 명시 검사하는 게 핵심.)
+	if keys, ok := matchInsertColumnAll(query, col); ok && len(keys) > 1 {
+		first, sErr := qr.Topology.Shard(keys[0])
+		if sErr != nil {
+			return RouteDecision{}, sErr
+		}
+		for _, k := range keys[1:] {
+			sh, err := qr.Topology.Shard(k)
+			if err != nil {
+				return RouteDecision{}, err
+			}
+			if sh != first {
+				return RouteDecision{}, ErrCrossShardInsert
+			}
+		}
+		return qr.decide(first, nil)(pick, read)
+	}
+
 	key, ok := qr.Extractor.ExtractRoutingKey(query, col)
 	if !ok {
 		return RouteDecision{Read: read, Scatter: true}, ErrNoRoutingKey

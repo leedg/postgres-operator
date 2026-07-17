@@ -126,6 +126,11 @@ func (s *session) handleSimpleQuery(m pgMessage) bool {
 		s.queryError("25006", err.Error()) // read_only_sql_transaction — cutover write-block.
 		return true
 	}
+	if errors.Is(err, router.ErrCrossShardInsert) {
+		// #B-30: 다중행 INSERT 가 여러 shard 로 갈림 — 오배치 대신 명시 거부.
+		s.queryError("0A000", err.Error()) // feature_not_supported.
+		return true
+	}
 	if err != nil {
 		s.queryError("08006", "routing failed: "+err.Error())
 		return true

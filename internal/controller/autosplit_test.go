@@ -70,7 +70,7 @@ func TestAutoSplitTriggerBreached(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _, _, _ := autoSplitTriggerBreached(tc.triggers, tc.obs)
+			got, _, _, _, _ := autoSplitTriggerBreached(tc.triggers, tc.obs)
 			if got != tc.want {
 				t.Fatalf("breached = %v, want %v", got, tc.want)
 			}
@@ -355,5 +355,42 @@ func TestReconcileAutoSplit_UnsourcedMetricsReason(t *testing.T) {
 	}
 	if reason != autoSplitReasonNoMetrics {
 		t.Fatalf("reason = %q, want %q", reason, autoSplitReasonNoMetrics)
+	}
+}
+
+// TestPVCUtilizationBreached 는 K-5 — PVC 사용률(%) 트리거 순수함수를 검증한다.
+func TestPVCUtilizationBreached(t *testing.T) {
+	cases := []struct {
+		name      string
+		obs       ShardObservation
+		threshold int32
+		want      bool
+	}{
+		{"80% 임계, 사용 85% → breach", ShardObservation{SizeBytes: 85, PVCCapacityBytes: 100}, 80, true},
+		{"80% 임계, 사용 정확히 80% → breach(>=)", ShardObservation{SizeBytes: 80, PVCCapacityBytes: 100}, 80, true},
+		{"80% 임계, 사용 79% → no", ShardObservation{SizeBytes: 79, PVCCapacityBytes: 100}, 80, false},
+		{"용량 미상(0) → no(오탐 방지)", ShardObservation{SizeBytes: 999, PVCCapacityBytes: 0}, 80, false},
+		{"크기 미관측(0) → no", ShardObservation{SizeBytes: 0, PVCCapacityBytes: 100}, 80, false},
+		{"대용량 오버플로 없음(50Gi 중 45Gi=90%)", ShardObservation{SizeBytes: 45 << 30, PVCCapacityBytes: 50 << 30}, 80, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pvcUtilizationBreached(tc.obs, tc.threshold); got != tc.want {
+				t.Fatalf("pvcUtilizationBreached(%+v, %d) = %v, want %v", tc.obs, tc.threshold, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutoSplitTriggerBreached_PVC 는 PVC 트리거가 AND 평가에 결선됐는지 검증한다.
+func TestAutoSplitTriggerBreached_PVC(t *testing.T) {
+	trig := &postgresv1alpha1.AutoSplitTriggers{PVCUtilizationPercent: 80}
+	// 85% → breach
+	if b, _, _, _, enPVC := autoSplitTriggerBreached(trig, ShardObservation{SizeBytes: 85, PVCCapacityBytes: 100}); !b || !enPVC {
+		t.Fatalf("85%% 사용 시 breach=true enPVC=true 기대, got b=%v enPVC=%v", b, enPVC)
+	}
+	// 50% → no breach
+	if b, _, _, _, _ := autoSplitTriggerBreached(trig, ShardObservation{SizeBytes: 50, PVCCapacityBytes: 100}); b {
+		t.Fatalf("50%% 사용 시 breach=false 기대")
 	}
 }

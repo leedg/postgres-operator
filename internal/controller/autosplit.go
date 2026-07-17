@@ -63,6 +63,10 @@ type ShardObservation struct {
 	CPUPercent int32
 	// P99LatencyMs 는 P99 지연(ms). 0 = 미관측(라우터 지연 메트릭 미결선 — 후속).
 	P99LatencyMs int32
+	// PVCCapacityBytes 는 shard 데이터 PVC 의 용량(bytes, spec.shards.storage.size). 0 =
+	// 미상(용량 미상 시 PVCUtilizationPercent 트리거는 breach 하지 않음). PVC 사용률(%)
+	// 트리거(K-5)가 SizeBytes/PVCCapacityBytes 로 사용률을 계산하는 데 쓴다.
+	PVCCapacityBytes int64
 }
 
 // ShardMetricsObserver 는 cluster 의 shard 별 관측치를 수집한다. default 구현
@@ -81,6 +85,8 @@ func (statusShardObserver) ObserveShards(_ context.Context, cluster *postgresv1a
 	if cluster == nil {
 		return nil
 	}
+	// PVC 용량은 shard 공통(spec.shards.storage.size). PVC 사용률(%) 트리거용.
+	pvcCapacityBytes := cluster.Spec.Shards.Storage.Size.Value()
 	obs := make([]ShardObservation, 0, len(cluster.Status.Shards))
 	for i := range cluster.Status.Shards {
 		s := &cluster.Status.Shards[i]
@@ -88,8 +94,9 @@ func (statusShardObserver) ObserveShards(_ context.Context, cluster *postgresv1a
 			continue
 		}
 		obs = append(obs, ShardObservation{
-			ShardID:   s.Name,
-			SizeBytes: s.SizeBytes,
+			ShardID:          s.Name,
+			SizeBytes:        s.SizeBytes,
+			PVCCapacityBytes: pvcCapacityBytes,
 			// CPUPercent 는 cpuAugmentingObserver 가 보강, P99LatencyMs 는 미결선 → base 는 0.
 		})
 	}
@@ -104,26 +111,42 @@ func (statusShardObserver) ObserveShards(_ context.Context, cluster *postgresv1a
 // size 는 GB → bytes 환산 후 비교. cpu / latency 는 관측치가 임계 이상이어야 한다 —
 // 현재 관측치가 0(소스 미결선)이면 임계(>0)를 넘지 못해 breached=false 가 되어 오탐을
 // 막는다.
-func autoSplitTriggerBreached(t *postgresv1alpha1.AutoSplitTriggers, obs ShardObservation) (breached, enabledSize, enabledCPU, enabledLat bool) {
+func autoSplitTriggerBreached(t *postgresv1alpha1.AutoSplitTriggers, obs ShardObservation) (breached, enabledSize, enabledCPU, enabledLat, enabledPVC bool) {
 	if t == nil {
-		return false, false, false, false
+		return false, false, false, false, false
 	}
 	enabledSize = t.SizeThresholdGB > 0
 	enabledCPU = t.CPUPercent > 0
 	enabledLat = t.P99LatencyMs > 0
-	if !enabledSize && !enabledCPU && !enabledLat {
-		return false, false, false, false
+	enabledPVC = t.PVCUtilizationPercent > 0
+	if !enabledSize && !enabledCPU && !enabledLat && !enabledPVC {
+		return false, false, false, false, false
 	}
 	if enabledSize && obs.SizeBytes < int64(t.SizeThresholdGB)*bytesPerGB {
-		return false, enabledSize, enabledCPU, enabledLat
+		return false, enabledSize, enabledCPU, enabledLat, enabledPVC
 	}
 	if enabledCPU && obs.CPUPercent < t.CPUPercent {
-		return false, enabledSize, enabledCPU, enabledLat
+		return false, enabledSize, enabledCPU, enabledLat, enabledPVC
 	}
 	if enabledLat && obs.P99LatencyMs < t.P99LatencyMs {
-		return false, enabledSize, enabledCPU, enabledLat
+		return false, enabledSize, enabledCPU, enabledLat, enabledPVC
 	}
-	return true, enabledSize, enabledCPU, enabledLat
+	// PVC 사용률(%) = SizeBytes / PVCCapacityBytes * 100. 용량 미상(0) 이면 사용률 미상 →
+	// 오탐 방지로 breach 하지 않는다(K-5: "80% 과적재 시 오토스케일" 을 절대 GB 환산 없이 표현).
+	if enabledPVC && !pvcUtilizationBreached(obs, t.PVCUtilizationPercent) {
+		return false, enabledSize, enabledCPU, enabledLat, enabledPVC
+	}
+	return true, enabledSize, enabledCPU, enabledLat, enabledPVC
+}
+
+// pvcUtilizationBreached 는 shard 데이터 사용률(SizeBytes/PVCCapacityBytes*100)이 threshold%
+// 이상인지 본다. 용량/크기 미관측(0) 이면 false(오탐 방지). 순수 함수 — 단위테스트 용이.
+func pvcUtilizationBreached(obs ShardObservation, thresholdPercent int32) bool {
+	if obs.PVCCapacityBytes <= 0 || obs.SizeBytes <= 0 {
+		return false
+	}
+	// 정수 오버플로 회피: 100 곱 대신 비율 비교. SizeBytes*100 >= threshold*Capacity.
+	return obs.SizeBytes*100 >= int64(thresholdPercent)*obs.PVCCapacityBytes
 }
 
 // autoSplitSustained 는 breach 상태가 dur 동안 *지속*되었는지 in-memory 로 추적한다
@@ -362,7 +385,7 @@ func (r *PostgresClusterReconciler) reconcileAutoSplit(
 				continue
 			}
 			obs := obsByShard[entry.Shard]
-			breached, _, _, enLat := autoSplitTriggerBreached(as.Triggers, obs)
+			breached, _, _, enLat, _ := autoSplitTriggerBreached(as.Triggers, obs)
 			// P99 latency 는 아직 metrics 소스 미결선(CPU 는 cpuAugmentingObserver 로
 			// metrics.k8s.io 결선됨). latency 트리거만 unsourced 로 표기한다.
 			if enLat {

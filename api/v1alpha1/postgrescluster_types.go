@@ -178,6 +178,15 @@ type AutoSplitTriggers struct {
 	// +optional
 	CPUPercent int32 `json:"cpuPercent,omitempty"`
 
+	// PVCUtilizationPercent is the per-shard data-PVC utilization threshold (%,
+	// dbSize/pvcCapacity). 0 disables. Unlike SizeThresholdGB (absolute GB), this expresses
+	// "split when the shard fills X% of its PVC" directly, so no manual GB conversion is needed
+	// and it self-adjusts on PVC resize (K-5 gap closure).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	PVCUtilizationPercent int32 `json:"pvcUtilizationPercent,omitempty"`
+
 	// DurationMinutes is how long the thresholds above must be sustained (minutes). 0 means immediate.
 	// +kubebuilder:validation:Minimum=0
 	// +optional

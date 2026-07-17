@@ -102,6 +102,16 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      pvcUtilizationPercent:
+                        description: |-
+                          PVCUtilizationPercent is the per-shard data-PVC utilization threshold (%,
+                          dbSize/pvcCapacity). 0 disables. Unlike SizeThresholdGB (absolute GB), this expresses
+                          "split when the shard fills X% of its PVC" directly, so no manual GB conversion is needed
+                          and it self-adjusts on PVC resize (K-5 gap closure).
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
                       sizeThresholdGB:
                         description: SizeThresholdGB is the per-shard size threshold
                           (GB). 0 disables this trigger.

@@ -4,6 +4,15 @@ This project follows SemVer.
 
 ## [Unreleased]
 
+### Resharding reliability
+
+- *(reshard)* B-17 batches `InitialCopy` in a transaction with prepared statements and passes through the copy timeout.
+- *(reshard)* B-18 merges changed ranges during cutover so unrelated shard ranges are preserved.
+- *(status)* B-19 reports the target shard primary, and B-20 excludes transient copy/delete Job Pods from shard membership.
+- *(reshard)* B-21 requires logical-replication initial tablesync as well as low WAL lag before online cutover, closing a data-loss path where a subscription could report near-zero lag before its initial snapshot completed.
+
+These entries describe the current unreleased branch after operator tag `v0.4.0-beta.8`; they do not create a new release tag. The bundled chart version is `0.4.0-beta.9`.
+
 ### Added
 
 - *(router,sharding)* **Distributed SQL query router** (`cmd/pg-router`, RFC-0004).

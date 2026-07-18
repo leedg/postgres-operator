@@ -13,6 +13,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	postgresv1alpha1 "github.com/keiailab/postgres-operator/api/v1alpha1"
 )
@@ -65,6 +66,22 @@ var _ = Describe("ShardSplitJob ShardID apiserver 검증 (ADR-0027 P2 prerequisi
 		ssj := validShardSplitJob("valid-shardid", "shard-0a")
 		Expect(k8sClient.Create(ctx, ssj)).To(Succeed())
 		// 본 객체를 watch 하는 reconciler 가 suite 에 없어 finalizer 없이 즉시 삭제 가능.
+		Expect(k8sClient.Delete(ctx, ssj)).To(Succeed())
+	})
+
+	It("생성 후 데이터 이동 spec 변경을 거부한다", func() {
+		ssj := validShardSplitJob("immutable-spec", "shard-0a")
+		Expect(k8sClient.Create(ctx, ssj)).To(Succeed())
+
+		ssj.Spec.Sources = []string{"shard-1"}
+		Expect(k8sClient.Update(ctx, ssj)).NotTo(Succeed(),
+			"진행 중 source 변경은 기존 copy와 routing을 갈라놓으므로 거부돼야 함")
+
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ssj), ssj)).To(Succeed())
+		ssj.Spec.Targets[0].Ranges[0].Hi = "0x7fffffff"
+		Expect(k8sClient.Update(ctx, ssj)).NotTo(Succeed(),
+			"진행 중 target 변경은 기존 copy와 routing을 갈라놓으므로 거부돼야 함")
+
 		Expect(k8sClient.Delete(ctx, ssj)).To(Succeed())
 	})
 })

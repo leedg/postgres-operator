@@ -747,8 +747,24 @@ func TestBackupJobReconcile_RunningSidecarRestoreCompleteReleasesRestoreLockAndM
 		Type:   batchv1.JobComplete,
 		Status: corev1.ConditionTrue,
 	}}
+	// #B-26: restore Job 완료 후 operator 는 재기동한 shard-0 PostgreSQL 이 Ready 인지
+	// 검증해야 Succeeded 로 본다. fake 환경에서 그 조건을 만족시키는 Ready shard-0 pod 를 둔다
+	// (없으면 RestoreVerifyingHealth 로 requeue 하는 것이 올바른 동작).
+	restoredPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-shard-0-0",
+			Namespace: bj.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "shard", 0),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: pgContainerName, Ready: true},
+			},
+		},
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(bj, cluster, sts, runner).
+		WithObjects(bj, cluster, sts, runner, restoredPod).
 		WithStatusSubresource(&postgresv1alpha1.BackupJob{}).
 		Build()
 	reg := plugin.NewRegistry()

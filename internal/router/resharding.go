@@ -6,7 +6,8 @@
 // target 으로 이동하며 손실(gap)/중복(overlap)이 0 — 이 깨지면 cutover 후 row 가
 // 사라지거나 두 shard 에 중복된다. 본 file 은 7-step state machine(shardsplitjob_types.go)
 // 의 Pending phase reconciler / validating webhook 이 재사용하는 *순수 검증 함수*다.
-// 실 데이터 이동(SnapshotWAL/InitialCopy/CDCCatchup/Cutover)은 후속 reconciler.
+// 실 데이터 이동(InitialCopy/CDCCatchup/Cutover)은 shardsplitjob controller가 수행한다.
+// SnapshotWAL은 현재 부수효과가 없는 예약 전이 단계다.
 package router
 
 import (

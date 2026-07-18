@@ -73,6 +73,21 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// (reshard-feature-sync) 미지원 spec 차단이 *먼저* — 구 CRD에서 생성됐거나 admission
+	// 적용 전에 진행 중이던 요청은 승인 게이트·phase 부수효과보다 먼저 Failed 처리한다.
+	// Failed/Aborted의 안전 cleanup은 위 terminal 분기에서 계속 허용한다.
+	if reason := unsupportedSplitSpecReason(&ssj); reason != "" {
+		ssj.Status.Phase = postgresv1alpha1.ShardSplitPhaseFailed
+		ssj.Status.FailureReason = reason
+		now := metav1.Now()
+		ssj.Status.CompletedAt = &now
+		ssj.Status.ObservedGeneration = ssj.Generation
+		if err := r.Status().Update(ctx, &ssj); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// AutoSplit 승인 게이트: 자동 생성 job 이 requireApproval(approval=required)이면
 	// 운영자 승인 annotation(autosplit-approved=true) 전까지 Pending 을 유지한다 —
 	// 비가역 데이터 이동 전 확인(AutoSplitSpec.RequireApproval production safety).
@@ -268,9 +283,32 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // nextPhase 는 현재 phase 로부터 다음 phase 와 (Failed 시) 사유를 반환한다.
+// unsupportedSplitSpecReason 은 (reshard-feature-sync) 진행 중이거나 구 CRD 에서 온 요청 중
+// 현재 데이터 이동 구현이 다룰 수 없는 형태를 Reconcile 진입 즉시(어떤 phase 부수효과보다 먼저)
+// 차단하기 위한 사유를 반환한다. 지원 가능하면 "". nextPhase 의 Pending 게이트와 동일 불변식
+// (merge 미구현 / split 은 단일 source) — 여기서 먼저 걸러 in-flight Bootstrap 요청도 fail-closed.
+func unsupportedSplitSpecReason(ssj *postgresv1alpha1.ShardSplitJob) string {
+	if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge {
+		return "merge direction is not implemented"
+	}
+	if len(ssj.Spec.Sources) != 1 {
+		return "split requires exactly one source"
+	}
+	return ""
+}
+
 func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob) (postgresv1alpha1.ShardSplitJobPhase, string) {
 	switch ssj.Status.Phase {
 	case "", postgresv1alpha1.ShardSplitPhasePending:
+		// 현재 데이터 이동 구현은 split 전용이며 source[0]만 복사한다.
+		// merge 또는 다중 source를 허용하면 routing update가 복사되지 않은 source까지
+		// 제거할 수 있으므로 어떤 부수효과보다 먼저 fail-closed 한다.
+		if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "merge direction is not implemented"
+		}
+		if len(ssj.Spec.Sources) != 1 {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "split requires exactly one source"
+		}
 		// 데이터 보존 불변식 gate (#213). target 범위가 무중첩·무공백 연속이어야.
 		targets := flattenTargetRanges(ssj.Spec.Targets)
 		if err := router.ValidateSplitPlan(targets, targets); err != nil {
@@ -288,11 +326,11 @@ func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob)
 	case postgresv1alpha1.ShardSplitPhaseCDCCatchup:
 		return postgresv1alpha1.ShardSplitPhaseCutover, ""
 	case postgresv1alpha1.ShardSplitPhaseCutover:
-		// *비가역* gate: AllowForwardOnly=true 는 rollback 불가 → 안전망(§6 L3) 미보유
-		// 골격에서는 진입 거부. false(rollback 가능)만 자동 진행.
+		// 현재 forward-only 정책은 구현하지 않았으므로 true를 명시적으로 거부한다.
+		// false는 routing 진행 허용 조건일 뿐 자동 rollback 보장이 아니다.
 		if ssj.Spec.AllowForwardOnly {
 			return postgresv1alpha1.ShardSplitPhaseFailed,
-				"cutover requires reversible path (AllowForwardOnly=false) in skeleton reconciler"
+				"allowForwardOnly=true is not implemented"
 		}
 		return postgresv1alpha1.ShardSplitPhaseRoutingUpdate, ""
 	case postgresv1alpha1.ShardSplitPhaseRoutingUpdate:

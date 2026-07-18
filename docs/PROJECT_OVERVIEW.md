@@ -1,6 +1,6 @@
 # postgres-operator 프로젝트 개요
 
-> 버전: v0.4.0-beta.1 | 라이선스: MIT | 언어: Go 1.26 | 프레임워크: Kubebuilder / controller-runtime
+> operator 버전: v0.4.0-beta.8 | Helm chart: 0.4.0-beta.9 | 라이선스: MIT | 언어: Go 1.26 | 프레임워크: Kubebuilder / controller-runtime
 >
 > 🔖 진행 중 작업을 이어받거나 재검증하려면 먼저 [WORK_HANDOFF.ko.md](WORK_HANDOFF.ko.md)를 보라 — 브랜치 `chore/ha-pitr-e2e-consolidation`의 커밋 구성·검증 결과·남은 라이브 E2E·재현 방법 정리.
 
@@ -11,11 +11,12 @@
 단기 목표는 단일 클러스터 PostgreSQL(Primary + Replica) 운영 자동화이며, 장기 목표는 **수평 샤딩 + 분산 SQL 레이어**를 vanilla PostgreSQL 위에 구축하는 것이다.
 
 ```
-[현재 GA]
+[현재 beta]
   단일 클러스터: Primary + Replica, HA Failover, 백업, 커넥션 풀, 선언적 DB/역할
 
-[로드맵 — 설계 단계]
-  ShardRange CRD → pg-router 쿼리 라우터 → 크로스 샤드 분산 트랜잭션
+[현재 beta + 후속 로드맵]
+  ShardRange CRD → pg-router 쿼리 라우터 → ShardSplitJob 구현
+  후속: 범용 크로스 샤드 분산 트랜잭션
 ```
 
 ---
@@ -77,7 +78,7 @@
 
 ---
 
-## 4. CRD 목록 (8종)
+## 4. CRD 목록 (10종)
 
 | CRD | 단축명 | 범위 | 역할 |
 |---|---|---|---|
@@ -89,6 +90,8 @@
 | `PostgresUser` | `pguser` | Namespace | PostgreSQL 역할 / 패스워드 선언적 관리 |
 | `ImageCatalog` | `pgic` | Namespace | 네임스페이스 범위 PostgreSQL 이미지 카탈로그 |
 | `ClusterImageCatalog` | `pgcic` | Cluster | 클러스터 전체 공유 이미지 카탈로그 |
+| `ShardRange` | `shr` | Namespace | 키스페이스의 샤드 범위와 라우팅 토폴로지 |
+| `ShardSplitJob` | `ssj` | Namespace | single-source online/offline shard split 상태 머신 |
 
 ---
 
@@ -103,7 +106,7 @@ cmd/main.go
 ├── PostgresDatabaseReconciler  — SQL DDL 실행 (psql exec via pod)
 ├── PostgresUserReconciler      — SQL 역할 관리 (psql exec via pod)
 ├── ScheduledBackupReconciler   — 크론 기반 BackupJob 생성
-├── ShardSplitJobReconciler     — 샤드 분할 (CRD만, 컨트롤러 구현 예정)
+├── ShardSplitJobReconciler     — 대상 생성·복사·CDC·cutover·cleanup·promotion 상태 머신
 ├── PoolerReconciler            — PgBouncer Deployment 관리
 └── FailoverLease (Runnable)    — HA Failover 전용 Kubernetes Lease
 ```
@@ -151,16 +154,16 @@ AuthPlugin         — 인증 메커니즘 (SCRAM / mTLS / OIDC)
 **현재 (v0.4.0-beta.8)**
 - 단일 클러스터 운영: Primary + Replica, HA, 백업, 풀링, 모니터링 — beta 품질
 - PITR restore drill **완료** (2026-06-24 live 7 PASS), 자동 failover reconcile 연결·fencing·promotion 코드 완료
-- `ShardRange` / `ShardSplitJob` CRD 정의 완료, **컨트롤러 미구현**
+- `ShardRange` 토폴로지 watch와 `pg-router` 배포, point routing·scatter-gather·failover-aware backend 구현
+- `ShardSplitJob` online/offline 상태 머신과 AutoSplit 관측·승인 게이트 구현; 초기 tablesync, range 보존, target status를 회귀 테스트로 보호
 
 **로드맵 (순서대로)**
 
 1. HA 강화 — ~~PITR drill~~(완료), chaos/node-loss failover live drill 재검증 (ADR-0027 shard-identity)
-2. `ShardRange` CRD 컨트롤러 + `pg-router` (수동 멀티 샤드 라우팅)
-3. Scatter-gather 쿼리 + 읽기 레플리카 오토스케일
-4. `ShardSplitJob` — 온라인 샤드 분할
-5. 부하 기반 자동 분할/리밸런스
-6. 크로스 샤드 분산 트랜잭션 및 JOIN
+2. `pg-router`와 reshard 경로의 장애 주입·확장성 검증
+3. Scatter-gather SQL 범위와 읽기 레플리카 오토스케일 확장
+4. 부하 기반 자동 분할/리밸런스 운영 정책 검증
+5. 크로스 샤드 분산 트랜잭션 및 JOIN
 
 ---
 
@@ -176,8 +179,8 @@ postgres-operator/
 │   ├── postgresuser_types.go
 │   ├── scheduledbackup_types.go
 │   ├── imagecatalog_types.go
-│   ├── shardrange_types.go      # 로드맵 전용 (컨트롤러 없음)
-│   └── shardsplitjob_types.go   # 로드맵 전용 (컨트롤러 없음)
+│   ├── shardrange_types.go      # 라우터가 감시하는 샤드 토폴로지
+│   └── shardsplitjob_types.go   # 구현된 split/merge 작업 API
 │
 ├── internal/
 │   ├── controller/          # Reconciler 구현체

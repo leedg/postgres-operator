@@ -301,3 +301,32 @@ func TestAggregateShardStatus_NoPods_ReturnsEmpty(t *testing.T) {
 		t.Errorf("no pods: should be empty, got %+v", out)
 	}
 }
+
+// --- B-19 회귀 차단: reshard target 의 primary status ------------------------------
+//
+// 트리거(4노드 라이브 2026-07-14): split 이 Completed 로 끝나도 status.shards[shard-1a].primary
+// 가 계속 비어 라우터(PGROUTER_BACKEND=status)가 새 샤드에 접속하지 못했다
+// (`connection to server was lost`). target STS 는 instance manager 없이 PG 만 띄우므로
+// instance-status annotation 을 영원히 발행하지 않는다.
+func TestAggregateNamedShardStatus_ReshardTargetWithoutAnnotation(t *testing.T) {
+	t.Parallel()
+
+	pod := makePod("demo-rsd-shard-1a-0", statusapi.Status{}, true)
+	delete(pod.Annotations, statusapi.AnnotationKey) // instance manager 미탑재 — annotation 없음.
+	delete(pod.Labels, "postgres.keiailab.io/shard")
+	pod.Labels["app.kubernetes.io/component"] = "reshard-target"
+	pod.Labels[ReshardTargetLabelKey] = "shard-1a"
+
+	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(pod).Build()
+
+	out := aggregateNamedShardStatus(context.Background(), c, newCluster(), "shard-1a", "demo-rsd-shard-1a-headless")
+	if out.Primary == nil {
+		t.Fatalf("reshard target 의 Primary 가 nil — 라우터가 새 샤드에 접속할 수 없다 (status=%+v)", out)
+	}
+	if !out.Primary.Ready {
+		t.Errorf("Primary.Ready = false, want true (Pod 가 k8s Ready)")
+	}
+	if out.Primary.Endpoint == "" {
+		t.Errorf("Primary.Endpoint 가 비었다 — BACKEND=status 해석 불가")
+	}
+}

@@ -171,15 +171,15 @@ cluster via GitOps.
 **Goal**: split / rebalance without data loss.
 
 - [x] **`ShardSplitJob` CRD** — `api/v1alpha1/shardsplitjob_types.go` (~180 lines): ShardSplitJobSpec (Cluster/Keyspace/Direction/Sources/Targets/CutoverWindow/CDCMaxLag/AllowForwardOnly) + ShardSplitTarget (ShardID/Ranges/Placement) + ShardSplitJobStatus (Phase 11-enum/ObservedGeneration/StartedAt/CompletedAt/CurrentLagBytes/CutoverStartedAt/SnapshotLSN/FailureReason/Conditions) + ShardSplitDirection 2-enum (split/merge) + zz_generated_shardsplitjob.go deepcopy. 5 sub-test PASS (`TestShardSplitJob`, D.9.1, 2026-05-19). 라이브 CRD apply 는 mesh 복원 후 별 turn.
-- [ ] **7-step e2e** scenario — **(stale: #124 로 `internal/controller/shardsplit/` 패키지 + "14 sub-test" 제거됨 — 2026-06-16 실측 부재. 잔존 = `internal/controller/shardsplitjob_controller.go`(기본 phase 컨트롤러) + `TestShardSplitJob_nextPhase` 1건. 아래 7 sub-step 은 제거된 `shardsplit/steps.go` 참조라 모두 무효.)** 구 기록: `internal/controller/shardsplit/`: Step interface freeze + 7 step 구체 구현 (StepSnapshotWAL/Bootstrap/InitialCopy/CDCCatchup/Cutover/RoutingUpdate/Cleanup) + Dependencies interface (8 method: Snapshot/BootstrapTarget/InitialCopy/StartCDC/CDCLag/Cutover/UpdateRouting/CleanupSource) + `RunAll` orchestrator (state machine + phase transition + 자동 Failed 처리). 14 sub-test PASS (`TestStepRun` 11 + `TestRunAll_*` 5: HappyPath/SnapshotFailure/CDCNotReady/NilJob/PendingPhaseInit). 실 K8s/SQL Dependencies 구현은 multi-month sprint (D.9.2 마감, 2026-05-19).
-  - [x] 1. Snapshot + WAL capture — `StepSnapshotWAL.Run` (Dependencies.Snapshot → status.SnapshotLSN 기록, startedAt 설정, D.9.3).
-  - [x] 2. Bootstrap the target shard — `StepBootstrap.Run` (모든 target 에 Dependencies.BootstrapTarget 호출, D.9.4).
-  - [x] 3. Initial copy — `StepInitialCopy.Run` (SnapshotLSN precondition 검증 + 각 target 에 Dependencies.InitialCopy, D.9.5).
-  - [x] 4. CDC catch-up — `StepCDCCatchup.Run` (Dependencies.StartCDC + CDCLag 측정 → status.CurrentLagBytes 갱신, D.9.6).
-  - [x] 5. Cutover (minimal write-block window) — `StepCutover.Run` (`CDCReadyForCutover` precondition + status.CutoverStartedAt 기록 + Dependencies.Cutover with window, D.9.7).
-  - [x] 6. Routing update — `StepRoutingUpdate.Run` (Dependencies.UpdateRouting — ShardRange CRD ranges + metadata store atomic 갱신, D.9.8).
-  - [x] 7. Source cleanup — `StepCleanup.Run` (Dependencies.CleanupSource + status.CompletedAt 기록, D.9.9).
-- [x] **Cutover rollback / forward-only** verification — `internal/controller/shardsplit/steps.go` `RollbackAllowed(job)` 정책 함수: Cleanup/Completed 불가 / AllowForwardOnly + Cutover/RoutingUpdate 불가 / 그 외 가능. `ValidateTransition` 가 post-cutover Aborted 차단 + `IsTerminal` 3 phase 분류. 7 sub-test PASS (`TestStateMachine`, D.9.10, 2026-05-19).
+- [~] **현재 reshard state machine** — `internal/controller/shardsplitjob_controller.go`와 `shardsplitjob_copy.go`가 target bootstrap, offline InitialCopy Job, online CDC tablesync/lag gate, write-block, `ShardRange` routing update, source cleanup, promotion을 수행한다. failure/abort 회귀 테스트와 B-17~B-21 데이터 보전 수정이 포함된다. 단일 source split만 지원하며 merge/다중 source는 fail-closed 한다.
+  - [ ] `SnapshotWAL`의 실제 snapshot/LSN capture — 현재는 no-op 예약 단계이며 `status.snapshotLSN`을 채우지 않는다.
+  - [x] Target bootstrap — target ConfigMap/Service/StatefulSet을 멱등 생성한다.
+  - [x] Initial copy — bulk/range copy Job의 성공을 phase 전이 조건으로 사용한다.
+  - [x] CDC catch-up — online 모드에서 initial tablesync와 WAL lag를 함께 확인한다.
+  - [x] Cutover/routing update — write-block과 range 병합 갱신으로 무관한 shard 범위를 보존한다.
+  - [x] Source cleanup/promotion — cleanup Job 및 source-observation precondition을 거친다.
+  - [ ] 운영 SLO e2e — cutover p99, checksum, rollback drill은 별도 라이브 증거가 필요하다.
+- [x] **Cutover 안전 게이트 / abort cleanup** — 현재 controller는 `AllowForwardOnly=true`를 routing 전 `Failed`로 차단한다. online `Failed`/`Aborted`는 `cdc-abort` Job 완료 뒤 write-block을 해제하고, 정리 실패는 수동 cleanup 필요 condition으로 남긴다. 이는 완전한 post-cutover 자동 rollback 보장이 아니다.
 - Verify: data integrity during split (checksum) + cutover-window measurement + rollback feasibility.
 
 ### Gate G5 — Distributed SQL (~0% buffer)

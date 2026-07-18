@@ -19,6 +19,13 @@ spec:
       labels:
         app.kubernetes.io/name: pg-router
         app.kubernetes.io/component: router
+      # Prometheus scrapes the active-connection gauge; a custom-metrics adapter
+      # (e.g. prometheus-adapter) maps it into custom.metrics.k8s.io for the router
+      # HPA's active-connection Pods metric (spec.router.autoscale.scaleOnActiveConnections).
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: pg-router
       securityContext:
@@ -32,6 +39,17 @@ spec:
             - name: postgres
               containerPort: 5432
               protocol: TCP
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          # readiness = routing table(topology) loaded (/readyz). Not-ready Pods are
+          # removed from Service endpoints so traffic never hits a router that can't route.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9187
+            initialDelaySeconds: 2
+            periodSeconds: 5
           env:
             - name: PGROUTER_LISTEN
               value: ":5432"

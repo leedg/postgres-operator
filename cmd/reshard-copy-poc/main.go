@@ -105,9 +105,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "reshard-copy-poc: full copy requires PGROUTER_COPY_TABLE")
 		os.Exit(2)
 	}
-	timeout := 60 * time.Second
-	if cdcMode {
-		timeout = 15 * time.Minute // CDC bulk 복사/drain 은 길 수 있다.
+	// 복사 제한시간. offline(범위복사) 기본값이 60s 로 하드코딩돼 있어 조금만 큰 테이블이면
+	// `context deadline exceeded` 로 InitialCopy 가 실패했다 (B-15, 4노드 라이브 실측
+	// 2026-07-14: orders 10만행 복사가 60s 를 넘겨 ShardSplitJob 이 Failed). 데이터 크기는
+	// 클러스터마다 다르므로 env 로 조정 가능하게 하고, 기본값도 현실적인 값으로 올린다.
+	timeout := 15 * time.Minute
+	if v := os.Getenv("RESHARD_COPY_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		} else {
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: invalid RESHARD_COPY_TIMEOUT=%q (using %s)\n", v, timeout)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -223,8 +231,11 @@ func runCDC(ctx context.Context, mode, src, tgt, targetShard string) {
 		must(router.EnsureSchema(ctx, src, tgt, tables), "ensure schema")
 		must(router.CreatePublication(ctx, src, pub, tables), "create publication")
 		must(router.CreateSubscription(ctx, tgt, connInfo, sub, pub, true), "create subscription")
+		// 초기 스냅샷(tablesync) 완료를 *먼저* 게이트한다 — WAL lag 만으론 초기 COPY 미완을
+		// 놓쳐 cutover/source-delete 가 빈 target 위에서 진행되어 데이터가 유실된다(B-21).
+		waitTablesync(ctx, tgt, sub, len(tables))
 		waitLag(ctx, src, sub, maxLag)
-		fmt.Printf("reshard-copy-poc: cdc-setup 완료 — subscription %s 활성, lag ≤ %d\n", sub, maxLag)
+		fmt.Printf("reshard-copy-poc: cdc-setup 완료 — subscription %s 활성, 초기복사 완료 + lag ≤ %d\n", sub, maxLag)
 	case "cdc-finalize":
 		col := os.Getenv("PGROUTER_VINDEX_COLUMN")
 		if col == "" {
@@ -252,9 +263,19 @@ func runCDC(ctx context.Context, mode, src, tgt, targetShard string) {
 		fmt.Printf("reshard-copy-poc: cdc-finalize 완료 — 범위 밖 %d row 삭제, %s 자기 범위만 보유\n", total, targetShard)
 	case "cdc-abort":
 		fmt.Printf("reshard-copy-poc: cdc-abort target=%s\n", targetShard)
-		must(router.DropSubscription(ctx, tgt, sub), "drop subscription")
-		must(router.DropPublication(ctx, src, pub), "drop publication")
-		fmt.Printf("reshard-copy-poc: cdc-abort 완료 — subscription %s / publication %s 정리\n", sub, pub)
+		// 1) 정상 drop 시도(원격 slot 까지 정리). source 불통 등으로 실패하면 force
+		//    fallback 으로 target subscription 을 확실히 제거한다(§6.7 abort 누수 차단 —
+		//    source-down 에도 AbortCleanup 이 완료되도록).
+		if err := router.DropSubscription(ctx, tgt, sub); err != nil {
+			fmt.Printf("reshard-copy-poc: cdc-abort 정상 drop 실패(%v) → force fallback(slot detach)\n", err)
+			must(router.ForceDropSubscription(ctx, tgt, sub), "force drop subscription")
+		}
+		// 2) publication drop 은 best-effort — source 불통이면 어차피 불가하고, orphan
+		//    slot 은 source 복구 후 정리한다(target 정리 우선).
+		if err := router.DropPublication(ctx, src, pub); err != nil {
+			fmt.Printf("reshard-copy-poc: cdc-abort publication drop best-effort 실패(%v) — source 불통 가정, orphan slot 는 source 복구 후 정리\n", err)
+		}
+		fmt.Printf("reshard-copy-poc: cdc-abort 완료 — subscription %s 정리(fallback 포함)\n", sub)
 	}
 }
 
@@ -266,6 +287,26 @@ func cdcTables(ctx context.Context, src string) []string {
 	all, err := router.ListUserTables(ctx, src)
 	must(err, "list tables")
 	return router.FilterTables(all, csv(os.Getenv("PGROUTER_REFERENCE_TABLES")))
+}
+
+// waitTablesync 는 target subscription 의 초기 테이블 복사(pg_subscription_rel.srsubstate)가
+// wantTables 전부 'r'|'s' 될 때까지 폴링한다(ctx 만료 시 실패 → phase Failed → 데이터 유실 대신
+// 명시적 실패). B-21: waitLag(WAL lag) 만으론 초기 스냅샷 미완을 놓쳐 유실이 발생했다.
+func waitTablesync(ctx context.Context, tgt, sub string, wantTables int) {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "reshard-copy-poc: tablesync wait timeout (sub=%s)\n", sub)
+			os.Exit(1)
+		default:
+		}
+		pending, err := router.TablesyncPending(ctx, tgt, sub, wantTables)
+		must(err, "tablesync")
+		if pending == 0 {
+			return
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 // waitLag 는 subscription 슬롯 lag 가 maxLag 이하가 될 때까지 폴링한다(ctx 만료 시 실패).

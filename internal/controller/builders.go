@@ -9,8 +9,10 @@ package controller
 import (
 	"fmt"
 	"maps"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +54,10 @@ const (
 
 	// pgPort는 PostgreSQL의 표준 포트다.
 	pgPort int32 = 5432
+
+	// routerMetricsPort 는 pg-router 가 /metrics(Prometheus 텍스트, active-connection
+	// 게이지)를 노출하는 HTTP 포트다. pg-router 의 PGROUTER_METRICS_ADDR 기본값과 정합.
+	routerMetricsPort int32 = 9187
 
 	// instanceProbePort 는 instance manager 의 healthz/readyz HTTP 포트.
 	instanceProbePort int32 = 8080
@@ -664,6 +670,42 @@ func buildClientService(cluster *postgresv1alpha1.PostgresCluster, name, role st
 			}},
 		},
 	}
+}
+
+// buildShardPrimaryService 는 shard 의 *현재 primary* 를 가리키는 ExternalName Service 를
+// 만든다(§6 stable per-shard primary Service). externalHost 는 현재 primary Pod 의 안정
+// DNS(host, 포트 제외)다. operator 가 failover 시 externalHost 를 갱신하면 이 이름을
+// 참조하는 라우터/클라이언트가 새 primary 로 따라간다 — status polling 불요, DNS 만으로
+// failover-follow.
+//
+// ExternalName 을 쓰는 이유: primary Pod 는 이미 shard headless Service 로 안정 per-pod
+// DNS 를 가지므로, 그 DNS 로의 CNAME alias 만 operator 가 관리하면 된다(EndpointSlice/Pod
+// IP 관리 불요 — 최소 surface). selector 가 없어 endpoint controller 와 경합하지 않는다.
+func buildShardPrimaryService(cluster *postgresv1alpha1.PostgresCluster, name, externalHost string) *corev1.Service {
+	labels := SelectorLabels(cluster.Name, "shard-primary", -1)
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: cluster.Namespace,
+			Labels:    labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: externalHost,
+		},
+	}
+}
+
+// primaryEndpointHost 는 status 의 primary Endpoint("host:port")에서 host 만 뽑는다.
+// 포트가 없으면 그대로 반환. 빈 문자열이면 빈 문자열.
+func primaryEndpointHost(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	if i := strings.LastIndex(endpoint, ":"); i > 0 {
+		return endpoint[:i]
+	}
+	return endpoint
 }
 
 // buildInstanceServiceAccount 는 instance Pod 가 사용할 ServiceAccount 를 만든다.
@@ -1302,9 +1344,50 @@ func routerTargetCPU(cluster *postgresv1alpha1.PostgresCluster) int32 {
 	return 70
 }
 
+func routerScaleOnActiveConnections(cluster *postgresv1alpha1.PostgresCluster) bool {
+	return cluster != nil && cluster.Spec.Router != nil && cluster.Spec.Router.Autoscale != nil &&
+		cluster.Spec.Router.Autoscale.ScaleOnActiveConnections
+}
+
+func routerTargetActiveConnections(cluster *postgresv1alpha1.PostgresCluster) int32 {
+	if cluster != nil && cluster.Spec.Router != nil && cluster.Spec.Router.Autoscale != nil &&
+		cluster.Spec.Router.Autoscale.TargetActiveConnections > 0 {
+		return cluster.Spec.Router.Autoscale.TargetActiveConnections
+	}
+	return 1000
+}
+
 func buildRouterHPA(cluster *postgresv1alpha1.PostgresCluster, deploymentName string) *autoscalingv2.HorizontalPodAutoscaler {
 	minReplicas := routerMinReplicas(cluster)
 	targetCPU := routerTargetCPU(cluster)
+	metrics := []autoscalingv2.MetricSpec{{
+		Type: autoscalingv2.ResourceMetricSourceType,
+		Resource: &autoscalingv2.ResourceMetricSource{
+			Name: corev1.ResourceCPU,
+			Target: autoscalingv2.MetricTarget{
+				Type:               autoscalingv2.UtilizationMetricType,
+				AverageUtilization: &targetCPU,
+			},
+		},
+	}}
+	// opt-in: active-connection Pods 메트릭. pg-router 가 노출하는
+	// RouterActiveConnectionsMetric 게이지를 custom-metrics adapter 가
+	// custom.metrics.k8s.io 로 매핑한다는 전제. Pod 당 평균 active 커넥션이
+	// target 을 넘으면 스케일 아웃. CPU 와 함께 있으면 HPA 는 둘 중 더 많은
+	// replica 를 요구하는 쪽을 택한다(표준 HPA semantics).
+	if routerScaleOnActiveConnections(cluster) {
+		target := resource.NewQuantity(int64(routerTargetActiveConnections(cluster)), resource.DecimalSI)
+		metrics = append(metrics, autoscalingv2.MetricSpec{
+			Type: autoscalingv2.PodsMetricSourceType,
+			Pods: &autoscalingv2.PodsMetricSource{
+				Metric: autoscalingv2.MetricIdentifier{Name: postgresv1alpha1.RouterActiveConnectionsMetric},
+				Target: autoscalingv2.MetricTarget{
+					Type:         autoscalingv2.AverageValueMetricType,
+					AverageValue: target,
+				},
+			},
+		})
+	}
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      RouterHPAName(cluster.Name),
@@ -1319,24 +1402,127 @@ func buildRouterHPA(cluster *postgresv1alpha1.PostgresCluster, deploymentName st
 			},
 			MinReplicas: &minReplicas,
 			MaxReplicas: routerMaxReplicas(cluster),
-			Metrics: []autoscalingv2.MetricSpec{{
-				Type: autoscalingv2.ResourceMetricSourceType,
-				Resource: &autoscalingv2.ResourceMetricSource{
-					Name: corev1.ResourceCPU,
-					Target: autoscalingv2.MetricTarget{
-						Type:               autoscalingv2.UtilizationMetricType,
-						AverageUtilization: &targetCPU,
-					},
-				},
-			}},
+			Metrics:     metrics,
 		},
 	}
 }
 
-// buildRouterDeployment는 stateless QueryRouter의 Deployment를 만든다.
-// ADR 0003 §강제 메커니즘에 의해 PVC를 절대 마운트하지 않는다(StatefulSet 사용
-// 금지). 본 함수는 P12-T2 시점에 cmd/router 바이너리 이미지로 교체된다. 현재는
-// PG 베이스 이미지를 그대로 사용하는 placeholder.
+// routerImage 는 QueryRouter Pod 가 실행할 pg-router 이미지다 (ROUTER_IMAGE 로 주입,
+// 미설정 시 기본값 — 로컬 빌드 후 노드에 import 한 태그). reshardCopyImage() 와 동일 패턴:
+// 이미지 경로는 배포 환경 관심사이므로 CRD 가 아니라 operator env 로 받는다.
+func routerImage() string {
+	if v := os.Getenv("ROUTER_IMAGE"); v != "" {
+		return v
+	}
+	return "ghcr.io/keiailab/pg-router:dev"
+}
+
+// routerKeyspace 는 라우터가 조회할 ShardRange 의 keyspace 다. cmd/pg-router 의
+// PGROUTER_KEYSPACE 기본값과 정합 — ShardRange.spec.keyspace 가 이 값이어야 라우팅된다.
+const routerKeyspace = "default"
+
+// routerEnv 는 cmd/pg-router 의 env 계약을 채운다. namespace/cluster 는 CR 에서,
+// topology/backend 는 K8s API 기반 동적 모드로 고정한다(정적 env 토폴로지는 reshard 시
+// 라우팅 테이블이 갱신되지 않아 본 오퍼레이터 모델과 맞지 않는다).
+func routerEnv(cluster *postgresv1alpha1.PostgresCluster) []corev1.EnvVar {
+	return []corev1.EnvVar{
+		{Name: "PGROUTER_NAMESPACE", Value: cluster.Namespace},
+		{Name: "PGROUTER_CLUSTER", Value: cluster.Name},
+		{Name: "PGROUTER_KEYSPACE", Value: routerKeyspace},
+		{Name: "PGROUTER_TOPOLOGY", Value: "crd"},
+		{Name: "PGROUTER_BACKEND", Value: "status"},
+		{Name: "PGROUTER_MODE", Value: routerMode()},
+		{Name: "PGROUTER_LISTEN", Value: fmt.Sprintf(":%d", pgPort)},
+		{Name: "PGROUTER_METRICS_ADDR", Value: fmt.Sprintf(":%d", routerMetricsPort)},
+	}
+}
+
+// routerMode 는 pg-router 의 라우팅 모드다 (ROUTER_MODE 로 주입, 기본 query).
+//
+// query  = 쿼리를 파싱해 샤딩 키로 per-query 라우팅 + scatter-gather. 분산 SQL 의 본 모드.
+// connection = 접속 시 *dbname* 을 키로 삼아 한 연결을 한 샤드에 고정하는 PoC 모드 —
+// 실 dbname 과 샤딩 키가 충돌하므로 오퍼레이터 기본값으로는 부적합하다.
+func routerMode() string {
+	if v := os.Getenv("ROUTER_MODE"); v != "" {
+		return v
+	}
+	return "query"
+}
+
+// buildRouterServiceAccount 는 router Pod 전용 ServiceAccount 다. instance SA 와 분리한다
+// — router 는 PVC fence/lease 권한이 필요 없고(최소권한), instance 는 ShardRange 읽기가
+// 필요 없다.
+func buildRouterServiceAccount(cluster *postgresv1alpha1.PostgresCluster) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterServiceAccountName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+	}
+}
+
+// buildRouterRole 는 pg-router 의 K8s 읽기 권한(최소)이다.
+//
+//   - shardranges: PGROUTER_TOPOLOGY=crd 의 키→샤드 매핑 소스 (watch 로 hot-reload)
+//   - postgresclusters: PGROUTER_BACKEND=status 의 샤드 엔드포인트 소스
+//     (failover 로 primary 가 바뀌면 .status 를 통해 인지)
+//
+// 쓰기 verb 는 없다 — 라우터는 CR 을 변경하지 않는다.
+//
+// `*/status` 서브리소스 규칙은 두지 않는다: `.status` 는 부모 리소스를 GET/LIST 할 때 함께
+// 실려오므로 읽기에는 불필요하고(status 서브리소스 권한은 *쓰기* 용), operator 자신이 해당
+// 권한을 보유하지 않아 RBAC escalation 방지에 걸려 Role 생성이 거부된다 (라이브 실측 2026-07-14:
+// `roles ... is forbidden: ... attempting to grant RBAC permissions not currently held`).
+func buildRouterRole(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.Role {
+	return &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterRoleName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{postgresv1alpha1.GroupVersion.Group},
+				Resources: []string{"shardranges", "postgresclusters"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+}
+
+// buildRouterRoleBinding 은 router SA ↔ Role 결합이다.
+func buildRouterRoleBinding(cluster *postgresv1alpha1.PostgresCluster) *rbacv1.RoleBinding {
+	return &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      RouterRoleBindingName(cluster.Name),
+			Namespace: cluster.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "router", -1),
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      rbacv1.ServiceAccountKind,
+			Name:      RouterServiceAccountName(cluster.Name),
+			Namespace: cluster.Namespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     RouterRoleName(cluster.Name),
+		},
+	}
+}
+
+// buildRouterDeployment는 stateless QueryRouter(cmd/pg-router)의 Deployment를 만든다.
+// ADR 0003 §강제 메커니즘에 의해 PVC를 절대 마운트하지 않는다(StatefulSet 사용 금지).
+//
+// image 는 pg-router 이미지여야 한다(routerImage() 가 결정). PG 베이스 이미지를 넘기면
+// 그 엔트리포인트가 POD_NAME 등 instance 전용 env 를 요구해 CrashLoop 한다.
+//
+// env 는 cmd/pg-router 의 계약(PGROUTER_*)이다:
+//   - TOPOLOGY=crd     — ShardRange CR 에서 키→샤드 매핑을 읽고 watch 로 hot-reload
+//   - BACKEND=status   — PostgresCluster.status 에서 샤드 primary/replica 엔드포인트를
+//     해석(failover 인지). 두 모드 모두 K8s API 를 읽으므로 전용 SA/Role 이 필요하다
+//     (buildRouterServiceAccount/Role/RoleBinding).
 func buildRouterDeployment(
 	cluster *postgresv1alpha1.PostgresCluster,
 	name, configMapName, image string,
@@ -1349,6 +1535,16 @@ func buildRouterDeployment(
 		labels[RouterAutoscaleLabelKey] = "true"
 	}
 
+	// pg-router 는 /metrics(Prometheus 텍스트)로 active-connection 게이지를 노출한다.
+	// scrape annotation 으로 Prometheus/custom-metrics adapter 가 수집한다(HPA
+	// ScaleOnActiveConnections 결선의 metrics 소스). scrape 자체는 부작용 없으므로
+	// autoscale 비활성이어도 노출을 켜둔다(관측성).
+	podAnnotations := map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   strconv.Itoa(int(routerMetricsPort)),
+		"prometheus.io/path":   "/metrics",
+	}
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -1359,19 +1555,37 @@ func buildRouterDeployment(
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: selectorLabels},
 			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{Labels: labels},
+				ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations},
 				Spec: corev1.PodSpec{
-					SecurityContext: dataplanePodSecurityContext(),
+					ServiceAccountName: RouterServiceAccountName(cluster.Name),
+					SecurityContext:    dataplanePodSecurityContext(),
 					Containers: []corev1.Container{{
 						Name:            "router",
 						Image:           image,
 						Resources:       resources,
 						SecurityContext: dataplaneContainerSecurityContext(),
+						Env:             routerEnv(cluster),
 						Ports: []corev1.ContainerPort{{
 							Name:          "postgres",
 							ContainerPort: pgPort,
 							Protocol:      corev1.ProtocolTCP,
+						}, {
+							Name:          "metrics",
+							ContainerPort: routerMetricsPort,
+							Protocol:      corev1.ProtocolTCP,
 						}},
+						// readiness = 라우팅 테이블(토폴로지) 확보 여부(/readyz). 확보 전엔
+						// Service endpoint 에서 제외되어 라우팅 불가 Pod 로 트래픽이 안 감.
+						ReadinessProbe: &corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								HTTPGet: &corev1.HTTPGetAction{
+									Path: "/readyz",
+									Port: intstr.FromInt32(routerMetricsPort),
+								},
+							},
+							InitialDelaySeconds: 2,
+							PeriodSeconds:       5,
+						},
 						VolumeMounts: append([]corev1.VolumeMount{
 							{Name: "config", MountPath: pgConfigMountPath, ReadOnly: true},
 						}, dataplaneEphemeralVolumeMounts()...),

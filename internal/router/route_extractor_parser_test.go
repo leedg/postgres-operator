@@ -162,3 +162,27 @@ func TestParserSelectableViaFactory(t *testing.T) {
 		t.Fatalf("auto = (%q,%v), want (zed,true)", k, ok)
 	}
 }
+
+// --- B-13 회귀 차단: 정수 샤딩 키 ---------------------------------------------
+//
+// 트리거(4노드 라이브 2026-07-14): `tenant_id int` 스키마에서 라우터가 모든 INSERT 를
+// `cannot scatter a keyless write query` 로 거부했다. 원인 = 키 리터럴을 문자열(tokStr)만
+// 인정 → 숫자 리터럴이 키로 안 잡힘. 정수 키는 가장 흔한 샤딩 키다.
+func TestExtractRoutingKey_NumericLiteral(t *testing.T) {
+	ex := parserExtractor{}
+	cases := []struct {
+		name, query, want string
+	}{
+		{"insert 정수키", "INSERT INTO orders (tenant_id, amount) VALUES (7, 12.5)", "7"},
+		{"select 정수키", "SELECT * FROM orders WHERE tenant_id = 7", "7"},
+		{"update 정수키", "UPDATE orders SET amount = 1 WHERE tenant_id = 42", "42"},
+		{"delete 정수키", "DELETE FROM orders WHERE tenant_id = 42", "42"},
+		{"문자열키 회귀", "INSERT INTO t (tenant_id, v) VALUES ('alice', 'a')", "alice"},
+	}
+	for _, c := range cases {
+		got, ok := ex.ExtractRoutingKey(c.query, "tenant_id")
+		if !ok || got != c.want {
+			t.Errorf("%s: ExtractRoutingKey = (%q, %v), want (%q, true)", c.name, got, ok, c.want)
+		}
+	}
+}

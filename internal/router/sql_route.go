@@ -48,15 +48,24 @@ func (regexExtractor) ExtractRoutingKey(query, col string) (string, bool) {
 	return matchInsertColumn(query, col)
 }
 
-// matchColumnEquals 는 query 어디에서든 `<col> = 'literal'` (대소문자 무시)을 잡는다.
-// 복합 predicate (`WHERE a=1 AND tenant_id='t9'`) 에서도 지정 컬럼만 추출한다.
+// matchColumnEquals 는 query 어디에서든 `<col> = 'literal'` 또는 `<col> = 123`(따옴표 없는
+// 숫자)을 잡는다(대소문자 무시). 복합 predicate (`WHERE a=1 AND tenant_id='t9'`) 에서도
+// 지정 컬럼만 추출한다.
+//
+// B-13: 숫자 그룹이 없어서 `tenant_id int` 스키마가 통째로 라우팅되지 않았다.
 func matchColumnEquals(query, col string) (string, bool) {
-	pat := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(col) + `\s*=\s*'([^']*)'`)
+	pat := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(col) + `\s*=\s*(?:'([^']*)'|(-?[0-9]+(?:\.[0-9]+)?))`)
 	m := pat.FindStringSubmatch(query)
-	if len(m) < 2 || m[1] == "" {
+	if len(m) < 3 {
 		return "", false
 	}
-	return m[1], true
+	if m[1] != "" {
+		return m[1], true
+	}
+	if m[2] != "" {
+		return m[2], true
+	}
+	return "", false
 }
 
 // insertPattern 은 `INSERT INTO t (c1, c2, ...) VALUES (v1, v2, ...)` 의 컬럼 목록과
@@ -85,10 +94,72 @@ func matchInsertColumn(query, col string) (string, bool) {
 				}
 				return inner, true
 			}
+			// B-13: 따옴표 없는 숫자 리터럴(정수 샤딩 키)도 키다 — 해시는 키 문자열 기준.
+			if numericLiteral.MatchString(v) {
+				return v, true
+			}
 			return "", false
 		}
 	}
 	return "", false
+}
+
+// numericLiteral 은 따옴표 없는 숫자 리터럴(정수/실수, 음수 포함)이다.
+var numericLiteral = regexp.MustCompile(`^-?[0-9]+(?:\.[0-9]+)?$`)
+
+// insertMultiRowPattern 은 `INSERT INTO t (c1,...) VALUES (..),(..),...` 의 컬럼 목록과
+// VALUES 절 전체(다중 튜플)를 잡는다. matchInsertColumnAll 이 각 튜플에서 키를 뽑는다.
+var insertMultiRowPattern = regexp.MustCompile(`(?is)INSERT\s+INTO\s+[^\s(]+\s*\(([^)]*)\)\s*VALUES\s*(.+?)(?:\s+ON\s+CONFLICT|\s+RETURNING|;|\s*$)`)
+
+// tuplePattern 은 VALUES 절에서 개별 `( ... )` 튜플을 하나씩 잡는다(중첩 괄호·함수
+// 미지원 — regex 전략 best-effort).
+var tuplePattern = regexp.MustCompile(`\(([^)]*)\)`)
+
+// matchInsertColumnAll 은 다중행 INSERT 의 *모든 튜플*에서 col 위치의 키를 추출한다.
+// #B-30: 라우터가 다중행 INSERT 를 첫 튜플 키로만 라우팅해 나머지 행을 오배치하던 것을,
+// 모든 튜플 키를 뽑아 호출자가 "단일 샤드 수렴 여부"를 판정할 수 있게 한다.
+// 반환: (키 목록, ok). 하나라도 키를 못 뽑으면(비-리터럴 등) ok=false.
+func matchInsertColumnAll(query, col string) ([]string, bool) {
+	m := insertMultiRowPattern.FindStringSubmatch(query)
+	if len(m) < 3 {
+		return nil, false
+	}
+	cols := splitCSV(m[1])
+	idx := -1
+	for i, c := range cols {
+		if strings.EqualFold(c, col) {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil, false
+	}
+	tuples := tuplePattern.FindAllStringSubmatch(m[2], -1)
+	if len(tuples) == 0 {
+		return nil, false
+	}
+	keys := make([]string, 0, len(tuples))
+	for _, t := range tuples {
+		vals := splitCSV(t[1])
+		if idx >= len(vals) {
+			return nil, false
+		}
+		v := strings.TrimSpace(vals[idx])
+		switch {
+		case len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'':
+			inner := v[1 : len(v)-1]
+			if inner == "" {
+				return nil, false
+			}
+			keys = append(keys, inner)
+		case numericLiteral.MatchString(v):
+			keys = append(keys, v)
+		default:
+			return nil, false
+		}
+	}
+	return keys, true
 }
 
 // splitCSV 는 comma 구분 목록을 trim 하여 분리한다 (단순 — 중첩 함수/콤마 미지원,

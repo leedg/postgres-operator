@@ -1,0 +1,21 @@
+# Build the router-bench binary — 라우터 처리량/오버헤드 측정 도구(Suite F / F-4·F-5).
+# In-cluster Job 으로 실행: router ClusterIP + shard DNS 를 env 로 받아 벤치.
+FROM golang:1.26.4@sha256:68cb6d68bed024785b69195b89af7ac7a444f27791435f98647edff595aa0479 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /workspace
+COPY go.mod go.mod
+COPY go.sum go.sum
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o router-bench ./cmd/router-bench
+
+FROM gcr.io/distroless/static:nonroot@sha256:e3f945647ffb95b5839c07038d64f9811adf17308b9121d8a2b87b6a22a80a39
+WORKDIR /
+COPY --from=builder /workspace/router-bench .
+USER 65532:65532
+
+ENTRYPOINT ["/router-bench"]

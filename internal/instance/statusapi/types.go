@@ -74,6 +74,12 @@ type Status struct {
 	// 미관측 (예: pg_stat_replication 권한 부재) 시 -1 — controller 가 N/A 로 표기.
 	LagBytes int64 `json:"lagBytes"`
 
+	// SizeBytes 는 이 shard 데이터베이스의 크기 (bytes) 다 — primary 만 보고한다
+	// (pg_database_size(current_database())). controller 가 shard 별로 집계해
+	// ShardStatus.SizeBytes 로 노출하며, AutoSplit 의 sizeThresholdGB 트리거가 이를
+	// 관측한다. 미관측(replica / 권한 부재 / 질의 실패) 시 0.
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+
 	// Reason 은 Ready=false 또는 degraded 상태의 machine-readable 원인이다.
 	// 예: RejoinPreparationFailed.
 	Reason string `json:"reason,omitempty"`

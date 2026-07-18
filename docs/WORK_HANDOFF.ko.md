@@ -424,12 +424,45 @@ kubectl -n postgres-operator-system set env deploy/postgres-operator-controller-
   `buildRouterHPA`(autoscaling/v2, CPU utilization target) → `routerAutoscaleEnabled` gate 에서 upsert,
   비활성/DB 정지 시 `deleteRouterHPA`. `Owns(HorizontalPodAutoscaler)` watch, autoscaling/v2 RBAC
   (`config/rbac/role.yaml`), webhook bounds 검증(`maxReplicas>0`, `maxReplicas≥effective minReplicas`)까지
-  결선·단위테스트 완료. **남은 것**: active-connection custom metric 노출/어댑터(현재는 CPU utilization
-  기준). 미설정 시 기존대로 `spec.router.replicas` 수동 scale.
-- **AutoSplit / 자동 shard 확장**: `spec.autoSplit` 스키마와 admission 검증은 있으나, shard size/latency/CPU
-  관측, 지속시간 판정, 후보 계산, `ShardSplitJob` 자동 생성 루프는 미구현이다.
-- **남은 live gate**: native router concurrent-write online resharding e2e, target promotion 후 live
-  chaos/failover drill, source-down abort cleanup fallback 검증은 아직 남아 있다.
+  결선·단위테스트 완료. **active-connection custom metric 결선 완료(2026-07-08)**: pg-router 가
+  `pgrouter_active_connections` 게이지를 `/metrics`(Prometheus, `PGROUTER_METRICS_ADDR` 기본 `:9187`)로
+  노출(`cmd/pg-router/metrics.go`, `trackConn` inc/dec)하고, `spec.router.autoscale.scaleOnActiveConnections`
+  (opt-in, 기본 false) 이 true 면 `buildRouterHPA` 가 CPU 메트릭에 더해 Pods 메트릭(AverageValue
+  `targetActiveConnections`)을 추가한다. 라우터 Deployment 에 metrics 포트 + `prometheus.io/*` scrape
+  annotation, `config/router/README.md` 에 prometheus-adapter 규칙 예시. 어댑터 부재 시 Pods 메트릭
+  unavailable → CPU fallback. 기본(opt-in 미설정)은 CPU-only(비파괴).
+- **AutoSplit / 자동 shard 확장 (구현 완료, 2026-07-08)**: 관측→지속 판정→후보 계산→`ShardSplitJob`
+  자동 생성 루프 결선(`internal/controller/autosplit.go`). size 트리거 관측 파이프라인 연결(instance
+  manager 가 primary 에서 `pg_database_size` 를 `statusapi.Status.SizeBytes` 로 보고 →
+  `aggregate_status` 가 `ShardStatus.SizeBytes` 집계 → default observer 가 읽음). 트리거 AND 평가 +
+  `durationMinutes` 지속 추적, `router.SplitHashRange` 중점 분할 → 멱등 `ShardSplitJob` 생성(owner=cluster),
+  `requireApproval` 이면 SSJ 컨트롤러가 승인 annotation 전까지 Pending 유지. `AutoSplitEligible` condition.
+  **CPU 트리거 결선 완료(2026-07-10)**: `cpuAugmentingObserver`(`autosplit_cpu.go`)가 shard primary Pod 의
+  metrics.k8s.io PodMetrics(unstructured GET, dep 0) 사용량 ÷ Pod CPU request × 100 으로 CPU% 를 채운다.
+  metrics-server / request 부재 시 graceful 0(오탐 없음). RBAC `metrics.k8s.io/pods get;list` 추가.
+  **남은 것**: P99 latency 트리거만 미결선(라우터 per-shard 지연 히스토그램 필요, 후속). size·cpu 는 실동작.
+  자동 생성된 job 의 online 여부는 기본 offline(운영자 승인 전 편집 가능).
+- **남은 live gate**: native router concurrent-write online resharding e2e(클라 쓰기를 라우터 경유로 받는
+  무중단 cutover 실증), target promotion 후 live chaos/failover drill 은 kind live 필요(별도 체크포인트).
+  **source-down abort cleanup fallback 구현 완료(2026-07-08)**: `router.ForceDropSubscription`
+  (DISABLE→slot detach→DROP)으로 publisher 접속 없이 target subscription 제거, `cmd/reshard-copy-poc`
+  cdc-abort 가 정상 drop 실패 시 이를 fallback 으로 사용. env-guarded 라이브 테스트 2종 추가
+  (`internal/router/reshard_native_live_test.go`: PK-없는 target 동시 UPDATE/DELETE seq-scan 경로 +
+  abort fallback 메커니즘) — `RESHARD_LIVE_*` env + postgres:18 2개로 실행(kind/make 불요).
+- **라우터 dev 백로그 진척(2026-07-10, SSOT=[ROUTER-GAP-ANALYSIS](sharding/ROUTER-GAP-ANALYSIS.ko.md) §6,
+  상세=[IMPL_LOG](IMPL_LOG_2026-07-08_autosplit-hpa-abort.ko.md) §7~§10)**: ① scatter 집계 재merge
+  (COUNT/SUM/MIN/MAX, `64afabd`) ② 라우터 `/readyz` readiness(`66a52a1`) ③ stable per-shard primary
+  Service(ExternalName failover-follow, `d24fef8`) ④ Promote source-observation fence(ADR-0029 P-B.6,
+  `8050ef3`) ⑤ ShardRange/status watch informer(즉시 hot-reload, `watch.FakeWatcher` 결정론 검증,
+  IMPL_LOG §11) 완료. **dev+envtest 검증 가능 백로그 전부 소진** — 남은 것은 아래 순수 kind-live
+  게이트뿐(node14 물리디스크 복구 후).
+- **남은 live gate**: native router concurrent-write online resharding e2e(클라 쓰기를 라우터 경유로 받는
+  무중단 cutover 실증), target promotion 후 live chaos/failover drill 은 kind live 필요(별도 체크포인트).
+  **source-down abort cleanup fallback 구현 완료(2026-07-08)**: `router.ForceDropSubscription`
+  (DISABLE→slot detach→DROP)으로 publisher 접속 없이 target subscription 제거, `cmd/reshard-copy-poc`
+  cdc-abort 가 정상 drop 실패 시 이를 fallback 으로 사용. env-guarded 라이브 테스트 2종 추가
+  (`internal/router/reshard_native_live_test.go`: PK-없는 target 동시 UPDATE/DELETE seq-scan 경로 +
+  abort fallback 메커니즘) — `RESHARD_LIVE_*` env + postgres:18 2개로 실행(kind/make 불요).
 - **의도적 보류**: source Service/PVC/PDB 삭제는 기본 동작이 아니며, 향후 별도 opt-in 정책과 live drill 후에만
   검토한다. cross-shard 2PC, extended scatter, Flush 파이프라이닝도 아직 범위 밖이다.
 

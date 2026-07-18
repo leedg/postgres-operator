@@ -111,12 +111,29 @@ type RouterAutoscaleSpec struct {
 	// +optional
 	TargetCPU int32 `json:"targetCPU,omitempty"`
 
-	// TargetActiveConnections is the HPA active-connection target.
+	// TargetActiveConnections is the HPA active-connection target (average value per Pod).
+	// Only used when ScaleOnActiveConnections=true.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1000
 	// +optional
 	TargetActiveConnections int32 `json:"targetActiveConnections,omitempty"`
+
+	// ScaleOnActiveConnections enables an additional Pods metric on the router HPA that
+	// scales on the average active client-connection count per router Pod (metric
+	// RouterActiveConnectionsMetric, exposed by pg-router's /metrics endpoint). Default
+	// false keeps the HPA CPU-only. Requires a custom-metrics adapter (e.g.
+	// prometheus-adapter) in the cluster that maps the scraped gauge into the
+	// custom.metrics.k8s.io API; without it the Pods metric reports unavailable and the
+	// HPA falls back to CPU.
+	// +kubebuilder:default=false
+	// +optional
+	ScaleOnActiveConnections bool `json:"scaleOnActiveConnections,omitempty"`
 }
+
+// RouterActiveConnectionsMetric is the Prometheus/custom-metrics name that pg-router
+// exposes for its active client-connection gauge and that the router HPA's Pods metric
+// targets when ScaleOnActiveConnections is enabled.
+const RouterActiveConnectionsMetric = "pgrouter_active_connections"
 
 // RouterSpec is the stateless QueryRouter Deployment configuration (RFC 0001 §3.1, RFC 0004).
 //
@@ -160,6 +177,15 @@ type AutoSplitTriggers struct {
 	// +kubebuilder:validation:Maximum=100
 	// +optional
 	CPUPercent int32 `json:"cpuPercent,omitempty"`
+
+	// PVCUtilizationPercent is the per-shard data-PVC utilization threshold (%,
+	// dbSize/pvcCapacity). 0 disables. Unlike SizeThresholdGB (absolute GB), this expresses
+	// "split when the shard fills X% of its PVC" directly, so no manual GB conversion is needed
+	// and it self-adjusts on PVC resize (K-5 gap closure).
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	PVCUtilizationPercent int32 `json:"pvcUtilizationPercent,omitempty"`
 
 	// DurationMinutes is how long the thresholds above must be sustained (minutes). 0 means immediate.
 	// +kubebuilder:validation:Minimum=0

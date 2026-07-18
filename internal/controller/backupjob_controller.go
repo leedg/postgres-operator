@@ -73,6 +73,10 @@ const (
 	backupJobRunnerNameMaxLen     = 63
 	backupJobRunnerNameSuffix     = "-runner"
 	backupJobRunnerRequeueWait    = 15 * time.Second
+	// backupRestoreHealthTimeout 는 restore Job 완료 후 PostgreSQL 이 기동(Ready)해야 하는
+	// 최대 시간이다. 초과하면 restore 를 Failed 로 본다 (#B-26: 도달불가 recovery target 등으로
+	// PG 가 CrashLoop 하면 restore 는 실패). recovery + basebackup 재생을 넉넉히 커버.
+	backupRestoreHealthTimeout = 5 * time.Minute
 
 	BackupJobReasonAwaitingInvocation           = "AwaitingPluginInvocation"
 	BackupJobReasonClusterNotFound              = "ClusterNotFound"
@@ -87,6 +91,8 @@ const (
 	BackupJobReasonRestoreAlreadyInProgress     = "RestoreAlreadyInProgress"
 	BackupJobReasonRestoreSucceeded             = "RestoreSucceeded"
 	BackupJobReasonRestoreFailed                = "RestoreFailed"
+	BackupJobReasonRestoreVerifyingHealth       = "RestoreVerifyingHealth"
+	BackupJobReasonRestorePostgresFailed        = "RestorePostgresFailed"
 	BackupJobReasonRunnerJobCreated             = "RunnerJobCreated"
 	BackupJobReasonRunnerJobRunning             = "RunnerJobRunning"
 	BackupJobReasonRunnerJobSucceeded           = "RunnerJobSucceeded"
@@ -562,6 +568,19 @@ func (r *BackupJobReconciler) reconcileSidecarRestore(
 		return ctrl.Result{}, err
 	}
 
+	// #B-26: restore runner Job 이 이미 Complete 면 파일 복원 단계는 끝났다 — 아래 STS scale-0
+	// 로직을 재실행하지 말고 PG 기동 검증(finalize)으로 직행한다. finalize 가 annotation 을
+	// 해제해 STS 가 다시 올라오는데, scale-0 을 재실행하면 기동 중 pod 를 죽여 health 관측이
+	// 진동(RestoreVerifyingHealth ↔ RestoreWaitingForPodsToStop)한다.
+	if bj.Status.RunnerJobName != "" {
+		var doneRunner batchv1.Job
+		if err := r.Get(ctx, client.ObjectKey{Namespace: bj.Namespace, Name: bj.Status.RunnerJobName}, &doneRunner); err == nil {
+			if jobConditionTrue(&doneRunner, batchv1.JobComplete) {
+				return r.finalizeSidecarRestore(ctx, bj, cluster, &doneRunner)
+			}
+		}
+	}
+
 	stsName := ShardStatefulSetName(cluster.Name, 0)
 	var sts appsv1.StatefulSet
 	if err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: stsName}, &sts); err != nil {
@@ -643,19 +662,7 @@ func (r *BackupJobReconciler) reconcileSidecarRestore(
 	}
 
 	if jobConditionTrue(&runner, batchv1.JobComplete) {
-		if err := r.releaseClusterRestoreAnnotation(ctx, bj, cluster); err != nil {
-			return ctrl.Result{}, err
-		}
-		endedAt := nowFunc()
-		bj.Status.EndedAt = &endedAt
-		bj.Status.Phase = postgresv1alpha1.BackupJobSucceeded
-		bj.Status.ObservedGeneration = bj.Generation
-		setBackupJobCondition(bj, metav1.ConditionTrue,
-			BackupJobReasonRestoreSucceeded,
-			"Restore runner Job "+runner.Name+" completed successfully")
-		commonsevents.Emitf(r.Recorder, bj, BackupJobReasonRestoreSucceeded,
-			"Restore runner Job %s completed successfully", runner.Name)
-		return ctrl.Result{}, r.statusUpdate(ctx, bj)
+		return r.finalizeSidecarRestore(ctx, bj, cluster, &runner)
 	}
 
 	if failed := findJobCondition(&runner, batchv1.JobFailed); failed != nil && failed.Status == corev1.ConditionTrue {
@@ -679,6 +686,70 @@ func (r *BackupJobReconciler) reconcileSidecarRestore(
 		BackupJobReasonRestoreInProgress,
 		"Shard StatefulSet "+stsName+" is stopped; restore runner Job orchestration pending")
 	return ctrl.Result{RequeueAfter: backupJobRunnerRequeueWait}, r.statusUpdate(ctx, bj)
+}
+
+// finalizeSidecarRestore 는 restore runner Job(pgbackrest 파일복원) 완료 후, STS 가 다시
+// 올라와 PostgreSQL 이 recovery 를 수행한 결과를 검증한다(#B-26). pgbackrest 성공만으로는
+// 부족하다 — 도달불가 recovery target 등으로 PG 가 CrashLoop 하면 restore 는 실패다.
+//   ready   → Succeeded
+//   crashed → Failed(RestorePostgresFailed)
+//   기동 중 → requeue, backupRestoreHealthTimeout 초과 시 Failed
+func (r *BackupJobReconciler) finalizeSidecarRestore(
+	ctx context.Context,
+	bj *postgresv1alpha1.BackupJob,
+	cluster *postgresv1alpha1.PostgresCluster,
+	runner *batchv1.Job,
+) (ctrl.Result, error) {
+	// annotation 해제 → 클러스터 reconciler 가 STS 를 원복(scale-up)해 PG 가 recovery 를 시작.
+	if err := r.releaseClusterRestoreAnnotation(ctx, bj, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+	ready, crashed, err := r.shardRestorePrimaryHealth(ctx, cluster, 0)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch {
+	case ready:
+		endedAt := nowFunc()
+		bj.Status.EndedAt = &endedAt
+		bj.Status.Phase = postgresv1alpha1.BackupJobSucceeded
+		bj.Status.ObservedGeneration = bj.Generation
+		setBackupJobCondition(bj, metav1.ConditionTrue,
+			BackupJobReasonRestoreSucceeded,
+			"Restore runner Job "+runner.Name+" completed and PostgreSQL is Ready after recovery")
+		commonsevents.Emitf(r.Recorder, bj, BackupJobReasonRestoreSucceeded,
+			"Restore runner Job %s completed and PostgreSQL is Ready after recovery", runner.Name)
+		return ctrl.Result{}, r.statusUpdate(ctx, bj)
+	case crashed:
+		endedAt := nowFunc()
+		bj.Status.EndedAt = &endedAt
+		bj.Status.Phase = postgresv1alpha1.BackupJobFailed
+		bj.Status.ObservedGeneration = bj.Generation
+		setBackupJobCondition(bj, metav1.ConditionFalse,
+			BackupJobReasonRestorePostgresFailed,
+			"Restore files applied but PostgreSQL failed to start (CrashLoopBackOff) — "+
+				"the recovery target may be beyond the archived WAL range (unreachable)")
+		commonsevents.EmitWarningf(r.Recorder, bj, BackupJobReasonRestorePostgresFailed,
+			"Restore %s: PostgreSQL failed to start after recovery (CrashLoopBackOff)", bj.Name)
+		return ctrl.Result{}, r.statusUpdate(ctx, bj)
+	default:
+		if runner.Status.CompletionTime != nil &&
+			nowFunc().Time.Sub(runner.Status.CompletionTime.Time) > backupRestoreHealthTimeout {
+			endedAt := nowFunc()
+			bj.Status.EndedAt = &endedAt
+			bj.Status.Phase = postgresv1alpha1.BackupJobFailed
+			bj.Status.ObservedGeneration = bj.Generation
+			setBackupJobCondition(bj, metav1.ConditionFalse,
+				BackupJobReasonRestorePostgresFailed,
+				"Restore files applied but PostgreSQL did not become Ready within the health timeout")
+			return ctrl.Result{}, r.statusUpdate(ctx, bj)
+		}
+		bj.Status.ObservedGeneration = bj.Generation
+		setBackupJobCondition(bj, metav1.ConditionFalse,
+			BackupJobReasonRestoreVerifyingHealth,
+			"Restore files applied; waiting for PostgreSQL to start and reach Ready after recovery")
+		return ctrl.Result{RequeueAfter: backupJobRunnerRequeueWait}, r.statusUpdate(ctx, bj)
+	}
 }
 
 func buildSidecarRestoreJob(
@@ -759,6 +830,50 @@ func (r *BackupJobReconciler) shardPodsStopped(
 		return false, err
 	}
 	return len(pods.Items) == 0, nil
+}
+
+// restorePrimaryPodHealth 는 restore 후 재기동한 shard-0 pod 목록에서 PostgreSQL 컨테이너의
+// 기동 상태를 분류한다(순수 함수 — 단위테스트 용이). ready=true 면 PG 정상 기동(복구 완료),
+// crashed=true 면 CrashLoopBackOff(도달불가 recovery target 등으로 PG 가 기동 거부). 둘 다
+// false 면 아직 기동 중(또는 STS scale-up 전으로 pod 부재).
+func restorePrimaryPodHealth(pods []corev1.Pod) (ready, crashed bool) {
+	for i := range pods {
+		for j := range pods[i].Status.ContainerStatuses {
+			cs := &pods[i].Status.ContainerStatuses[j]
+			if cs.Name != pgContainerName {
+				continue
+			}
+			if cs.Ready {
+				return true, false
+			}
+			// 크래시 판정: CrashLoopBackOff waiting 이거나, 반복 재시작(RestartCount>=2). 컨테이너
+			// 상태는 PodInitializing ↔ CrashLoopBackOff 를 오가서 periodic reconcile 이 딱
+			// CrashLoopBackOff 순간을 놓칠 수 있으므로, monotonic 한 RestartCount 를 주 신호로 쓴다
+			// (정상 restore 복구는 재시작 0 — R-8 C-3 라이브 확인).
+			if (cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff") ||
+				cs.RestartCount >= 2 {
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+// shardRestorePrimaryHealth 는 shard-0 pod 를 조회해 restorePrimaryPodHealth 로 분류한다.
+func (r *BackupJobReconciler) shardRestorePrimaryHealth(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+	shardOrdinal int32,
+) (ready, crashed bool, err error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(SelectorLabels(cluster.Name, "shard", shardOrdinal)),
+	); err != nil {
+		return false, false, err
+	}
+	ready, crashed = restorePrimaryPodHealth(pods.Items)
+	return ready, crashed, nil
 }
 
 func (r *BackupJobReconciler) ensureClusterRestoreAnnotation(

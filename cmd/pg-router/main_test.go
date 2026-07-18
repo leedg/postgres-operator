@@ -100,6 +100,23 @@ func TestEnvBackendResolver(t *testing.T) {
 	}
 }
 
+// TestPrimaryServiceResolver 는 각 shard 를 operator-published per-shard primary
+// Service DNS(`<cluster>-<shard>-primary.<ns>.svc...`)로 해석함을 검증한다 —
+// 이름은 operator 의 ShardPrimaryServiceName(`<cluster>-<shard>-primary`)과 정합.
+func TestPrimaryServiceResolver(t *testing.T) {
+	r := primaryServiceResolver("demo", "prod")
+	got, err := r("shard-0")
+	want := "demo-shard-0-primary.prod.svc.cluster.local:5432"
+	if err != nil || got != want {
+		t.Fatalf("primary-service resolver = (%q,%v), want %q", got, err, want)
+	}
+	// named target shard 도 동일 규칙.
+	got, _ = r("t1")
+	if want := "demo-t1-primary.prod.svc.cluster.local:5432"; got != want {
+		t.Fatalf("named shard = %q, want %q", got, want)
+	}
+}
+
 // TestWritePgError 는 우아한 실패가 유효한 PostgreSQL ErrorResponse('E')로 인코딩됨을
 // 검증한다 (샤드 down 시 조용한 drop 대신 클라이언트가 사유를 받는다).
 func TestWritePgError(t *testing.T) {

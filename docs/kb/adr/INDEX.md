@@ -18,7 +18,7 @@ Standard path: `<repo>/docs/kb/adr/` (per the org-wide
 | [ADR-0005](0005-versioning-and-channels.md) | Release channels (alpha / beta / stable) + CRD apiVersion evolution | Accepted | 2026-04-30 |
 | [ADR-0006](0006-gitops-deploy-overlay.md) | Introduce the GitOps deploy overlay | Accepted | 2026-05-06 |
 | [ADR-0007](0007-pre-commit-instead-of-lefthook.md) | Hook tooling — pre-commit instead of lefthook (diverging from the org-wide lefthook standard) | Accepted | 2026-05-06 |
-| [ADR-0008](0008-keiailab-commons-adoption.md) | Adopt keiailab-commons + harden the container `SecurityContext` invariant | Accepted | 2026-05-07 |
+| [ADR-0008](0008-operator-commons-adoption.md) | Adopt keiailab-commons + harden the container `SecurityContext` invariant | Accepted | 2026-05-07 |
 | [ADR-0009](0009-webhook-accumulate-errors.md) | Webhook validate — immediate-return → accumulate-errors (delegate to `commons.ValidateWithPredicate`) | Accepted | 2026-05-07 |
 | [ADR-0010](0010-rfc-0017-tooling-unification-adoption.md) | Adopt RFC-0017 operator tooling unification (introduce lefthook + EventRecorder + HEALTHCHECK) | Proposed | 2026-05-09 |
 | [ADR-0011](0011-rfc-0018-pkg-status-partial-adoption.md) | Partial RFC-0018 adoption — `pkg/status` (`Ready` type only) + asymmetric `pkg/finalizer` preserved (PR-A7 first cut) | Accepted | 2026-05-09 |
@@ -77,4 +77,3 @@ with current operational policy* — see the Notes column.
   see `standards/enforcement.md §2.1`.
 - The v0.x archive is a history-preservation area; new decisions live in
   the active section only.
-

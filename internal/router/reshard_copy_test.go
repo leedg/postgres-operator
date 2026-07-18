@@ -76,6 +76,9 @@ func TestCDC_RejectsInjection(t *testing.T) {
 	if err := DropSubscription(ctx, "", bad); !errors.Is(err, ErrInvalidTable) {
 		t.Errorf("DropSubscription err = %v, want ErrInvalidTable", err)
 	}
+	if err := ForceDropSubscription(ctx, "", bad); !errors.Is(err, ErrInvalidTable) {
+		t.Errorf("ForceDropSubscription err = %v, want ErrInvalidTable", err)
+	}
 	if _, err := DeleteForeignRange(ctx, "", bad, specWithCol("id"), "shard-0"); !errors.Is(err, ErrInvalidTable) {
 		t.Errorf("DeleteForeignRange bad table err = %v, want ErrInvalidTable", err)
 	}

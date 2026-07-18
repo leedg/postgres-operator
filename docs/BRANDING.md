@@ -21,10 +21,10 @@ This document is the canonical reference for `postgres-operator` branding decisi
 
 | Asset | URL | Usage |
 |---|---|---|
-| Current primary logo | `docs/branding/symbol.png` | README header, slides |
-| Keiailab base symbol | `docs/branding/base-symbol.png` | Source reference for the outer rotating-arrow mark |
-| Light wordmark | `docs/branding/light.png` | Light backgrounds and docs cards |
-| Dark wordmark | `docs/branding/dark.png` | Dark backgrounds and social cards |
+| Current primary logo | [`branding/symbol.png`](branding/symbol.png) | README header, slides |
+| Keiailab base symbol | [`branding/base-symbol.png`](branding/base-symbol.png) | Source reference for the outer rotating-arrow mark |
+| Light wordmark | [`branding/light.png`](branding/light.png) | Light backgrounds and docs cards |
+| Dark wordmark | [`branding/dark.png`](branding/dark.png) | Dark backgrounds and social cards |
 | Current favicon | `https://keiailab.com/favicon.ico` | Favicon, social cards |
 | Planned SVG kit | `https://keiailab.com/assets/{logo,mark,wordmark}.svg` | Future replacement after URLs return 200 |
 
@@ -88,7 +88,7 @@ GitHub README 의 shield.io badge 는 위 hex 사용 권장.
 > **MIT-licensed PostgreSQL Operator for Kubernetes — vanilla PG18+, license-clean, K8s-native auto-sharding roadmap**
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"/></a>
   <!-- 기존 shield.io badges 유지 + 정합 -->
 </p>
 
@@ -117,7 +117,7 @@ GitHub README 의 shield.io badge 는 위 hex 사용 권장.
 README 의 shield.io badge 순서 (좌→우):
 
 1. License (MIT)
-2. Go Version (1.25+)
+2. Go Version (1.26+)
 3. Database (PostgreSQL 18+)
 4. Kubernetes Version (1.26+)
 5. Container Image (ghcr.io/keiailab)

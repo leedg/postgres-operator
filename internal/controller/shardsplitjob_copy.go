@@ -135,6 +135,12 @@ func (r *ShardSplitJobReconciler) buildReshardJob(ssj *postgresv1alpha1.ShardSpl
 		{Name: "PGROUTER_RANGES", Value: p.ranges},
 		{Name: "PGROUTER_REFERENCE_TABLES", Value: strings.Join(p.refTables, ",")},
 	}
+	// 복사 제한시간 passthrough (B-15). 데이터 크기는 클러스터마다 다르므로 운영자가
+	// operator Deployment 의 RESHARD_COPY_TIMEOUT 으로 조정한다 — 미설정 시 copy 바이너리의
+	// 기본값(15m)이 쓰인다. 미전달이면 조정 자체가 불가능했다(라이브 실측 2026-07-14).
+	if v := os.Getenv("RESHARD_COPY_TIMEOUT"); v != "" {
+		env = append(env, corev1.EnvVar{Name: "RESHARD_COPY_TIMEOUT", Value: v})
+	}
 	switch p.mode {
 	case "delete":
 		env = append(env, corev1.EnvVar{Name: "PGROUTER_RESHARD_DELETE_ONLY", Value: "1"})

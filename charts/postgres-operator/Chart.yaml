@@ -101,6 +101,16 @@ annotations:
       name: postgresusers.postgres.keiailab.io
       displayName: PostgresUser
       description: ready primary Pod 의 psql 로 PostgreSQL role flags, membership, password, validUntil 을 적용한다
+    - kind: ShardRange
+      version: v1alpha1
+      name: shardranges.postgres.keiailab.io
+      displayName: ShardRange
+      description: keyspace 의 vindex 와 shard range routing topology 를 선언한다
+    - kind: ShardSplitJob
+      version: v1alpha1
+      name: shardsplitjobs.postgres.keiailab.io
+      displayName: ShardSplitJob
+      description: guarded online 또는 offline shard split workflow 를 선언한다
   artifacthub.io/crdsExamples: |
     - apiVersion: postgres.keiailab.io/v1alpha1
       kind: ImageCatalog
@@ -249,7 +259,7 @@ annotations:
       image: ghcr.io/keiailab/postgres-operator:0.4.0-beta.8
   artifacthub.io/changes: |
     - kind: changed
-      description: "Add opt-in ExternalSecret rendering for PostgresUser, Pooler, and external replica-source credentials while keeping operator appVersion/image at 0.4.0-beta.1."
+      description: "Package operator appVersion/image 0.4.0-beta.8 and publish all 10 CRDs, including ShardRange and ShardSplitJob."
 
 dependencies:
   - name: keiailab-commons

@@ -35,6 +35,7 @@ type Mock struct {
 
 	Ready bool
 	Lag   int64
+	Size  int64
 	pid   int
 
 	// InRecovery + InRecoveryOK 는 IsInRecovery 의 반환값을 제어한다. 기본
@@ -144,6 +145,13 @@ func (m *Mock) LagBytes(_ context.Context) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.Lag
+}
+
+// DatabaseSizeBytes 는 Size 필드를 그대로 반환 (테스트 stub). 기본값 0.
+func (m *Mock) DatabaseSizeBytes(_ context.Context) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Size
 }
 
 // ExitCh 는 시뮬레이션 채널을 반환.

@@ -35,7 +35,13 @@ type queryRouter struct {
 }
 
 func newQueryRouter(provider router.TopologyProvider, write, read router.BackendResolver) queryRouter {
-	ext, _ := router.NewRouteKeyExtractor("")
+	// 추출기 기본값 = auto (parser 우선 + regex fallback). 라이브러리 기본값은 regex 인데,
+	// regex 는 best-effort 라 복합 predicate·따옴표 식별자에서 놓치는 경우가 있다 —
+	// 오퍼레이터가 띄우는 라우터는 정확한 parser 를 먼저 쓴다(PGROUTER_EXTRACTOR 로 조정).
+	ext, err := router.NewRouteKeyExtractor(env("PGROUTER_EXTRACTOR", router.ExtractorAuto))
+	if err != nil {
+		ext, _ = router.NewRouteKeyExtractor(router.ExtractorAuto)
+	}
 	return queryRouter{provider: provider, extractor: ext, write: write, read: read}
 }
 

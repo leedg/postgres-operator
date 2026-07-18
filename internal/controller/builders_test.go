@@ -781,6 +781,71 @@ func TestBuildRouterHPA_ExplicitMinAndCPU(t *testing.T) {
 	}
 }
 
+func TestBuildRouterHPA_ActiveConnectionsPodsMetric(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Router: &postgresv1alpha1.RouterSpec{
+				Replicas: 2,
+				Autoscale: &postgresv1alpha1.RouterAutoscaleSpec{
+					Enabled:                  true,
+					MaxReplicas:              8,
+					ScaleOnActiveConnections: true,
+					TargetActiveConnections:  500,
+				},
+			},
+		},
+	}
+
+	hpa := buildRouterHPA(cluster, RouterDeploymentName("orders"))
+
+	// CPU + Pods 두 메트릭 (opt-in 시 CPU 는 유지, active-connection 추가).
+	if len(hpa.Spec.Metrics) != 2 {
+		t.Fatalf("metrics len = %d, want 2 (cpu + pods)", len(hpa.Spec.Metrics))
+	}
+	if hpa.Spec.Metrics[0].Type != autoscalingv2.ResourceMetricSourceType {
+		t.Fatalf("metric[0] type = %q, want Resource(cpu)", hpa.Spec.Metrics[0].Type)
+	}
+	pods := hpa.Spec.Metrics[1]
+	if pods.Type != autoscalingv2.PodsMetricSourceType || pods.Pods == nil {
+		t.Fatalf("metric[1] = %+v, want Pods", pods)
+	}
+	if pods.Pods.Metric.Name != postgresv1alpha1.RouterActiveConnectionsMetric {
+		t.Fatalf("pods metric name = %q, want %q", pods.Pods.Metric.Name, postgresv1alpha1.RouterActiveConnectionsMetric)
+	}
+	if pods.Pods.Target.Type != autoscalingv2.AverageValueMetricType || pods.Pods.Target.AverageValue == nil {
+		t.Fatalf("pods target = %+v, want AverageValue", pods.Pods.Target)
+	}
+	if pods.Pods.Target.AverageValue.Value() != 500 {
+		t.Fatalf("pods target value = %d, want 500", pods.Pods.Target.AverageValue.Value())
+	}
+}
+
+func TestBuildRouterHPA_ActiveConnectionsDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	// ScaleOnActiveConnections 미설정(기본 false) → CPU-only(비파괴).
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec: postgresv1alpha1.PostgresClusterSpec{
+			Router: &postgresv1alpha1.RouterSpec{
+				Replicas: 2,
+				Autoscale: &postgresv1alpha1.RouterAutoscaleSpec{
+					Enabled:                 true,
+					MaxReplicas:             8,
+					TargetActiveConnections: 1000, // 값은 있어도 opt-in 아니면 무시.
+				},
+			},
+		},
+	}
+	hpa := buildRouterHPA(cluster, RouterDeploymentName("orders"))
+	if len(hpa.Spec.Metrics) != 1 {
+		t.Fatalf("metrics len = %d, want 1 (cpu-only when not opted in)", len(hpa.Spec.Metrics))
+	}
+}
+
 func TestBuildRouterDeployment_LabelsAutoscaleManagedReplicas(t *testing.T) {
 	t.Parallel()
 
@@ -811,6 +876,55 @@ func TestBuildRouterDeployment_LabelsAutoscaleManagedReplicas(t *testing.T) {
 	}
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Fatalf("initial replicas = %v, want minReplicas 3", dep.Spec.Replicas)
+	}
+}
+
+func TestBuildRouterDeployment_MetricsPortAndScrapeAnnotations(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "default"},
+		Spec:       postgresv1alpha1.PostgresClusterSpec{Router: &postgresv1alpha1.RouterSpec{Replicas: 2}},
+	}
+	dep := buildRouterDeployment(cluster, "orders-router", "orders-router-config", "example.com/router:dev", 2, corev1.ResourceRequirements{})
+
+	// metrics 컨테이너 포트 존재.
+	var metricsPort *corev1.ContainerPort
+	for i := range dep.Spec.Template.Spec.Containers[0].Ports {
+		p := &dep.Spec.Template.Spec.Containers[0].Ports[i]
+		if p.Name == "metrics" {
+			metricsPort = p
+		}
+	}
+	if metricsPort == nil {
+		t.Fatalf("router container missing 'metrics' port")
+	}
+	if metricsPort.ContainerPort != routerMetricsPort {
+		t.Fatalf("metrics port = %d, want %d", metricsPort.ContainerPort, routerMetricsPort)
+	}
+
+	// readiness probe = /readyz on metrics port.
+	rp := dep.Spec.Template.Spec.Containers[0].ReadinessProbe
+	if rp == nil || rp.HTTPGet == nil {
+		t.Fatalf("router container missing readiness probe")
+	}
+	if rp.HTTPGet.Path != "/readyz" {
+		t.Fatalf("readiness path = %q, want /readyz", rp.HTTPGet.Path)
+	}
+	if rp.HTTPGet.Port.IntVal != routerMetricsPort {
+		t.Fatalf("readiness port = %v, want %d", rp.HTTPGet.Port, routerMetricsPort)
+	}
+
+	// Prometheus scrape annotations.
+	ann := dep.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" {
+		t.Fatalf("prometheus.io/scrape = %q, want true", ann["prometheus.io/scrape"])
+	}
+	if ann["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("prometheus.io/path = %q, want /metrics", ann["prometheus.io/path"])
+	}
+	if ann["prometheus.io/port"] != "9187" {
+		t.Fatalf("prometheus.io/port = %q, want 9187", ann["prometheus.io/port"])
 	}
 }
 
@@ -1154,5 +1268,113 @@ func TestBuildTargetShardConfigMapAndService_Isolation(t *testing.T) {
 	if svc.Spec.Selector[ReshardTargetLabelKey] != tsts.Spec.Template.Labels[ReshardTargetLabelKey] {
 		t.Errorf("svc selector(%v) 가 target STS pod label(%v) 과 불일치",
 			svc.Spec.Selector, tsts.Spec.Template.Labels)
+	}
+}
+
+// --- B-01 회귀 차단: router Deployment 가 pg-router 로 뜨는가 -------------------
+//
+// 트리거 사고(4노드 라이브, Phase 1): router Pod 가 CrashLoopBackOff. 원인 2겹 —
+// (a) reconcile 이 instance(PG) 이미지를 router 에 넘김 (b) pg-router 계약(PGROUTER_*)
+// env 미주입. 아래 테스트는 두 원인을 각각 고정한다.
+
+func TestRouterImage_EnvOverrideAndDefault(t *testing.T) {
+	t.Setenv("ROUTER_IMAGE", "")
+	if got := routerImage(); got != "ghcr.io/keiailab/pg-router:dev" {
+		t.Errorf("routerImage() 기본값 = %q", got)
+	}
+	t.Setenv("ROUTER_IMAGE", "pg-router:local")
+	if got := routerImage(); got != "pg-router:local" {
+		t.Errorf("routerImage() env override = %q, want pg-router:local", got)
+	}
+}
+
+func TestBuildRouterDeployment_InjectsPGRouterEnvAndServiceAccount(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	}
+	dep := buildRouterDeployment(cluster, "orders-router", "orders-router-config",
+		"pg-router:local", 2, corev1.ResourceRequirements{})
+
+	if sa := dep.Spec.Template.Spec.ServiceAccountName; sa != "orders-router" {
+		t.Errorf("router SA = %q, want orders-router (K8s API 읽기 권한 필요)", sa)
+	}
+
+	env := map[string]string{}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		env[e.Name] = e.Value
+	}
+	// pg-router 가 ShardRange(topology) + PostgresCluster.status(backend) 를 읽어야
+	// reshard·failover 후에도 라우팅 테이블이 따라간다.
+	want := map[string]string{
+		"PGROUTER_NAMESPACE": "pg-test",
+		"PGROUTER_CLUSTER":   "orders",
+		"PGROUTER_KEYSPACE":  routerKeyspace,
+		"PGROUTER_TOPOLOGY":  "crd",
+		"PGROUTER_BACKEND":   "status",
+		"PGROUTER_MODE":      "query",
+		"PGROUTER_LISTEN":    ":5432",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("router env %s = %q, want %q", k, env[k], v)
+		}
+	}
+	// metrics addr 은 scrape annotation / HPA custom-metrics 포트와 일치해야 한다.
+	if env["PGROUTER_METRICS_ADDR"] != ":9187" {
+		t.Errorf("PGROUTER_METRICS_ADDR = %q, want :9187", env["PGROUTER_METRICS_ADDR"])
+	}
+	// 라우터는 stateless — PVC 마운트 금지(ADR 0003).
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			t.Errorf("router Pod 가 PVC 마운트: %s", v.Name)
+		}
+	}
+}
+
+func TestBuildRouterRole_ReadOnlyOnShardRangeAndCluster(t *testing.T) {
+	t.Parallel()
+
+	cluster := &postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	}
+	role := buildRouterRole(cluster)
+	if len(role.Rules) == 0 {
+		t.Fatal("router Role 규칙 0")
+	}
+	for _, rule := range role.Rules {
+		for _, verb := range rule.Verbs {
+			switch verb {
+			case "get", "list", "watch":
+			default:
+				t.Errorf("router Role 에 쓰기 verb %q (읽기 전용이어야 함): %v", verb, rule.Resources)
+			}
+		}
+	}
+	rb := buildRouterRoleBinding(cluster)
+	if rb.Subjects[0].Name != buildRouterServiceAccount(cluster).Name {
+		t.Errorf("RoleBinding subject(%s) 가 router SA(%s) 와 불일치",
+			rb.Subjects[0].Name, buildRouterServiceAccount(cluster).Name)
+	}
+	if rb.RoleRef.Name != role.Name {
+		t.Errorf("RoleBinding roleRef(%s) 가 Role(%s) 와 불일치", rb.RoleRef.Name, role.Name)
+	}
+}
+
+// router Role 은 `*/status` 서브리소스 규칙을 두면 안 된다 — operator 가 해당 권한을 보유하지
+// 않아 RBAC escalation 방지에 걸려 Role 생성 자체가 거부된다(라이브 실측 2026-07-14).
+func TestBuildRouterRole_NoStatusSubresource(t *testing.T) {
+	t.Parallel()
+
+	role := buildRouterRole(&postgresv1alpha1.PostgresCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "orders", Namespace: "pg-test"},
+	})
+	for _, rule := range role.Rules {
+		for _, res := range rule.Resources {
+			if strings.Contains(res, "/status") {
+				t.Errorf("router Role 에 status 서브리소스 %q — escalation 차단으로 Role 생성 실패한다", res)
+			}
+		}
 	}
 }

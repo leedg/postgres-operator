@@ -33,10 +33,12 @@ The operator runs **unmodified upstream PostgreSQL** — no forked engine, no em
 - **Connection pooling** — `Pooler` runs a PgBouncer layer in front of a cluster, with transaction/session pool modes and optional cert-manager TLS.
 - **Declarative databases & roles** — `PostgresDatabase` and `PostgresUser` manage databases, schemas, extensions, FDWs, roles, memberships, and passwords against the ready primary.
 - **Image catalogs** — `ImageCatalog` / `ClusterImageCatalog` pin the PostgreSQL runtime image per major version, namespace- or cluster-scoped.
+- **Native sharding** — `ShardRange` is the routing topology source of truth, while the reconciled `pg-router` deployment provides point routing, scatter-gather reads, and failover-aware backends.
+- **Online and offline resharding** — `ShardSplitJob` provisions target shards, copies data, optionally catches up with logical replication, switches routing, and cleans up through a guarded state machine.
 - **Observability** — the Helm chart ships a Prometheus `ServiceMonitor`, a `PrometheusRule` with built-in alerts, and Grafana dashboards.
 - **Secure by default** — restricted Pod Security Context, deny-by-default `NetworkPolicy`, and TLS via cert-manager.
 
-The chart installs **8 CRDs**:
+The chart installs **10 CRDs**:
 
 | CRD | Purpose |
 |---|---|
@@ -48,10 +50,12 @@ The chart installs **8 CRDs**:
 | `PostgresUser` | Declarative role / membership / password |
 | `ImageCatalog` | Namespace-scoped PostgreSQL image catalog |
 | `ClusterImageCatalog` | Cluster-wide PostgreSQL image catalog |
+| `ShardRange` | Shard-key ranges and their current routing targets |
+| `ShardSplitJob` | Guarded online or offline shard split workflow |
 
 ## Status
 
-Current release: **v0.4.0-beta.1**. The operator manages single-cluster PostgreSQL (primary + replicas) with HA, backups, pooling, and monitoring. It is **beta** — verify your own backup/restore procedure before trusting it with production data. See [Roadmap](#roadmap) for what is not yet built.
+Current operator release: **v0.4.0-beta.8**. The bundled Helm chart is **0.4.0-beta.9** and packages that operator version. The operator manages PostgreSQL clusters with HA, backups, pooling, monitoring, native shard routing, and guarded online/offline shard splits. It is **beta** — verify backup/restore and reshard rollback procedures against your own workload before production use. See [Roadmap](#roadmap) for the remaining distributed-SQL work.
 
 ## Installation
 
@@ -136,22 +140,21 @@ Helm keeps CRDs on uninstall by design; remove them manually with `kubectl delet
 
 ## Roadmap
 
-Beyond single-cluster operations, the long-term goal is a horizontally sharded, distributed-SQL layer on top of vanilla PostgreSQL. The `ShardRange` and `ShardSplitJob` CRD types are defined, but **no controllers exist for them yet** — sharding and the `pg-router` query layer are design-only at this stage.
+Beyond single-cluster operations, the project is building a horizontally sharded, distributed-SQL layer on top of vanilla PostgreSQL. `ShardRange`, the reconciled `pg-router`, AutoSplit evaluation, and the single-source `ShardSplitJob` split state machine are implemented. The current branch also guards offline initial copy, online logical-replication catch-up, routing cutover, source cleanup, and target promotion. These paths remain beta and require workload-specific validation. `direction=merge` and multiple sources are rejected before side effects; `cutoverWindow` enforcement and automatic rollback are not implemented. A split source must currently use the ordinal `shard-N` form; a promoted named shard such as `shard-1a` cannot yet be selected as a later split source. Router SQL coverage is also bounded rather than a general distributed SQL engine, and cross-shard transactions and general distributed JOINs are not complete.
 
 Planned, roughly in order:
 
 - HA hardening — PITR drill, chaos failover testing
-- `ShardRange` CRD controller + `pg-router` (manual multi-shard routing)
-- Scatter-gather queries + read-replica autoscaling
-- `ShardSplitJob` — online shard splitting
-- Automatic split/rebalance triggered by load
+- Harden `pg-router` and resharding with broader failure-injection and scale tests
+- Expand scatter-gather SQL coverage and read-replica autoscaling
+- Validate automatic split/rebalance policies on production-shaped workloads
 - Cross-shard distributed transactions and JOINs
 
 Detailed phase plan, sub-tasks, and SLOs: [`docs/ROADMAP.md`](docs/ROADMAP.md). Architecture and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/sharding/SHARDING.md`](docs/sharding/SHARDING.md), and the [ADR index](docs/kb/adr/INDEX.md).
 
 ## Contributing
 
-The canonical repository is on [GitLab](https://keiailab.synology.me/gitlab/keiailab/oss/postgres-operator), mirrored to [GitHub](https://github.com/keiailab/postgres-operator).
+The canonical development and release repository is [GitHub](https://github.com/keiailab/postgres-operator). Any GitLab copy is an archive mirror, not the development source of truth.
 
 ```bash
 make lint test validate   # lint + unit tests + manifest validation

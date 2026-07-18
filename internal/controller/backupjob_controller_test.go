@@ -747,8 +747,24 @@ func TestBackupJobReconcile_RunningSidecarRestoreCompleteReleasesRestoreLockAndM
 		Type:   batchv1.JobComplete,
 		Status: corev1.ConditionTrue,
 	}}
+	// #B-26: restore Job 완료 후 operator 는 재기동한 shard-0 PostgreSQL 이 Ready 인지
+	// 검증해야 Succeeded 로 본다. fake 환경에서 그 조건을 만족시키는 Ready shard-0 pod 를 둔다
+	// (없으면 RestoreVerifyingHealth 로 requeue 하는 것이 올바른 동작).
+	restoredPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "demo-shard-0-0",
+			Namespace: bj.Namespace,
+			Labels:    SelectorLabels(cluster.Name, "shard", 0),
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: pgContainerName, Ready: true},
+			},
+		},
+	}
 	c := fake.NewClientBuilder().WithScheme(scheme).
-		WithObjects(bj, cluster, sts, runner).
+		WithObjects(bj, cluster, sts, runner, restoredPod).
 		WithStatusSubresource(&postgresv1alpha1.BackupJob{}).
 		Build()
 	reg := plugin.NewRegistry()
@@ -1061,4 +1077,56 @@ func assertEmptyDirVolume(t *testing.T, volumes []corev1.Volume, name string) {
 		}
 	}
 	t.Fatalf("EmptyDir volume %q not found in %+v", name, volumes)
+}
+
+// TestRestorePrimaryPodHealth 는 #B-26 fix — restore 후 PG 기동 상태 분류를 검증한다.
+func TestRestorePrimaryPodHealth(t *testing.T) {
+	pgReady := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: true},
+	}}}
+	pgCrash := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+		}},
+	}}}
+	pgStarting := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: pgContainerName, Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"},
+		}},
+	}}}
+	otherCrash := corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "sidecar", Ready: false, State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+		}},
+	}}}
+
+	cases := []struct {
+		name              string
+		pods              []corev1.Pod
+		wantReady, wantCrash bool
+	}{
+		{"empty (STS scale-up 전)", nil, false, false},
+		{"pg ready", []corev1.Pod{pgReady}, true, false},
+		{"pg crashloop → crashed", []corev1.Pod{pgCrash}, false, true},
+		{"pg starting → neither", []corev1.Pod{pgStarting}, false, false},
+		{"pg RestartCount>=2 → crashed (sampling 무관)", []corev1.Pod{{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: pgContainerName, Ready: false, RestartCount: 3, State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		}}}}, false, true},
+		{"pg 단일 재시작(RestartCount 1) → 아직 크래시 아님", []corev1.Pod{{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: pgContainerName, Ready: false, RestartCount: 1, State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+		}}}}, false, false},
+		{"non-pg container crash 는 무시", []corev1.Pod{otherCrash}, false, false},
+		{"ready 가 crash 보다 우선", []corev1.Pod{pgReady, pgCrash}, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ready, crashed := restorePrimaryPodHealth(tc.pods)
+			if ready != tc.wantReady || crashed != tc.wantCrash {
+				t.Fatalf("restorePrimaryPodHealth = (ready=%v crashed=%v), want (ready=%v crashed=%v)",
+					ready, crashed, tc.wantReady, tc.wantCrash)
+			}
+		})
+	}
 }

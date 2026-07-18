@@ -148,6 +148,7 @@ func aggregateShardStatusMatching(
 
 	now := time.Now().UTC()
 	var primaryCandidate *postgresv1alpha1.ShardEndpoint
+	var primarySizeBytes int64 // 선택된 primary 가 보고한 shard DB 크기 (AutoSplit 관측).
 	var replicas []postgresv1alpha1.ShardEndpoint
 
 	for i := range pods.Items {
@@ -157,11 +158,28 @@ func aggregateShardStatusMatching(
 		}
 		st, ok := parsePodStatus(pod)
 		if !ok {
-			// annotation 부재 — Pod 부팅 직후. fallback 표기.
+			// annotation 부재. 두 경우가 있다:
+			//
+			//  (a) 일반 shard Pod 부팅 직후 — instance manager 가 아직 status 를 안 붙였다.
+			//      곧 붙으므로 replica(미준비)로 표기하고 넘어간다.
+			//  (b) **reshard target Pod** — 이 STS 는 instance manager 없이 PG 만 띄우므로
+			//      status annotation 을 *영원히* 발행하지 않는다. 그래서 split 이 끝나도
+			//      ShardStatus.Primary 가 계속 비었고, 라우터(PGROUTER_BACKEND=status)가 새
+			//      샤드의 백엔드를 해석하지 못해 접속이 끊겼다
+			//      (B-19, 4노드 라이브 실측 2026-07-14: `connection to server was lost`).
+			//      target 은 단일 인스턴스 primary 가 구조적으로 보장되므로(replica 없음),
+			//      Kubernetes readiness 를 근거로 primary 로 인정한다.
 			ep := postgresv1alpha1.ShardEndpoint{
 				Pod:      pod.Name,
 				Endpoint: defaultEndpoint(pod.Name, svcName, cluster.Namespace),
 				Ready:    false,
+			}
+			if pod.Labels[ReshardTargetLabelKey] != "" && !kubernetesPodNotReady(pod) {
+				ep.Ready = true
+				if primaryCandidate == nil {
+					primaryCandidate = &ep
+				}
+				continue
 			}
 			replicas = append(replicas, ep)
 			continue
@@ -226,6 +244,7 @@ func aggregateShardStatusMatching(
 			} else {
 				p := ep
 				primaryCandidate = &p
+				primarySizeBytes = maxInt64(0, st.SizeBytes)
 			}
 		default:
 			replicas = append(replicas, ep)
@@ -234,6 +253,9 @@ func aggregateShardStatusMatching(
 
 	out.Primary = primaryCandidate
 	out.Replicas = replicas
+	if primaryCandidate != nil {
+		out.SizeBytes = primarySizeBytes
+	}
 	return out
 }
 
@@ -336,8 +358,18 @@ func podMatchesNamedShardIdentity(pod *corev1.Pod, shardID string) bool {
 	if pod == nil || shardID == "" {
 		return false
 	}
+	// reshard 의 copy/delete **Job Pod** 도 대상 shard 를 가리키는 reshard-target 라벨을
+	// 달고 있다. 이들은 DB 인스턴스가 아니라 *일회성 작업* 이므로 shard 멤버로 세면 안 된다
+	// (B-20, 4노드 라이브 실측 2026-07-14: status.shards[shard-1a].replicas 에 copy Job Pod
+	// 들이 들어가 primary 선출을 오염시켰다).
+	if pod.Labels[jobNameLabelKey] != "" {
+		return false
+	}
 	return pod.Labels[ShardIDLabelKey] == shardID || pod.Labels[ReshardTargetLabelKey] == shardID
 }
+
+// jobNameLabelKey 는 batch/v1 Job 이 자기 Pod 에 붙이는 표준 라벨이다.
+const jobNameLabelKey = "batch.kubernetes.io/job-name"
 
 func kubernetesPodNotReady(pod *corev1.Pod) bool {
 	if pod == nil {

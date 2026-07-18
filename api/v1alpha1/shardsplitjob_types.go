@@ -14,16 +14,16 @@ import (
 //
 // 7-step workflow (RFC-0002 §online-resharding 정합):
 //
-//  1. Snapshot + WAL capture — source shard 의 시점 일관 base snapshot 확보
+//  1. SnapshotWAL — 현재는 호환성을 위해 유지하는 no-op 전이 단계
 //  2. Bootstrap target shard — 신규 shard StatefulSet 생성 + PG init
-//  3. Initial copy — base snapshot 적용 (logical 또는 pg_basebackup)
-//  4. CDC catch-up — source 의 변경분을 logical replication 으로 따라잡기
+//  3. Initial copy — offline 모드의 bulk/range copy Job (online 모드는 no-op)
+//  4. CDC catch-up — online 모드에서 copy_data=true logical replication으로 초기복사와 변경분을 따라잡기
 //  5. Cutover — write 차단 최소화 윈도우 + router 라우팅 갱신
 //  6. Routing update — ShardRange CRD 의 ranges 갱신 + metadata store sync
 //  7. Source cleanup — old shard 의 split-out 키 범위 데이터 회수
 //
-// 본 CRD 는 *state machine 만 정의* — 실 step 구현은 internal/controller/
-// shardsplit/ + internal/router/ 에 위임 (P-D §D.9.* 후속).
+// 본 CRD 는 state machine API를 정의하고, 현재 부수효과는
+// internal/controller/shardsplitjob_*.go와 internal/router/에 구현되어 있다.
 
 // ShardSplitJobPhase 는 resharding state machine 의 현재 phase 이다.
 // +kubebuilder:validation:Enum=Pending;SnapshotWAL;Bootstrap;InitialCopy;CDCCatchup;Cutover;RoutingUpdate;Cleanup;Promote;Completed;Failed;Aborted
@@ -55,9 +55,10 @@ const (
 	ShardSplitDirectionMerge ShardSplitDirection = "merge"
 )
 
-// ShardSplitJobSpec 는 사용자 의도된 shard split/merge 작업이다.
-// +kubebuilder:validation:XValidation:rule="size(self.sources) > 0",message="sources must not be empty"
+// ShardSplitJobSpec 는 사용자 의도된 shard split 작업이다. merge 값은 향후 API
+// 호환성을 위해 예약되어 있지만 현재 controller가 모든 부수효과 전에 거부한다.
 // +kubebuilder:validation:XValidation:rule="size(self.targets) > 0",message="targets must not be empty"
+// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec is immutable after creation"
 type ShardSplitJobSpec struct {
 	// Cluster 는 본 작업이 속한 PostgresCluster 의 이름 (동일 namespace).
 	// +kubebuilder:validation:Required
@@ -69,24 +70,27 @@ type ShardSplitJobSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z][a-z0-9_]{0,62}$`
 	Keyspace string `json:"keyspace"`
 
-	// Direction 은 split 또는 merge 방향. 기본 split.
+	// Direction 은 향후 split 또는 merge 방향을 표현한다. 현재는 split만 구현되어
+	// controller가 merge를 부수효과 전에 거부한다. 기본 split.
 	// +kubebuilder:default=split
 	// +optional
 	Direction ShardSplitDirection `json:"direction,omitempty"`
 
-	// Sources 는 source shard ID 목록 (split: 1, merge: N).
+	// Sources 는 source shard ID 목록이다. 현재 split은 정확히 1개만 허용하며
+	// merge용 다중 source는 예약 상태다.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	Sources []string `json:"sources"`
 
-	// Targets 는 target shard 정의 목록 (split: N, merge: 1).
+	// Targets 는 target shard 정의 목록이다. 현재 split은 1개 이상을 허용하며
+	// merge용 단일 target 의미는 예약 상태다.
 	// 각 target 은 자체 키 범위와 placement hint 를 갖는다.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	Targets []ShardSplitTarget `json:"targets"`
 
-	// CutoverWindow 는 cutover phase 의 최대 write-block 시간이다 (예: "30s").
-	// 초과 시 자동 abort + rollback. 기본 60s.
+	// CutoverWindow 는 향후 최대 write-block 시간 enforcement를 위한 예약 필드이다.
+	// 현재 controller는 이 값을 측정하거나 자동 abort/rollback에 사용하지 않는다. 기본 60s.
 	// +kubebuilder:default="60s"
 	// +optional
 	CutoverWindow metav1.Duration `json:"cutoverWindow,omitempty"`
@@ -97,8 +101,9 @@ type ShardSplitJobSpec struct {
 	// +optional
 	CDCMaxLag int64 `json:"cdcMaxLag,omitempty"`
 
-	// AllowForwardOnly 는 true 면 cutover 이후 rollback 불가 (D.9.10).
-	// 기본 false — rollback 가능 (역방향 logical replication 유지).
+	// AllowForwardOnly 는 향후 forward-only cutover 의도를 위한 필드이다.
+	// 현재 controller는 true를 routing 전에 거부한다. false는 진행을 허용하지만
+	// 역방향 logical replication이나 자동 rollback을 보장하지 않는다.
 	// +kubebuilder:default=false
 	// +optional
 	AllowForwardOnly bool `json:"allowForwardOnly,omitempty"`
@@ -112,7 +117,7 @@ type ShardSplitJobSpec struct {
 	Online bool `json:"online,omitempty"`
 }
 
-// ShardSplitTarget 는 split/merge 의 target shard 1건 정의.
+// ShardSplitTarget 는 split target shard 1건을 정의한다.
 type ShardSplitTarget struct {
 	// ShardID 는 target shard 의 식별자 (ShardRange.spec.ranges[].shard 와 동일).
 	//
@@ -172,7 +177,8 @@ type ShardSplitJobStatus struct {
 	// +optional
 	CutoverStartedAt *metav1.Time `json:"cutoverStartedAt,omitempty"`
 
-	// SnapshotLSN 은 SnapshotWAL phase 에서 확정된 source 시점 LSN.
+	// SnapshotLSN 은 향후 snapshot 기준점 기록을 위한 예약 필드이다.
+	// 현재 SnapshotWAL 은 no-op 이므로 컨트롤러가 이 값을 채우지 않는다.
 	// +optional
 	SnapshotLSN string `json:"snapshotLSN,omitempty"`
 

@@ -14,6 +14,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -72,6 +73,38 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 
+	// (reshard-feature-sync) 미지원 spec 차단이 *먼저* — 구 CRD에서 생성됐거나 admission
+	// 적용 전에 진행 중이던 요청은 승인 게이트·phase 부수효과보다 먼저 Failed 처리한다.
+	// Failed/Aborted의 안전 cleanup은 위 terminal 분기에서 계속 허용한다.
+	if reason := unsupportedSplitSpecReason(&ssj); reason != "" {
+		ssj.Status.Phase = postgresv1alpha1.ShardSplitPhaseFailed
+		ssj.Status.FailureReason = reason
+		now := metav1.Now()
+		ssj.Status.CompletedAt = &now
+		ssj.Status.ObservedGeneration = ssj.Generation
+		if err := r.Status().Update(ctx, &ssj); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// AutoSplit 승인 게이트: 자동 생성 job 이 requireApproval(approval=required)이면
+	// 운영자 승인 annotation(autosplit-approved=true) 전까지 Pending 을 유지한다 —
+	// 비가역 데이터 이동 전 확인(AutoSplitSpec.RequireApproval production safety).
+	// 승인 annotation 편집이 재-reconcile 을 트리거해 SnapshotWAL 로 진행한다.
+	if (ssj.Status.Phase == "" || ssj.Status.Phase == postgresv1alpha1.ShardSplitPhasePending) &&
+		autoSplitHoldForApproval(&ssj) {
+		if ssj.Status.Phase == "" {
+			ssj.Status.Phase = postgresv1alpha1.ShardSplitPhasePending
+			ssj.Status.ObservedGeneration = ssj.Generation
+			if err := r.Status().Update(ctx, &ssj); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		logger.Info("ShardSplitJob 승인 대기 (autosplit requireApproval)", "name", ssj.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// RoutingUpdate phase: 실 routing 전환 — 해당 keyspace 의 ShardRange CRD 의 ranges 를
 	// target 으로 갱신한다. *가역* cutover 결과(rollback=ShardRange 원복, §6 L3 안전망).
 	// 사용자 비가역 승인(2026-06-04) 하에 진입. write-block(운영 write freeze) + CDC
@@ -89,6 +122,17 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			ssj.Status.ObservedGeneration = ssj.Generation
 			_ = r.Status().Update(ctx, &ssj)
 			return ctrl.Result{}, nil
+		}
+		// #B-28: target StatefulSet 을 upsert 했다고 곧장 InitialCopy 로 넘어가면, copy Job 이
+		// target pod 부팅(및 headless DNS 등록) 전에 실행돼 "no such host" 로 실패한다(E-1 에서
+		// 수동 "target Ready 후 재적용" 으로 우회했던 race). target pod 가 Ready 될 때까지
+		// Bootstrap 에 머물며 requeue 한다 — nextPhase 전이 게이트.
+		ready, err := r.bootstrapTargetsReady(ctx, &ssj)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !ready {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
 
@@ -239,9 +283,32 @@ func (r *ShardSplitJobReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // nextPhase 는 현재 phase 로부터 다음 phase 와 (Failed 시) 사유를 반환한다.
+// unsupportedSplitSpecReason 은 (reshard-feature-sync) 진행 중이거나 구 CRD 에서 온 요청 중
+// 현재 데이터 이동 구현이 다룰 수 없는 형태를 Reconcile 진입 즉시(어떤 phase 부수효과보다 먼저)
+// 차단하기 위한 사유를 반환한다. 지원 가능하면 "". nextPhase 의 Pending 게이트와 동일 불변식
+// (merge 미구현 / split 은 단일 source) — 여기서 먼저 걸러 in-flight Bootstrap 요청도 fail-closed.
+func unsupportedSplitSpecReason(ssj *postgresv1alpha1.ShardSplitJob) string {
+	if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge {
+		return "merge direction is not implemented"
+	}
+	if len(ssj.Spec.Sources) != 1 {
+		return "split requires exactly one source"
+	}
+	return ""
+}
+
 func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob) (postgresv1alpha1.ShardSplitJobPhase, string) {
 	switch ssj.Status.Phase {
 	case "", postgresv1alpha1.ShardSplitPhasePending:
+		// 현재 데이터 이동 구현은 split 전용이며 source[0]만 복사한다.
+		// merge 또는 다중 source를 허용하면 routing update가 복사되지 않은 source까지
+		// 제거할 수 있으므로 어떤 부수효과보다 먼저 fail-closed 한다.
+		if ssj.Spec.Direction == postgresv1alpha1.ShardSplitDirectionMerge {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "merge direction is not implemented"
+		}
+		if len(ssj.Spec.Sources) != 1 {
+			return postgresv1alpha1.ShardSplitPhaseFailed, "split requires exactly one source"
+		}
 		// 데이터 보존 불변식 gate (#213). target 범위가 무중첩·무공백 연속이어야.
 		targets := flattenTargetRanges(ssj.Spec.Targets)
 		if err := router.ValidateSplitPlan(targets, targets); err != nil {
@@ -259,11 +326,11 @@ func (r *ShardSplitJobReconciler) nextPhase(ssj *postgresv1alpha1.ShardSplitJob)
 	case postgresv1alpha1.ShardSplitPhaseCDCCatchup:
 		return postgresv1alpha1.ShardSplitPhaseCutover, ""
 	case postgresv1alpha1.ShardSplitPhaseCutover:
-		// *비가역* gate: AllowForwardOnly=true 는 rollback 불가 → 안전망(§6 L3) 미보유
-		// 골격에서는 진입 거부. false(rollback 가능)만 자동 진행.
+		// 현재 forward-only 정책은 구현하지 않았으므로 true를 명시적으로 거부한다.
+		// false는 routing 진행 허용 조건일 뿐 자동 rollback 보장이 아니다.
 		if ssj.Spec.AllowForwardOnly {
 			return postgresv1alpha1.ShardSplitPhaseFailed,
-				"cutover requires reversible path (AllowForwardOnly=false) in skeleton reconciler"
+				"allowForwardOnly=true is not implemented"
 		}
 		return postgresv1alpha1.ShardSplitPhaseRoutingUpdate, ""
 	case postgresv1alpha1.ShardSplitPhaseRoutingUpdate:
@@ -296,6 +363,17 @@ func (r *ShardSplitJobReconciler) promotePreconditionsMet(ctx context.Context, s
 			return false, fmt.Sprintf("source shard %q is still active in ShardRange", source), nil
 		}
 	}
+	// P-B.6 명시적 fence gate (ADR-0029 §승격 메커니즘 2): source ordinal shard 가
+	// 아직 *운영 관측*(status.shards 의 Ready primary)에 잡혀 있으면 target adopt 를
+	// 보류한다. ShardRange flip(active set 제외)만으로는 cluster reconciler 가 source STS
+	// 를 scale-0 하고 status 에서 제외하기 전 짧은 창이 있고, 그 사이 source·target 이
+	// 같은 shard-id 로 동시 관측되면 aggregate_status 가 primary 2개(split-brain)로
+	// 오판한다(#220-class). status 관측 제외를 명시 확인해 fence-vs-adopt race 를 닫는다.
+	if fenced, reason, err := r.sourceObservationExcluded(ctx, ssj); err != nil {
+		return false, "", err
+	} else if !fenced {
+		return false, reason, nil
+	}
 	for i := range ssj.Spec.Targets {
 		shardID := ssj.Spec.Targets[i].ShardID
 		if _, ok := active[shardID]; !ok {
@@ -307,6 +385,30 @@ func (r *ShardSplitJobReconciler) promotePreconditionsMet(ctx context.Context, s
 		}
 		if !ready {
 			return false, reason, nil
+		}
+	}
+	return true, "", nil
+}
+
+// sourceObservationExcluded 는 각 source shard 가 cluster 의 운영 관측(status.shards 의
+// Ready primary)에서 제외되었는지 확인한다(P-B.6 fence gate). source 가 아직 Ready
+// primary 로 관측되면 target adopt 를 보류해 source·target 동시 관측(#220-class
+// split-brain) 을 막는다. PostgresCluster CR 부재 시 관측 자체가 없으므로 fence 충족
+// (true) — 격리 테스트 및 cluster 삭제 경로에서 안전.
+func (r *ShardSplitJobReconciler) sourceObservationExcluded(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) (bool, string, error) {
+	var cluster postgresv1alpha1.PostgresCluster
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ssj.Namespace, Name: ssj.Spec.Cluster}, &cluster); err != nil {
+		if apierrors.IsNotFound(err) {
+			return true, "", nil
+		}
+		return false, "", fmt.Errorf("get cluster for promote fence: %w", err)
+	}
+	for _, source := range ssj.Spec.Sources {
+		for i := range cluster.Status.Shards {
+			s := &cluster.Status.Shards[i]
+			if s.Name == source && s.Primary != nil && s.Primary.Ready {
+				return false, fmt.Sprintf("source shard %q still observed with a Ready primary (fence pending)", source), nil
+			}
 		}
 	}
 	return true, "", nil
@@ -337,6 +439,24 @@ func (r *ShardSplitJobReconciler) activeShardRangeIDs(ctx context.Context, ssj *
 		return nil, fmt.Errorf("no ShardRange for cluster=%s keyspace=%s", ssj.Spec.Cluster, ssj.Spec.Keyspace)
 	}
 	return active, nil
+}
+
+// bootstrapTargetsReady 는 #B-28 — 모든 target shard 에 Ready(PodRunning + Ready condition)
+// 인 pod 가 하나 이상 있는지 본다. copy Job 실행(InitialCopy) 전 게이트로, target pod 부팅 +
+// headless DNS 등록이 끝났음을 보장해 "no such host" copy 실패를 막는다. targetShardReadyForPromote
+// 와 같은 readiness 판정(podReadyForPromote)을 재사용한다.
+func (r *ShardSplitJobReconciler) bootstrapTargetsReady(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) (bool, error) {
+	for i := range ssj.Spec.Targets {
+		shardID := ssj.Spec.Targets[i].ShardID
+		ready, _, err := r.targetShardReadyForPromote(ctx, ssj.Namespace, ssj.Spec.Cluster, shardID)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *ShardSplitJobReconciler) targetShardReadyForPromote(ctx context.Context, namespace, cluster, shardID string) (bool, string, error) {
@@ -419,9 +539,32 @@ func flattenTargetRanges(targets []postgresv1alpha1.ShardSplitTarget) []postgres
 	return out
 }
 
-// applyRouting 은 ShardSplitJob 의 cluster/keyspace 에 해당하는 ShardRange 의 ranges 를
-// target 으로 갱신하여 routing 을 새 shard 로 전환한다 (가역 cutover — 원본 ShardRange
-// 로 rollback). split plan 은 Pending phase 에서 ValidateSplitPlan 으로 이미 검증됨.
+// mergeSplitRanges 는 기존 ranges 에서 *source shard 의 range 만* 제거하고 target ranges 를
+// 더한다 — split 과 무관한 shard 의 range 는 그대로 보존한다.
+//
+// B-18 (4노드 라이브 실측 2026-07-14): 기존 구현은 `sr.Spec.Ranges = flattenTargetRanges(...)`
+// 로 **전체 ranges 를 target 것으로 대체**했다. 그 결과 shard-1 하나를 분할했을 뿐인데
+// shard-0 의 range(0x00000000~0x7fffffff)가 통째로 사라져 shard-0 의 데이터가 라우팅 불가가
+// 되고(PostgresCluster.status.shards 에서도 제거 → STS 0/0), Cleanup Job 은 이미 사라진
+// source 에 접속하려다 실패했다. split 은 *부분 갱신*이어야 한다.
+func mergeSplitRanges(existing []postgresv1alpha1.ShardRangeEntry, sources []string, targets []postgresv1alpha1.ShardSplitTarget) []postgresv1alpha1.ShardRangeEntry {
+	removed := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		removed[s] = true
+	}
+	out := make([]postgresv1alpha1.ShardRangeEntry, 0, len(existing)+len(targets))
+	for _, e := range existing {
+		if !removed[e.Shard] {
+			out = append(out, e) // split 과 무관한 shard — 보존.
+		}
+	}
+	return append(out, flattenTargetRanges(targets)...)
+}
+
+// applyRouting 은 ShardSplitJob 의 cluster/keyspace 에 해당하는 ShardRange 에서 *source
+// shard 의 range 를 target ranges 로 치환*하여 routing 을 새 shard 로 전환한다 (가역
+// cutover — 원본 ShardRange 로 rollback). 다른 shard 의 range 는 건드리지 않는다(B-18).
+// split plan 은 Pending phase 에서 ValidateSplitPlan 으로 이미 검증됨.
 func (r *ShardSplitJobReconciler) applyRouting(ctx context.Context, ssj *postgresv1alpha1.ShardSplitJob) error {
 	var list postgresv1alpha1.ShardRangeList
 	if err := r.List(ctx, &list, client.InNamespace(ssj.Namespace)); err != nil {
@@ -430,7 +573,7 @@ func (r *ShardSplitJobReconciler) applyRouting(ctx context.Context, ssj *postgre
 	for i := range list.Items {
 		sr := &list.Items[i]
 		if sr.Spec.Cluster == ssj.Spec.Cluster && sr.Spec.Keyspace == ssj.Spec.Keyspace {
-			sr.Spec.Ranges = flattenTargetRanges(ssj.Spec.Targets)
+			sr.Spec.Ranges = mergeSplitRanges(sr.Spec.Ranges, ssj.Spec.Sources, ssj.Spec.Targets)
 			sr.Spec.WriteBlocked = false // 라우팅 전환 완료 → write-block 해제(쓰기 재개, 이제 새 shard 로).
 			if err := r.Update(ctx, sr); err != nil {
 				return fmt.Errorf("update ShardRange %s: %w", sr.Name, err)

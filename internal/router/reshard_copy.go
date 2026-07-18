@@ -113,6 +113,16 @@ func CopyShardRange(ctx context.Context, sourceDSN, targetDSN, table string, spe
 		return 0, 0, err
 	}
 
+	// 재시도 멱등성 (B-16, 4노드 라이브 실측 2026-07-14): InitialCopy Job 은 실패 시
+	// backoffLimit 만큼 재시도된다. 이전 시도가 일부 행을 넣고 죽었으면 재시도가 같은 행을
+	// 또 INSERT 해 target 이 중복 상태가 되고, 이후 인덱스 복제가
+	// `could not create unique index "orders_pkey" (23505)` 로 실패한다.
+	// target 은 *이 작업이 만든 빈 shard* 이므로(source 는 read-only) 복사 시작 전에 비우는
+	// 것이 안전하며, 이것이 복사를 재시도 가능하게 만든다. rollback 도 동일하게 truncate 다.
+	if _, err := tgt.ExecContext(ctx, "TRUNCATE TABLE "+table); err != nil { //nolint:gosec // table 화이트리스트 검증됨
+		return 0, 0, fmt.Errorf("router: truncate target %s (retry idempotency): %w", table, err)
+	}
+
 	rows, err := src.QueryContext(ctx, "SELECT * FROM "+table) //nolint:gosec // table는 화이트리스트 검증됨
 	if err != nil {
 		return 0, 0, fmt.Errorf("router: source select %s: %w", table, err)
@@ -129,30 +139,70 @@ func CopyShardRange(ctx context.Context, sourceDSN, targetDSN, table string, spe
 	}
 	insertSQL := buildInsert(table, cols)
 
+	// 삽입은 *트랜잭션 + prepared statement + 배치 커밋*으로 한다.
+	//
+	// B-17 (4노드 라이브 실측 2026-07-14): 행마다 autocommit `Exec` 를 날리던 구조라
+	// 처리량이 **분당 ~2,800행**에 그쳤다(왕복 + 매 행 fsync). orders 10만행 복사가 36분+
+	// 걸려 InitialCopy 타임아웃을 반복 초과했다 — 실질적으로 큰 샤드는 분할이 불가능했다.
+	// 한 트랜잭션 안에서 prepared stmt 로 넣고 batchRows 마다 커밋하면 왕복·fsync 가
+	// 상수배로 줄어든다(중간 커밋 → 긴 트랜잭션의 WAL/락 부담도 회피).
+	const batchRows = 1000
+	tx, err := tgt.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("router: begin target tx %s: %w", table, err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	stmt, err := tx.PrepareContext(ctx, insertSQL)
+	if err != nil {
+		return 0, 0, fmt.Errorf("router: prepare insert %s: %w", table, err)
+	}
+	inBatch := 0
+
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
-		if err := rows.Scan(ptrs...); err != nil {
+		if err = rows.Scan(ptrs...); err != nil {
 			return copied, scanned, fmt.Errorf("router: scan %s: %w", table, err)
 		}
 		scanned++
-		shard, err := ResolveShard(spec, keyString(vals[keyIdx]))
+		var shard string
+		shard, err = ResolveShard(spec, keyString(vals[keyIdx]))
 		if err != nil {
 			return copied, scanned, fmt.Errorf("router: resolve key: %w", err)
 		}
 		if shard != targetShard {
 			continue // 이 키는 target shard 소속이 아님 — 건너뜀.
 		}
-		if _, err := tgt.ExecContext(ctx, insertSQL, vals...); err != nil {
+		if _, err = stmt.ExecContext(ctx, vals...); err != nil {
 			return copied, scanned, fmt.Errorf("router: target insert %s: %w", table, err)
 		}
 		copied++
+		inBatch++
+		if inBatch >= batchRows {
+			if err = tx.Commit(); err != nil {
+				return copied, scanned, fmt.Errorf("router: commit batch %s: %w", table, err)
+			}
+			if tx, err = tgt.BeginTx(ctx, nil); err != nil {
+				return copied, scanned, fmt.Errorf("router: begin target tx %s: %w", table, err)
+			}
+			if stmt, err = tx.PrepareContext(ctx, insertSQL); err != nil {
+				return copied, scanned, fmt.Errorf("router: prepare insert %s: %w", table, err)
+			}
+			inBatch = 0
+		}
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return copied, scanned, fmt.Errorf("router: rows %s: %w", table, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return copied, scanned, fmt.Errorf("router: commit %s: %w", table, err)
 	}
 	// 데이터 복사 후 인덱스/PK + 제약(CHECK·FK best-effort) 복제(bulk load 효율 +
 	// uniqueness·조회 성능·무결성).

@@ -108,6 +108,15 @@ type PostgresClusterReconciler struct {
 	// 재시작한다.
 	failoverPending   map[string]time.Time
 	failoverPendingMu sync.Mutex
+
+	// Observer 는 AutoSplit 트리거 관측치 수집기다. nil 이면 SetupWithManager 가
+	// default(statusShardObserver — cluster.Status.Shards 읽기)를 주입한다.
+	Observer ShardMetricsObserver
+
+	// autoSplitBreach 는 AutoSplit 트리거 초과가 durationMinutes 동안 지속되는지
+	// 추적한다(shouldPromoteAfterDebounce 미러). namespace/name/keyspace/shard 키.
+	autoSplitBreach   map[string]time.Time
+	autoSplitBreachMu sync.Mutex
 }
 
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters,verbs=get;list;watch;create;update;patch;delete
@@ -115,8 +124,11 @@ type PostgresClusterReconciler struct {
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=imagecatalogs;clusterimagecatalogs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=postgres.keiailab.io,resources=postgresusers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardsplitjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=postgres.keiailab.io,resources=shardranges,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets;deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=metrics.k8s.io,resources=pods,verbs=get;list
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;delete
@@ -390,13 +402,25 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		if err := r.upsert(ctx, &cluster, buildClientService(&cluster, svcName, "router")); err != nil {
 			return r.handleUpsertErr(ctx, &cluster, err, "router Service", logger)
 		}
-		// router 이미지: P12-T2 까지 PG 베이스 이미지 placeholder.
+		// router 는 K8s API(ShardRange / PostgresCluster.status)를 읽으므로 전용 SA + Role 이
+		// 선행되어야 한다 — Deployment 보다 먼저 upsert (SA 부재 시 Pod 가 기동 후 403).
+		if err := r.upsert(ctx, &cluster, buildRouterServiceAccount(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router ServiceAccount", logger)
+		}
+		if err := r.upsert(ctx, &cluster, buildRouterRole(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router Role", logger)
+		}
+		if err := r.upsert(ctx, &cluster, buildRouterRoleBinding(&cluster)); err != nil {
+			return r.handleUpsertErr(ctx, &cluster, err, "router RoleBinding", logger)
+		}
 		routerReplicas := cluster.Spec.Router.Replicas
 		if databasePodsStopped {
 			routerReplicas = 0
 		}
+		// router 이미지는 pg-router(cmd/pg-router) 다 — instance(PG) 이미지를 넘기면 그
+		// 엔트리포인트가 POD_NAME 등 instance env 를 요구해 CrashLoop 한다.
 		desiredDep := buildRouterDeployment(
-			&cluster, depName, cmName, resolvedImage.Image,
+			&cluster, depName, cmName, routerImage(),
 			routerReplicas,
 			cluster.Spec.Router.Resources,
 		)
@@ -506,6 +530,28 @@ func (r *PostgresClusterReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	applyClusterConditions(&cluster, activeShardCount, allShardPrimaryReady, routerActive, routerStatus, hibernating, standaloneReplica,
 		prevPhase == postgresv1alpha1.ClusterPhaseReady, failoverDecision)
 
+	// per-shard primary Service: 각 shard 의 현재 Ready primary 를 가리키는 ExternalName
+	// Service 를 publish/갱신한다(§6 stable per-shard primary Service). failover 로 primary
+	// 가 바뀌면 다음 reconcile 이 ExternalName 을 새 primary 로 갱신 → 라우터/클라가 DNS 로
+	// failover-follow(status polling 불요). DB 정지 중엔 primary 부재이므로 skip. best-effort.
+	if !databasePodsStopped {
+		if err := r.reconcileShardPrimaryServices(ctx, &cluster, shardStatuses); err != nil {
+			logger.Error(err, "per-shard primary Service reconcile 실패(best-effort, reconcile 계속)")
+		}
+	}
+
+	// AutoSplit: shard 관측 → 트리거 지속 판정 → 후보 있으면 ShardSplitJob 자동 생성.
+	// DB 정지 중에는 관측치가 무의미하므로 skip. spec.autoSplit 이 nil/비활성이면
+	// reconcileAutoSplit 이 즉시 Disabled 로 반환하고 condition 은 갱신하지 않는다.
+	if !databasePodsStopped && cluster.Spec.AutoSplit != nil {
+		eligible, asReason, asMessage := r.reconcileAutoSplit(ctx, &cluster, time.Now())
+		asStatus := metav1.ConditionFalse
+		if eligible > 0 {
+			asStatus = metav1.ConditionTrue
+		}
+		setCondition(&cluster.Status.Conditions, ConditionAutoSplitEligible, asStatus, asReason, asMessage, cluster.Generation)
+	}
+
 	// Config hot-reload: if cluster is Ready and primary Pods are running with
 	// a stale configHash, signal PostgreSQL to reload without restarting.
 	if !databasePodsStopped && allShardPrimaryReady {
@@ -549,6 +595,33 @@ func restoreInProgress(cluster *postgresv1alpha1.PostgresCluster) bool {
 		return false
 	}
 	return strings.TrimSpace(cluster.Annotations[AnnotationRestoreInProgress]) != ""
+}
+
+// reconcileShardPrimaryServices 는 각 shard 의 현재 Ready primary 를 가리키는
+// ExternalName Service 를 upsert 한다(§6 stable per-shard primary Service). primary 가
+// 없거나 not-ready 인 shard 는 skip(마지막 값 보존 — flap 방지). failover 시 primary
+// Endpoint 가 바뀌면 ExternalName 이 갱신되어 이 이름을 참조하는 라우터/클라이언트가
+// status polling 없이 새 primary 로 접속한다.
+func (r *PostgresClusterReconciler) reconcileShardPrimaryServices(
+	ctx context.Context,
+	cluster *postgresv1alpha1.PostgresCluster,
+	shards []postgresv1alpha1.ShardStatus,
+) error {
+	for i := range shards {
+		s := &shards[i]
+		if s.Name == "" || s.Primary == nil || !s.Primary.Ready {
+			continue
+		}
+		host := primaryEndpointHost(s.Primary.Endpoint)
+		if host == "" {
+			continue
+		}
+		svc := buildShardPrimaryService(cluster, ShardPrimaryServiceName(cluster.Name, s.Name), host)
+		if err := r.upsert(ctx, cluster, svc); err != nil {
+			return fmt.Errorf("upsert primary Service for shard %q: %w", s.Name, err)
+		}
+	}
+	return nil
 }
 
 func (r *PostgresClusterReconciler) reconcileActiveNamedShardResources(
@@ -957,10 +1030,12 @@ func copySpec(dst, src client.Object) {
 	case *corev1.Service:
 		s := src.(*corev1.Service)
 		// ClusterIP 는 immutable 이므로 기존 값 보존 (CreateOrUpdate 가 이미 채워둠).
-		// Selector, Ports, Type 만 desired 로 동기화.
+		// Selector, Ports, Type, ExternalName 만 desired 로 동기화. ExternalName 은
+		// per-shard primary Service 가 failover 시 새 primary 로 갱신하는 핵심 필드다.
 		d.Spec.Selector = s.Spec.Selector
 		d.Spec.Ports = s.Spec.Ports
 		d.Spec.Type = s.Spec.Type
+		d.Spec.ExternalName = s.Spec.ExternalName
 		d.Labels = s.Labels
 	case *appsv1.StatefulSet:
 		s := src.(*appsv1.StatefulSet)
@@ -1068,6 +1143,9 @@ func (r *PostgresClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return err
 		}
 		r.PromotionPodExecutor = executor
+	}
+	if r.Observer == nil {
+		r.Observer = newDefaultShardObserver(r.Client)
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&postgresv1alpha1.PostgresCluster{}).

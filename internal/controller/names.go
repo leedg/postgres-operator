@@ -36,6 +36,14 @@ func ShardConfigMapName(cluster string, ordinal int32) string {
 	return fmt.Sprintf("%s-shard-%d-config", cluster, ordinal)
 }
 
+// ShardPrimaryServiceName 은 shard 의 *현재 primary* 를 가리키는 안정 Service 이름이다.
+// operator 가 failover 시 이 Service(ExternalName)를 새 primary 로 갱신하므로, 라우터/
+// 클라이언트가 status polling 없이 이 DNS 이름만으로 현재 primary 에 접속한다(§6 백로그).
+// shardName 은 ordinal("shard-0") 또는 named("t1") 모두 DNS-1123 label-safe 다.
+func ShardPrimaryServiceName(cluster, shardName string) string {
+	return fmt.Sprintf("%s-%s-primary", cluster, shardName)
+}
+
 // --- G3 online-resharding: target shard 격리 식별 (ADR-0027) ---
 //
 // resharding 의 target shard 는 라이브 cluster 의 *ordinal shard 모델과 격리된
@@ -85,6 +93,22 @@ func RouterConfigMapName(cluster string) string {
 
 // RouterHPAName은 QueryRouter Deployment 를 대상으로 하는 HPA 이름을 반환한다.
 func RouterHPAName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
+// RouterServiceAccountName 은 router Pod 전용 ServiceAccount 이름이다.
+// instance SA 와 분리 — 권한 집합이 다르다(라우터=ShardRange/status 읽기 전용).
+func RouterServiceAccountName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
+// RouterRoleName 은 RouterServiceAccount 에 부착되는 Role 이름이다.
+func RouterRoleName(cluster string) string {
+	return fmt.Sprintf("%s-router", cluster)
+}
+
+// RouterRoleBindingName 은 router SA↔Role 결합 RoleBinding 이름이다.
+func RouterRoleBindingName(cluster string) string {
 	return fmt.Sprintf("%s-router", cluster)
 }
 

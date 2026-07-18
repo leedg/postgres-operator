@@ -24,11 +24,12 @@ Licensed under the MIT License. See the LICENSE file for details.
 //     primary yields a graceful PostgreSQL ErrorResponse to the client (no hang,
 //     no silent drop).
 //
-// Config (env): PGROUTER_LISTEN (:5432), PGROUTER_TOPOLOGY, PGROUTER_BACKEND,
-// PGROUTER_CLUSTER, PGROUTER_KEYSPACE (default), PGROUTER_NAMESPACE (default),
-// PGROUTER_REFRESH (10s), PGROUTER_DIAL_TIMEOUT (5s),
+// Config (env): PGROUTER_LISTEN (:5432), PGROUTER_TOPOLOGY, PGROUTER_BACKEND
+// (env|template|primary-service|status), PGROUTER_CLUSTER, PGROUTER_KEYSPACE (default),
+// PGROUTER_NAMESPACE (default), PGROUTER_REFRESH (10s), PGROUTER_DIAL_TIMEOUT (5s),
 // PGROUTER_BACKEND_TEMPLATE ({cluster}/{shard}/{namespace}),
-// PGROUTER_BACKEND_SHARD_0 / _1 (env mode host:port).
+// PGROUTER_BACKEND_SHARD_0 / _1 (env mode host:port). primary-service mode resolves each
+// shard to `<cluster>-<shard>-primary` (operator-published failover-following Service).
 package main
 
 import (
@@ -75,6 +76,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("pg-router: listen %s: %v", addr, err)
 	}
+	// active-connection 게이지를 노출하는 /metrics 서버(HPA ScaleOnActiveConnections
+	// 의 custom-metrics 소스). PGROUTER_METRICS_ADDR="" 이면 비활성.
+	go serveMetrics(env("PGROUTER_METRICS_ADDR", ":9187"))
 	log.Printf("pg-router PoC listening on %s (mode=%s topology=%s backend=%s)",
 		addr, mode, env("PGROUTER_TOPOLOGY", "static"), env("PGROUTER_BACKEND", "env"))
 	for {
@@ -83,10 +87,11 @@ func main() {
 			log.Printf("pg-router: accept: %v", err)
 			continue
 		}
+		// trackConn 이 active-connection 게이지를 연결 수명 동안 유지한다.
 		if mode == "query" {
-			go handleQueryMode(conn, qr, dialer, serverVersion, backendPassword)
+			go trackConn(func() { handleQueryMode(conn, qr, dialer, serverVersion, backendPassword) })
 		} else {
-			go handleConn(conn, provider, resolve, dialer)
+			go trackConn(func() { handleConn(conn, provider, resolve, dialer) })
 		}
 	}
 }
@@ -103,7 +108,7 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	cluster := env("PGROUTER_CLUSTER", "quickstart")
 	keyspace := env("PGROUTER_KEYSPACE", "default")
 
-	var k8s client.Client
+	var k8s client.WithWatch
 	if topoMode == "crd" || backendMode == "status" {
 		c, err := newK8sClient()
 		if err != nil {
@@ -118,10 +123,13 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 	switch topoMode {
 	case "", "static":
 		provider = router.StaticTopologyProvider{T: router.Topology{Cluster: cluster, Keyspace: keyspace, Spec: shardSpec()}}
+		setRouterReady(true) // static 토폴로지는 즉시 라우팅 가능.
 	case "crd":
 		crdProvider = &router.CRDTopologyProvider{Lister: clientLister{c: k8s}, Namespace: ns, Cluster: cluster, Keyspace: keyspace}
 		if _, err := crdProvider.Refresh(ctx); err != nil {
 			log.Printf("pg-router: initial topology refresh: %v (will retry)", err)
+		} else {
+			setRouterReady(true) // 초기 토폴로지 확보 → readiness.
 		}
 		provider = crdProvider
 	default:
@@ -138,6 +146,12 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 		readResolve = envReadBackendResolver
 	case "template":
 		resolve = templateResolver()
+	case "primary-service":
+		// operator-published per-shard primary Service(ExternalName failover-follow) 소비.
+		// reads 도 primary Service 로(이 모드는 replica read 미지원 — 필요 시 status 모드).
+		r := primaryServiceResolver(cluster, ns)
+		resolve = r
+		readResolve = r
 	case "status":
 		statusRes = router.NewStatusBackendResolver()
 		statusReader = clusterStatusReader{c: k8s}
@@ -147,17 +161,25 @@ func buildRouting(ctx context.Context) (router.TopologyProvider, router.BackendR
 		resolve = statusRes.Resolve
 		readResolve = statusRes.ResolveRead // Ready replica, falls back to primary.
 	default:
-		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|status)", backendMode)
+		return nil, nil, nil, fmt.Errorf("unknown PGROUTER_BACKEND %q (want env|template|primary-service|status)", backendMode)
 	}
 
 	if crdProvider != nil || statusRes != nil {
-		go refreshLoop(ctx, crdProvider, statusReader, statusRes, ns, cluster)
+		// changeCh: watch 이벤트가 즉시 refresh 를 트리거한다(interval 은 fallback).
+		// 버퍼 cap 1 로 버스트를 자연 coalesce.
+		changeCh := make(chan struct{}, 1)
+		if k8s != nil {
+			watchShardRangesAndCluster(ctx, k8s, ns, changeCh, envDuration("PGROUTER_WATCH_BACKOFF", 2*time.Second))
+		}
+		go refreshLoop(ctx, crdProvider, statusReader, statusRes, ns, cluster, changeCh)
 	}
 	return provider, resolve, readResolve, nil
 }
 
-// newK8sClient builds a controller-runtime client with the operator scheme.
-func newK8sClient() (client.Client, error) {
+// newK8sClient builds a controller-runtime watching client with the operator scheme.
+// WithWatch lets the router watch ShardRange/PostgresCluster for immediate hot-reload
+// (interval polling remains as a fallback).
+func newK8sClient() (client.WithWatch, error) {
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("scheme: %w", err)
@@ -166,29 +188,63 @@ func newK8sClient() (client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("k8s config: %w", err)
 	}
-	return client.New(cfg, client.Options{Scheme: scheme})
+	return client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 }
 
-// refreshLoop re-reads dynamic sources on PGROUTER_REFRESH interval (hot-reload):
-// the ShardRange topology and/or the PostgresCluster primary-endpoint status.
-func refreshLoop(ctx context.Context, cp *router.CRDTopologyProvider, reader router.ClusterStatusReader, res *router.StatusBackendResolver, ns, cluster string) {
+// refreshLoop re-reads dynamic sources on the PGROUTER_REFRESH interval (fallback) and
+// *immediately* on a watch change signal (changeCh) — the ShardRange topology and/or the
+// PostgresCluster primary-endpoint status. Watch-driven refresh shortens the failover /
+// resharding hot-reload window vs. interval-only polling; the interval remains as a safety
+// net if watches drop.
+func refreshLoop(ctx context.Context, cp *router.CRDTopologyProvider, reader router.ClusterStatusReader, res *router.StatusBackendResolver, ns, cluster string, changeCh <-chan struct{}) {
 	t := time.NewTicker(envDuration("PGROUTER_REFRESH", 10*time.Second))
 	defer t.Stop()
+	debounce := envDuration("PGROUTER_WATCH_DEBOUNCE", 200*time.Millisecond)
+
+	doRefresh := func() {
+		if cp != nil {
+			if _, err := cp.Refresh(ctx); err != nil {
+				log.Printf("pg-router: topology refresh: %v", err)
+			} else {
+				setRouterReady(true) // 초기 실패 후 refresh 로 토폴로지 확보 시 readiness 회복.
+			}
+		}
+		if res != nil && reader != nil {
+			if err := updateStatus(ctx, reader, res, ns, cluster); err != nil {
+				log.Printf("pg-router: status refresh: %v", err)
+			}
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if cp != nil {
-				if _, err := cp.Refresh(ctx); err != nil {
-					log.Printf("pg-router: topology refresh: %v", err)
-				}
-			}
-			if res != nil && reader != nil {
-				if err := updateStatus(ctx, reader, res, ns, cluster); err != nil {
-					log.Printf("pg-router: status refresh: %v", err)
-				}
-			}
+			doRefresh()
+		case <-changeCh:
+			// 짧은 debounce 로 연속 변경(예: ShardRange 여러 항목 편집)을 1회 refresh 로 합침.
+			coalesce(ctx, changeCh, debounce)
+			doRefresh()
+		}
+	}
+}
+
+// coalesce 는 debounce 창 동안 changeCh 에 쌓인 추가 신호를 흡수한다(버스트 → 1 refresh).
+func coalesce(ctx context.Context, changeCh <-chan struct{}, debounce time.Duration) {
+	if debounce <= 0 {
+		return
+	}
+	t := time.NewTimer(debounce)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-changeCh:
+			// 추가 신호 흡수 — 타이머는 유지(고정 창).
+		case <-t.C:
+			return
 		}
 	}
 }
@@ -382,6 +438,16 @@ func templateResolver() router.BackendResolver {
 	).Replace(tmpl)
 	return func(shardID string) (string, error) {
 		return strings.NewReplacer("{shard}", shardID).Replace(base), nil
+	}
+}
+
+// primaryServiceResolver maps each shard to its operator-published per-shard *primary*
+// Service DNS (`<cluster>-<shard>-primary.<ns>.svc.cluster.local:5432`). The operator
+// keeps that Service pointing at the shard's current primary (ExternalName failover-
+// follow), so the router follows failover via DNS without polling PostgresCluster status.
+func primaryServiceResolver(cluster, ns string) router.BackendResolver {
+	return func(shardID string) (string, error) {
+		return fmt.Sprintf("%s-%s-primary.%s.svc.cluster.local:5432", cluster, shardID, ns), nil
 	}
 }
 
